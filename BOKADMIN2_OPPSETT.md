@@ -31,3 +31,11 @@ Opprettet 2026-09-29 som kopi av Bokadmin slik den kjørte i drift (branch `utvi
 1. Repoet er offentlig: commit aldri `.env`, tokens, nøkler eller live-prosjektets ID/URL.
 2. Kjør aldri `supabase link` mot live-prosjektet fra denne mappa. `supabase/.temp/` er git-ignorert.
 3. Edge Function-hemmeligheter (`SHOPIFY_*`, `BOKBASEN_*`) settes kun i 2.0-prosjektet, med Test-butikkens nøkler.
+
+## Status Supabase 2.0 (2026-09-29)
+
+- Alle 14 migrasjoner er kjørt. `pg_cron` og `pg_net` er på, og `project_url` og `anon_key` ligger i Vault.
+- De tre pg_cron-jobbene (`resume-paused-jobs`, `resume-paused-availability-jobs`, `run-scheduled-tasks`) er **skrudd av** til Edge Functions er deployet. Skru på igjen med:
+  ```sql
+  select cron.alter_job(jobid, active := true) from cron.job;
+  ```
