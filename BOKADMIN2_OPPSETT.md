@@ -40,7 +40,10 @@ Opprettet 2026-09-29 som kopi av Bokadmin slik den kjørte i drift (branch `utvi
   ```sql
   select cron.alter_job(jobid, active := false) from cron.job;
   ```
-- Hemmeligheter satt: `SHOPIFY_SHOP_DOMAIN`, `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`. **Mangler:** `BOKBASEN_CLIENT_ID`, `BOKBASEN_CLIENT_SECRET`, `BOKBASEN_SUBSCRIPTION`.
+- Hemmeligheter satt: `SHOPIFY_SHOP_DOMAIN`, `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `BOKBASEN_CLIENT_ID`, `BOKBASEN_CLIENT_SECRET`, `BOKBASEN_SUBSCRIPTION` (`extended`).
+- Testet 2026-09-30: ISBN 9788203461392 slått opp i Bokbasen og pushet til Testbutikk. Tittel, forfatter, forlag, pris (449), status ACTIVE, strekkode/SKU, vekt (500 g), mva av, bilde, bkg-tagger (`bkg-3`, `bkg-31`, `bkg-312`) og publisering i 3 salgskanaler er riktige.
+- **Kjent avvik (finnes også i live):** SEO-tittel og -beskrivelse blir ikke satt når de første 320 tegnene av beskrivelsen har linjeskift. Push skriver dem som `single_line_text_field`-metafelt; Shopify avviser linjeskift, hele `metafieldsSet`-kallet feiler, og feilen svelges. Løsning: slå sammen mellomrom (`.replace(/\s+/g, " ")`) før `.slice(0, 320)` i `pushOneBook`.
+- Andre forhold fra push-testen (finnes også i live): forfatteren «Brochmann, Nina» blir to tagger («Brochmann», «Nina») fordi taggene settes sammen med komma, og tittelen blir en egen tagg.
 - **Kjent avvik:** `sync_log` i 2.0-databasen har ingen `job_id`-kolonne, men koden skriver `job_id` (price-update, availability-check, Import, Sjangre, api.ts). Innslagene feiler stille, så jobbloggen er tom. Ingen migrasjon oppretter kolonnen; live-databasen har den trolig fra en manuell endring. Må rettes med en ny migrasjon.
 
 ## Shopify-app og API (2026-09-30)
