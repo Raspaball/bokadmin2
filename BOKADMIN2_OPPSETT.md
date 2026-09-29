@@ -13,7 +13,7 @@ Opprettet 2026-09-29 som kopi av Bokadmin slik den kjørte i drift (branch `utvi
 | GitHub | Raspaball/bokadmin, privat | Raspaball/bokadmin2, **offentlig** (remote `origin`) |
 | Git-historikk | Full historikk | Starter på nytt fra én commit. Full historikk ligger i live-repoet |
 | Supabase | Live-prosjektet | «Bokadmin 2.0», ref `chwpqwblqummlufqdefe` (eu-west-1) |
-| Vercel | prosjekt `bokadmin` | Nytt prosjekt — ikke opprettet ennå |
+| Vercel | prosjekt `bokadmin` | prosjekt `bokadmin2` → https://bokadmin2.vercel.app (deployer `main`; `VITE_SUPABASE_*` peker på 2.0-prosjektet) |
 | Shopify | Livebutikken | Kun Test-butikken |
 | `.env` / hemmeligheter | Egen | Ikke kopiert. Lag ny fra `.env.example` med 2.0-verdier |
 
