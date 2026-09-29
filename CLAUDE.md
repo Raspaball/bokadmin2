@@ -8,14 +8,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 npm run dev        # Start Vite dev server
 npm run build      # Production build
 
-# Deploy a Supabase Edge Function (must be run from project root)
-supabase functions deploy <function-name> --no-verify-jwt
+# Deploy a Supabase Edge Function (must be run from project root).
+# Bokadmin 2.0: ALWAYS pass the 2.0 project ref — never link or deploy to the live project.
+supabase functions deploy <function-name> --no-verify-jwt --use-api --project-ref chwpqwblqummlufqdefe
 
 # Set secrets for Edge Functions
-supabase secrets set KEY=value
+supabase secrets set KEY=value --project-ref chwpqwblqummlufqdefe
 ```
 
 Frontend env vars go in `.env` (see `.env.example`). Edge Function secrets are set via `supabase secrets set`.
+See `BOKADMIN2_OPPSETT.md` for the separation from live Bokadmin and the current setup status.
 
 
 ## Eierens ønske — felles datakilder
@@ -56,7 +58,7 @@ Hvis du legger til data som brukes i mer enn én komponent eller Edge Function, 
 ```
 Bokbasen (ONIX v2 API)
     → Supabase DB (books table)
-        → Shopify (GraphQL Admin API 2025-01)
+        → Shopify (GraphQL Admin API 2026-07, Dev Dashboard-app)
 ```
 
 ### Frontend — `src/`
@@ -83,6 +85,8 @@ UI primitives live in `src/app/components/ui/` (shadcn/ui components, do not edi
 
 Deno-based Edge Functions, each in its own subdirectory with `index.ts`.
 
+Shared code lives in `supabase/functions/_shared/`. **`_shared/shopify.ts` is the only Shopify client:** it holds `SHOPIFY_API_VERSION`, fetches/refreshes the access token (`getShopifyAccessToken()`) and runs `shopifyGraphQL(query, variables)` → `{ data }`. Never define an API version, GraphQL wrapper or Shopify token lookup locally in a function.
+
 | Function | Purpose |
 |---|---|
 | `bokbasen/` | Bokbasen ONIX v2 metadata: ISBN lookup, date-range, enrich-db |
@@ -91,7 +95,7 @@ Deno-based Edge Functions, each in its own subdirectory with `index.ts`.
 | `availability-check/` | Long-running job: check ONIX availability codes and optionally update Shopify. Same endpoints as price-update, plus `start` accepts `mode: analyze|update` |
 | `sjangre-sync/` | Long-running job: enrich bokgruppekode → tag products → create Smart Collections. Endpoints: `/start`, `/resume/:jobId`, `/resume-paused`, `/status/:jobId`, `/analyze`, `/active`, `/recent`, `/catalog-bkg-stats`, `/delete-empty-collections` |
 
-All functions are called via `callEdgeFunction()` in `api.ts`. Passes the user's JWT (not anon key) so Edge Functions can identify the user and look up their credentials from `user_settings`. Falls back to anon key if no session.
+All functions are called via `callEdgeFunction()` in `api.ts`. Passes the user's JWT (not anon key) so Edge Functions can identify the user and look up their Bokbasen credentials from `user_settings`. Falls back to anon key if no session. Shopify is server-wide (see the Shopify access section below).
 
 ### Database tables (Supabase PostgreSQL)
 
@@ -103,10 +107,14 @@ All tables have a `user_id uuid` column (nullable) for multi-tenant isolation. T
 
 **Bokbasen:** Only ISBN lookup is supported — no free-text title/author search. Multi-ISBN queries are handled by looping individual lookups.
 
-**Shopify Admin GraphQL API 2025-01:**
+**Shopify Admin GraphQL API 2026-07** (version set only in `_shared/shopify.ts`):
 - Use `productVariantsBulkUpdate`, NOT the removed `productVariantUpdate`
 - SKU and weight live on `InventoryItem`, not `ProductVariant`
-- The `seo` field in `ProductInput` is silently ignored — use `metafieldsSet` with `namespace: "global"`, keys `title_tag` / `description_tag`
+- SEO is set with `metafieldsSet` (`namespace: "global"`, keys `title_tag` / `description_tag`), not via product input
+- `productCreate(product: ProductCreateInput)` / `productUpdate(product: ProductUpdateInput)` — the `input: ProductInput` argument is deprecated
+- Lookups: `productByIdentifier(identifier: { handle })` / `collectionByIdentifier(identifier: { handle })` — `productByHandle` / `collectionByHandle` are deprecated
+- Images: add with `productUpdate(product: { id }, media: [...])` (`productCreateMedia` is deprecated); read with `media` / `featuredMedia { preview { image { url } } }` (`images` / `featuredImage` are deprecated)
+- Validate every new or changed GraphQL string against the schema (Shopify's GraphQL validator) before deploying
 
 **Field mapping (Shopify):**
 - ISBN → handle, SKU, barcode
@@ -120,7 +128,7 @@ All tables have a `user_id uuid` column (nullable) for multi-tenant isolation. T
 
 Both `price-update` and `availability-check` share the same job pattern:
 - PAGE_SIZE = 250 products per Shopify page
-- `shopifyGql()` wrapper auto-retries on THROTTLED (1s / 2s, max 3 retries)
+- `shopifyGraphQL()` from `_shared/shopify.ts` auto-retries on THROTTLED (1s / 2s / 4s) and refreshes the token once on HTTP 401. Errors are thrown as `Shopify HTTP <status>: …`, which the jobs' `HTTP 401` / `HTTP 403` → `failed` check relies on
 - Cancellation: `POST /cancel/:jobId` sets status to `failed` with `error_message: "Avbrutt av bruker"`. The processing loop checks DB status each iteration.
 - `sync_log` entries include `job_id` for per-job log views, and can be deleted individually via `syncLog.deleteEntry(id)` (RLS: owner or NULL rows)
 
@@ -220,15 +228,17 @@ node scripts/clean-tags.mjs --execute --resume
 
 ## Git branches
 
-**Aktiv branch:** `utvikling` (utviklingsbranch, merges til master)
+**Aktiv branch (Bokadmin 2.0):** `main` i Raspaball/bokadmin2. (Live Bokadmin bruker `utvikling` / `master` i et eget repo.)
 
-### Credential-flyt (multi-tenant)
+### Credential-flyt
 
 ```
-Frontend (user JWT) → Edge Function → getUserIdFromJWT() → getShopifyCredentials()
-                                          ↓ user_settings funnet?
-                                    Ja: bruk DB-credentials
-                                    Nei: fall tilbake til env vars (admin/single-tenant)
+Shopify:  Edge Function → _shared/shopify.ts → env SHOPIFY_SHOP_DOMAIN / SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET
+          (samme butikk for alle brukere; user_settings brukes ikke for Shopify)
+
+Bokbasen: Frontend (user JWT) → Edge Function → getUserIdFromJWT() → user_settings.bokbasen_*
+                                                   ↓ ikke satt?
+                                             env BOKBASEN_CLIENT_ID / BOKBASEN_CLIENT_SECRET
 ```
 
 ### Nødprosedyre — fullstendig tilbakestilling til single-tenant
@@ -243,17 +253,17 @@ supabase functions deploy shopify --no-verify-jwt
 
 DB-kolonnene (`user_id`) og `user_settings`-tabellen forblir, men er ufarlige for single-tenant kode.
 
-## Shopify Access Token — tokenmodell og levetid
+## Shopify-tilgang — Dev Dashboard-app og client credentials
 
-Vi bruker **Custom App**-modellen (merchant oppretter app i Shopify Dev Dashboard og kopierer token). Dette gir tokens med prefiks `shpat_`.
+Bokadmin 2.0 bruker en app laget i **Shopify Dev Dashboard** (admin-opprettede custom apps med fast `shpat_`-token kan ikke lenger opprettes). Det finnes ingen fast token:
 
-**`shpat_`-tokens er permanente** — de utløper ikke automatisk. De blir ugyldige kun hvis:
-- Appen slettes/avinstalleres av merchant
-- Tokenet revokeres manuelt i Shopify Admin
-
-Dette skiller seg fra OAuth public app-tokens (`shpoa_`/`shpus_`) som har 90-dagers refresh-syklus. Vår arkitektur trenger derfor **ikke** refresh token-logikk.
-
-Eneste risiko: merchant reinstallerer appen i Shopify uten å oppdatere token i Bokadmin → alle API-kall returnerer 401. Vi håndterer ikke dette grasiøst per nå (ingen re-autentiseringsflyt). Lav-frekvens hendelse, men bør håndteres før kommersiell drift.
+- `_shared/shopify.ts` henter tilgangsnøkkelen med **client credentials grant**:
+  `POST https://{SHOPIFY_SHOP_DOMAIN}/admin/oauth/access_token` med `client_id`, `client_secret`, `grant_type=client_credentials`.
+- Svaret har `access_token` og `expires_in` (86399 s ≈ 24 t). Nøkkelen caches i minnet og fornyes 5 min før utløp. Parallelle kall ved kald start deler én forespørsel.
+- Ved HTTP 401 fra GraphQL tømmes cachen og kallet prøves én gang til med ny nøkkel. Først hvis det også feiler, kastes `Shopify HTTP 401`, og jobbene settes til `failed`.
+- Client credentials fungerer bare for butikker i **samme organisasjon** som appen, og appen må være **installert** i butikken. Typiske feil fra token-kallet: `application_cannot_be_found` (feil Client ID), `invalid_request: Missing or invalid client secret` (feil secret), `app_not_installed` (appen er ikke installert i butikken).
+- Påkrevde tilganger: `read/write_products`, `read/write_inventory`, `read/write_publications`, `read/write_online_store_navigation`.
+- `POST /shopify/test` tester serverens tilkobling og returnerer butikknavn, domene og produktantall.
 
 ## Skalerbarhet og veikart
 
@@ -268,7 +278,7 @@ Eneste risiko: merchant reinstallerer appen i Shopify uten å oppdatere token i 
 | Prioritet | Oppgave | Hvorfor |
 |---|---|---|
 | Høy | Shopify Bulk Operations for fullkatalog-push | Eneste som skalerer til 17k bøker |
-| Høy | Graceful 401-håndtering (ugyldig token) | Unngå stille feil ved avinstallert app |
+| Høy | Graceful 401-håndtering (ugyldig token) | Delvis løst i 2.0: token fornyes automatisk og 401 prøves på nytt. Gjenstår: tydelig melding i UI når appen er avinstallert |
 | Middels | Observability på jobber (feilrate, antall prosessert) | Vet ikke i dag om prisjobb feilet stille |
 | Middels | Webhook for `app/uninstalled` | Rydd opp credentials når butikk kobler fra |
 | Lav | Standard Shopify metafields (`facts.isbn`, `descriptors.subtitle`) | Bedre Dawn-interoperabilitet |
@@ -326,7 +336,7 @@ When a book with bokgruppekode `417` is pushed to Shopify, it gets three tags: `
 
 **Shopify constraints:**
 - Menus support max 3 nesting levels total. `buildMenuStructure(maxDepth)` defaults to 2, so bokgruppe categories nest as: Nettbutikk (L1) → bkg-N (L2) → bkg-NN (L3).
-- `pushOneBook` checks if the product already has an image before calling `productCreateMedia` — prevents duplicate images on re-export.
+- `pushOneBook` checks if the product already has media before adding an image via `productUpdate(media:)` — prevents duplicate images on re-export.
 - `shopifyGraphQL` auto-retries on THROTTLED errors with exponential backoff (1s / 2s / 4s, max 3 retries).
 
 **buildMegaMenu:**

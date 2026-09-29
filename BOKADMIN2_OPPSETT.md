@@ -32,10 +32,34 @@ Opprettet 2026-09-29 som kopi av Bokadmin slik den kjørte i drift (branch `utvi
 2. Kjør aldri `supabase link` mot live-prosjektet fra denne mappa. `supabase/.temp/` er git-ignorert.
 3. Edge Function-hemmeligheter (`SHOPIFY_*`, `BOKBASEN_*`) settes kun i 2.0-prosjektet, med Test-butikkens nøkler.
 
-## Status Supabase 2.0 (2026-09-29)
+## Status Supabase 2.0 (oppdatert 2026-09-30)
 
-- Alle 14 migrasjoner er kjørt. `pg_cron` og `pg_net` er på, og `project_url` og `anon_key` ligger i Vault.
-- De tre pg_cron-jobbene (`resume-paused-jobs`, `resume-paused-availability-jobs`, `run-scheduled-tasks`) er **skrudd av** til Edge Functions er deployet. Skru på igjen med:
+- Alle 14 migrasjoner er kjørt. `pg_cron` og `pg_net` er på, og `project_url` og `anon_key` ligger i Vault (`project_url` er kontrollert: peker på 2.0-prosjektet).
+- De fem Edge Functions (`shopify`, `price-update`, `availability-check`, `sjangre-sync`, `bokbasen`) er deployet til 2.0-prosjektet.
+- De tre pg_cron-jobbene (`resume-paused-jobs`, `resume-paused-availability-jobs`, `run-scheduled-tasks`) er **på** igjen fra 2026-09-30. Skru av midlertidig med:
   ```sql
-  select cron.alter_job(jobid, active := true) from cron.job;
+  select cron.alter_job(jobid, active := false) from cron.job;
   ```
+- Hemmeligheter satt: `SHOPIFY_SHOP_DOMAIN`, `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`. **Mangler:** `BOKBASEN_CLIENT_ID`, `BOKBASEN_CLIENT_SECRET`, `BOKBASEN_SUBSCRIPTION`.
+- **Kjent avvik:** `sync_log` i 2.0-databasen har ingen `job_id`-kolonne, men koden skriver `job_id` (price-update, availability-check, Import, Sjangre, api.ts). Innslagene feiler stille, så jobbloggen er tom. Ingen migrasjon oppretter kolonnen; live-databasen har den trolig fra en manuell endring. Må rettes med en ny migrasjon.
+
+## Shopify-app og API (2026-09-30)
+
+- Appen «Bokadmin 2.0» er laget i Shopify Dev Dashboard og installert i Testbutikk (`testbutikk-9434.myshopify.com`). Kun Testbutikk.
+- **Ingen fast `shpat_`-nøkkel.** Edge Functions henter en tilgangsnøkkel med client credentials grant (`POST https://{butikk}/admin/oauth/access_token`, `grant_type=client_credentials`). Nøkkelen gjelder i 24 timer og fornyes automatisk 5 minutter før utløp.
+- Alt Shopify-oppsett ligger i `supabase/functions/_shared/shopify.ts`: `SHOPIFY_API_VERSION = "2026-07"`, `getShopifyAccessToken()` og `shopifyGraphQL()`.
+- Butikk og nøkler kommer **kun** fra Supabase-hemmelighetene. Shopify-kolonnene i `user_settings` brukes ikke lenger av Edge Functions. Innstillinger-siden viser at Shopify styres av serveren og har bare en «Test tilkobling»-knapp.
+- Appen trenger disse tilgangene: `read/write_products`, `read/write_inventory`, `read/write_publications`, `read/write_online_store_navigation`.
+- Bytte av app-nøkler: `supabase secrets set SHOPIFY_CLIENT_ID=… SHOPIFY_CLIENT_SECRET=… --project-ref chwpqwblqummlufqdefe` (ingen ny deploy nødvendig). Client ID og secret må høre til samme app, og appen må være installert i butikken i `SHOPIFY_SHOP_DOMAIN`.
+
+## Beslutning: product handles (2026-09-29)
+
+Handle bygges av **tittel + forfatter + ISBN-13**, og bøker slås opp på ISBN i stedet for på handle. Hele begrunnelsen står i prosjektnotatet `claude/beslutning-product-handles.md`.
+
+- Format: `/products/avkledd-nina-brochmann-9788203461392`. Hovedtittelen uten undertittel (det etter kolon), deretter forfatter og ISBN. æ blir ae, ø blir o og å blir a, alt med små bokstaver og bindestrek.
+- Handle lages én gang når produktet opprettes, og endres ikke selv om Bokbasen retter tittelen senere.
+- ISBN lagres i metafeltet `bok.isbn` (definisjonen skal kreve unike verdier) og som strekkode på varianten.
+- Oppslag: `productByIdentifier(identifier: { customId: { namespace: "bok", key: "isbn", value: $isbn } })` erstatter `productByHandle` i `supabase/functions/shopify/index.ts`. Enda bedre er å lagre produkt-GID i Supabase når produktet opprettes.
+- Videresending ved bytte av handle: `productUpdate(product: { id, handle, redirectNewHandle: true })`, eller `urlRedirectCreate` (krever `write_online_store_navigation`).
+- Spørringene over er validert mot Admin API-skjemaet 29.09.
+- Gjelder bare Test-butikken nå. Å migrere livebutikken (ca. 11 000 bøker, med videresending fra `/products/<ISBN>`) er en egen, planlagt jobb.

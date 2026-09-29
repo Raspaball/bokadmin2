@@ -19,7 +19,7 @@ Logg inn med Supabase Auth.
 | Database + Auth | Supabase (PostgreSQL + Auth) |
 | Backend | Supabase Edge Functions (Deno) |
 | Bokmetadata | Bokbasen ONIX v2 API |
-| Nettbutikk | Shopify Admin GraphQL API 2025-01 |
+| Nettbutikk | Shopify Admin GraphQL API 2026-07 (Dev Dashboard-app) |
 
 ## Dataflyten
 
@@ -105,14 +105,14 @@ Manuell og automatisk pris- og tilgjengelighetsjobber mot Bokbasen.
 ## Deploy
 
 ```bash
-# Edge Function
-supabase functions deploy <navn> --no-verify-jwt
+# Edge Function (Bokadmin 2.0 — alltid med 2.0-prosjektets ref)
+supabase functions deploy <navn> --no-verify-jwt --use-api --project-ref <2.0-project-ref>
 
 # Secrets
-supabase secrets set BOKBASEN_CLIENT_ID=...
-supabase secrets set BOKBASEN_CLIENT_SECRET=...
-supabase secrets set SHOPIFY_SHOP_DOMAIN=butikk.myshopify.com
-supabase secrets set SHOPIFY_ACCESS_TOKEN=shpat_...
+supabase secrets set BOKBASEN_CLIENT_ID=... --project-ref <2.0-project-ref>
+supabase secrets set BOKBASEN_CLIENT_SECRET=... --project-ref <2.0-project-ref>
+supabase secrets set SHOPIFY_SHOP_DOMAIN=butikk.myshopify.com --project-ref <2.0-project-ref>
+supabase secrets set SHOPIFY_CLIENT_ID=... SHOPIFY_CLIENT_SECRET=shpss_... --project-ref <2.0-project-ref>
 ```
 
 ## Multi-tenant arkitektur
@@ -127,7 +127,7 @@ Multi-tenant er fullt implementert og merget inn i `master` (2026-02-21).
 
 ### Shopify-tilkoblingsmodell
 
-Bokadmin bruker **Custom App**-modellen: merchant oppretter en app i Shopify Dev Dashboard og kopierer Admin API Access Token (`shpat_...`). Disse tokenene er **permanente** — de utløper ikke automatisk, og det trengs ingen refresh-logikk. De blir kun ugyldige hvis appen slettes eller tokenet revokeres manuelt.
+Bokadmin 2.0 bruker en app laget i **Shopify Dev Dashboard** og installert i butikken. Det finnes ingen fast `shpat_`-token: Edge Functions henter en tilgangsnøkkel med client credentials grant (`SHOPIFY_CLIENT_ID` + `SHOPIFY_CLIENT_SECRET`), som gjelder i 24 timer og fornyes automatisk i `supabase/functions/_shared/shopify.ts`. Shopify settes opp på serveren, ikke per bruker i `user_settings`. Se `CLAUDE.md` og `BOKADMIN2_OPPSETT.md`.
 
 ### Nødprosedyre
 
@@ -140,9 +140,9 @@ supabase functions deploy shopify --no-verify-jwt
 ## Viktige API-begrensninger
 
 - **Bokbasen:** Støtter kun ISBN-oppslag — ingen fritekstsøk på tittel/forfatter
-- **Shopify 2025-01:** Bruk `productVariantsBulkUpdate` (ikke fjernede `productVariantUpdate`)
-- **Shopify 2025-01:** SKU og vekt ligger på `InventoryItem`, ikke `ProductVariant`
-- **Shopify 2025-01:** `seo`-feltet i `ProductInput` ignoreres stille — bruk `metafieldsSet` med `namespace: "global"`, nøkler `title_tag` / `description_tag`
+- **Shopify 2026-07:** Bruk `productVariantsBulkUpdate` (ikke fjernede `productVariantUpdate`)
+- **Shopify 2026-07:** SKU og vekt ligger på `InventoryItem`, ikke `ProductVariant`
+- **Shopify 2026-07:** SEO settes med `metafieldsSet` (`namespace: "global"`, nøkler `title_tag` / `description_tag`). Utfasede kall er byttet ut; se `CLAUDE.md`
 - **Shopify filtergrense:** Collections med >5 000 produkter mister automatisk filtervisning i storefront. Bokgruppe-hierarkiet (bkg-N/bkg-NN/bkg-NNN) er designet for å holde collections under denne grensen.
 - **Fullkatalog-skalering:** Nåværende per-bok API-loop er ikke egnet for >5 000 bøker. Shopify Bulk Operations (bulkOperationRunMutation) er ikke implementert ennå.
 
