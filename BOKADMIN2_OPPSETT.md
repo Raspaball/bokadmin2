@@ -10,9 +10,9 @@ Opprettet 2026-09-29 som kopi av Bokadmin slik den kjørte i drift (branch `utvi
 |---|---|---|
 | Mappe | C:\Bokadmin | C:\Bokadmin 2.0 |
 | Git-branch | `utvikling` / `master` | `main` (i Raspaball/bokadmin2) |
-| GitHub | Raspaball/bokadmin, privat (remote `bokadmin-live`, push er sperret) | Raspaball/bokadmin2, **offentlig** (remote `origin`) |
+| GitHub | Raspaball/bokadmin, privat | Raspaball/bokadmin2, **offentlig** (remote `origin`) |
 | Git-historikk | Full historikk | Starter på nytt fra én commit. Full historikk ligger i live-repoet |
-| Supabase | Live-prosjektet | Nytt prosjekt — ikke opprettet ennå |
+| Supabase | Live-prosjektet | «Bokadmin 2.0», ref `chwpqwblqummlufqdefe` (eu-west-1) |
 | Vercel | prosjekt `bokadmin` | Nytt prosjekt — ikke opprettet ennå |
 | Shopify | Livebutikken | Kun Test-butikken |
 | `.env` / hemmeligheter | Egen | Ikke kopiert. Lag ny fra `.env.example` med 2.0-verdier |
