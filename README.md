@@ -122,8 +122,7 @@ Multi-tenant er fullt implementert og merget inn i `master` (2026-02-21).
 - **`user_settings`-tabell** — lagrer Shopify- og Bokbasen-credentials per bruker
 - **`user_id`-kolonne** på alle tabeller — dataisolasjon mellom brukere via RLS
 - **Trigger `set_user_id_on_insert`** — setter `user_id` automatisk ved insert fra frontend
-- **Onboarding-veiviser** — vises automatisk til nye brukere ved første innlogging
-- **Innstillinger-side** — oppdater credentials, test tilkobling, koble eksisterende data
+- **Innstillinger-side** — Bokbasen-credentials per bruker, test av Shopify-tilkoblingen, koble eksisterende data (Shopify settes på serveren i 2.0; onboarding-veiviseren er fjernet)
 
 ### Shopify-tilkoblingsmodell
 

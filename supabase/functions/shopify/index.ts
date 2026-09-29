@@ -616,7 +616,8 @@ async function pushOneBook(
     `, {
       metafields: [
         { ownerId: product.id, namespace: "global", key: "title_tag", value: book.title || "", type: "single_line_text_field" },
-        { ownerId: product.id, namespace: "global", key: "description_tag", value: (book.description || "").slice(0, 320), type: "single_line_text_field" },
+        // single_line_text_field avviser linjeskift — og da feiler hele metafieldsSet-kallet
+        { ownerId: product.id, namespace: "global", key: "description_tag", value: (book.description || "").replace(/\s+/g, " ").trim().slice(0, 320), type: "single_line_text_field" },
       ],
     });
   } catch (_) { /* non-critical */ }

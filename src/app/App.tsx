@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { ContentArea } from './components/ContentArea';
-import { OnboardingWizard } from './components/OnboardingWizard';
 import { Toaster } from './components/ui/sonner';
 import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';

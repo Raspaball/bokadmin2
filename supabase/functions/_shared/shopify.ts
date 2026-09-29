@@ -35,6 +35,17 @@ export function getShopDomain(): string {
   return requireEnv("SHOPIFY_SHOP_DOMAIN");
 }
 
+// Shopify svarer med en hel HTML-side når token-kallet feiler. Hent ut den
+// lesbare linjen («Oauth error app_not_installed: …»), ellers kort ned teksten.
+function describeTokenError(body: string): string {
+  const matches = body.match(/Oauth error [^<]+/g) ?? [];
+  const detail = matches.sort((a, b) => b.length - a.length)[0];
+  const text = detail ?? body.replace(/<[^>]*>/g, " ");
+  return text
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ").trim().slice(0, 300);
+}
+
 async function requestAccessToken(): Promise<string> {
   const res = await fetch(`https://${getShopDomain()}/admin/oauth/access_token`, {
     method: "POST",
@@ -47,7 +58,9 @@ async function requestAccessToken(): Promise<string> {
   });
   // Samme "Shopify HTTP <status>"-format som GraphQL-feil, slik at jobbenes
   // 401/403 → failed-sjekk også fanger ugyldige app-nøkler.
-  if (!res.ok) throw new Error(`Shopify HTTP ${res.status}: token-forespørsel feilet: ${await res.text()}`);
+  if (!res.ok) {
+    throw new Error(`Shopify HTTP ${res.status}: token-forespørsel feilet: ${describeTokenError(await res.text())}`);
+  }
 
   const data = await res.json() as { access_token: string; expires_in: number };
   tokenCache = {
