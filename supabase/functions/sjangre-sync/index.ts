@@ -162,8 +162,8 @@ async function ensureCollections(koder: Set<string>): Promise<CollectionSyncResu
     const title = COLLECTION_NAMES[code] ?? `Bokgruppe ${code}`;
     try {
       const r = await shopifyGraphQL(
-        `query($h: String!) { collectionByHandle(handle: $h) { id } }`, { h: handle });
-      const col = (r.data as Record<string, unknown>)?.collectionByHandle as { id: string } | null;
+        `query($h: String!) { collectionByIdentifier(identifier: { handle: $h }) { id } }`, { h: handle });
+      const col = (r.data as Record<string, unknown>)?.collectionByIdentifier as { id: string } | null;
       if (col?.id) {
         existing++;
         details.push({ code, status: "existing" });
@@ -318,8 +318,8 @@ async function processSyncBatch(jobId: string) {
               config.already_tagged++;
             } else {
               const ur = await shopifyGraphQL(
-                `mutation($input: ProductInput!) { productUpdate(input: $input) { userErrors { message } } }`,
-                { input: { id: product.id, tags: [...product.tags, ...missingTags] } });
+                `mutation($product: ProductUpdateInput!) { productUpdate(product: $product) { userErrors { message } } }`,
+                { product: { id: product.id, tags: [...product.tags, ...missingTags] } });
               const errs = (ur.data as Record<string, unknown>)?.productUpdate as { userErrors: { message: string }[] } | null;
               if (errs?.userErrors?.length) config.tag_errors++;
               else config.tagged++;

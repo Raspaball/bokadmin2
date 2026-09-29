@@ -363,18 +363,18 @@ function bokgruppeTagsForKode(kode: string): string[] {
 // ── Product mutations ────────────────────────────────────────────────────────
 
 const PRODUCT_BY_HANDLE_QUERY = `
-  query productByHandle($handle: String!) {
-    productByHandle(handle: $handle) {
+  query productByIdentifier($handle: String!) {
+    productByIdentifier(identifier: { handle: $handle }) {
       id title handle
       variants(first: 1) { edges { node { id sku price } } }
-      images(first: 1) { edges { node { id } } }
+      media(first: 1) { edges { node { id } } }
     }
   }
 `;
 
 const PRODUCT_CREATE_MUTATION = `
-  mutation productCreate($input: ProductInput!) {
-    productCreate(input: $input) {
+  mutation productCreate($product: ProductCreateInput!) {
+    productCreate(product: $product) {
       product {
         id title handle
         variants(first: 1) { edges { node { id sku price } } }
@@ -385,8 +385,8 @@ const PRODUCT_CREATE_MUTATION = `
 `;
 
 const PRODUCT_UPDATE_MUTATION = `
-  mutation productUpdate($input: ProductInput!) {
-    productUpdate(input: $input) {
+  mutation productUpdate($product: ProductUpdateInput!) {
+    productUpdate(product: $product) {
       product {
         id title handle
         variants(first: 1) { edges { node { id sku price } } }
@@ -414,11 +414,12 @@ const INVENTORY_ITEM_UPDATE = `
   }
 `;
 
+// productCreateMedia er utfaset — bilder legges til via productUpdate(media:)
 const PRODUCT_IMAGE_MUTATION = `
-  mutation productCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
-    productCreateMedia(productId: $productId, media: $media) {
-      media { id }
-      mediaUserErrors { field message }
+  mutation productAddMedia($product: ProductUpdateInput!, $media: [CreateMediaInput!]!) {
+    productUpdate(product: $product, media: $media) {
+      product { id }
+      userErrors { field message }
     }
   }
 `;
@@ -426,7 +427,7 @@ const PRODUCT_IMAGE_MUTATION = `
 const PUBLICATIONS_QUERY = `
   query GetPublications {
     publications(first: 25) {
-      edges { node { id name } }
+      edges { node { id } }
     }
   }
 `;
@@ -465,8 +466,8 @@ async function publishToAllChannels(productId: string): Promise<void> {
 // ── Collection mutations ─────────────────────────────────────────────────────
 
 const COLLECTION_BY_HANDLE_QUERY = `
-  query collectionByHandle($handle: String!) {
-    collectionByHandle(handle: $handle) {
+  query collectionByIdentifier($handle: String!) {
+    collectionByIdentifier(identifier: { handle: $handle }) {
       id title handle
     }
   }
@@ -501,7 +502,7 @@ const CATALOG_PRODUCTS_QUERY = `
         node {
           id handle title productType vendor status
           descriptionHtml tags createdAt
-          images(first: 1) { edges { node { url altText } } }
+          featuredMedia { preview { image { url altText } } }
           variants(first: 1) {
             edges { node { id price compareAtPrice sku barcode inventoryPolicy } }
           }
@@ -536,11 +537,11 @@ async function pushOneBook(
 
   try {
     const lookupResult = await shopifyGraphQL(PRODUCT_BY_HANDLE_QUERY, { handle });
-    const existing = lookupResult.data?.productByHandle;
+    const existing = lookupResult.data?.productByIdentifier;
     if (existing?.id) {
       product = existing;
       isUpdate = true;
-      alreadyHasImage = (existing.images as { edges: unknown[] })?.edges?.length > 0;
+      alreadyHasImage = (existing.media as { edges: unknown[] })?.edges?.length > 0;
     }
   } catch (_) { /* not found — create */ }
 
@@ -556,12 +557,12 @@ async function pushOneBook(
 
   if (isUpdate && product) {
     productInput.id = product.id;
-    const updateResult = await shopifyGraphQL(PRODUCT_UPDATE_MUTATION, { input: productInput });
+    const updateResult = await shopifyGraphQL(PRODUCT_UPDATE_MUTATION, { product: productInput });
     const { product: updated, userErrors } = updateResult.data?.productUpdate || {};
     if (userErrors?.length) throw new Error(userErrors.map((e: { message: string }) => e.message).join(", "));
     if (updated) product = updated;
   } else {
-    const createResult = await shopifyGraphQL(PRODUCT_CREATE_MUTATION, { input: productInput });
+    const createResult = await shopifyGraphQL(PRODUCT_CREATE_MUTATION, { product: productInput });
     const { product: created, userErrors } = createResult.data?.productCreate || {};
     if (userErrors?.length) throw new Error(userErrors.map((e: { message: string }) => e.message).join(", "));
     product = created;
@@ -625,7 +626,7 @@ async function pushOneBook(
   if (imageUrl && !alreadyHasImage) {
     try {
       await shopifyGraphQL(PRODUCT_IMAGE_MUTATION, {
-        productId: product.id,
+        product: { id: product.id },
         media: [{ originalSource: imageUrl, alt: book.title, mediaContentType: "IMAGE" }],
       });
     } catch (_) { /* non-critical */ }
@@ -789,7 +790,7 @@ async function ensureCollections(
 
     try {
       const lookupResult = await shopifyGraphQL(COLLECTION_BY_HANDLE_QUERY, { handle });
-      const existingCol = lookupResult.data?.collectionByHandle;
+      const existingCol = lookupResult.data?.collectionByIdentifier;
 
       if (existingCol?.id) {
         existing++;
@@ -896,7 +897,7 @@ async function fullSyncCollections(
 
     try {
       const updateResult = await shopifyGraphQL(PRODUCT_UPDATE_MUTATION, {
-        input: { id: product.id, tags: [...product.tags, ...missingTags] },
+        product: { id: product.id, tags: [...product.tags, ...missingTags] },
       });
       const { userErrors } = updateResult.data?.productUpdate ?? {};
       if (userErrors?.length) throw new Error(userErrors.map((e: { message: string }) => e.message).join(", "));
@@ -1302,7 +1303,7 @@ const FEEDS_LIST_QUERY = `
           products(first: 4) {
             edges {
               node {
-                featuredImage { url }
+                featuredMedia { preview { image { url } } }
               }
             }
           }
@@ -1322,7 +1323,7 @@ const FEED_GET_QUERY = `
         edges {
           node {
             id title handle productType vendor status createdAt
-            images(first: 1) { edges { node { url } } }
+            featuredMedia { preview { image { url } } }
             variants(first: 1) { edges { node { id price } } }
           }
         }
@@ -1387,7 +1388,7 @@ async function feedsList() {
       productsCount: e.node.productsCount?.count ?? 0,
       image: e.node.image?.url ?? null,
       productImages: (e.node.products?.edges ?? [])
-        .map((pe: any) => pe.node.featuredImage?.url)
+        .map((pe: any) => pe.node.featuredMedia?.preview?.image?.url)
         .filter(Boolean) as string[],
     }));
 }
@@ -1404,7 +1405,7 @@ async function feedGet(collectionId: string) {
     vendor: e.node.vendor ?? "",
     status: e.node.status,
     createdAt: e.node.createdAt ?? "",
-    image: e.node.images?.edges?.[0]?.node?.url ?? null,
+    image: e.node.featuredMedia?.preview?.image?.url ?? null,
     price: e.node.variants?.edges?.[0]?.node?.price ?? "0.00",
   }));
   return {
@@ -1586,7 +1587,7 @@ serve(async (req: Request) => {
           sku: (variant.sku as string) ?? "",
           barcode: (variant.barcode as string) ?? "",
           variantId: (variant.id as string) ?? "",
-          imageUrl: ((node.images as { edges: { node: { url: string } }[] })?.edges?.[0]?.node?.url) ?? "",
+          imageUrl: ((node.featuredMedia as { preview?: { image?: { url: string } | null } } | null)?.preview?.image?.url) ?? "",
           seoTitle: ((node.seoTitleMf as { value: string } | null)?.value) ?? "",
           seoDescription: ((node.seoDescMf as { value: string } | null)?.value) ?? "",
           collections: ((node.collections as { edges: { node: { title: string } }[] })?.edges ?? []).map(e => e.node.title),
@@ -1621,7 +1622,7 @@ serve(async (req: Request) => {
               node {
                 id handle title productType vendor status
                 descriptionHtml tags createdAt
-                images(first: 1) { edges { node { url altText } } }
+                featuredMedia { preview { image { url altText } } }
                 variants(first: 1) {
                   edges { node { id price compareAtPrice sku barcode inventoryPolicy } }
                 }
@@ -1661,7 +1662,7 @@ serve(async (req: Request) => {
           sku: (variant.sku as string) ?? "",
           barcode: (variant.barcode as string) ?? "",
           variantId: (variant.id as string) ?? "",
-          imageUrl: ((node.images as { edges: { node: { url: string } }[] })?.edges?.[0]?.node?.url) ?? "",
+          imageUrl: ((node.featuredMedia as { preview?: { image?: { url: string } | null } } | null)?.preview?.image?.url) ?? "",
           seoTitle: ((node.seoTitleMf as { value: string } | null)?.value) ?? "",
           seoDescription: ((node.seoDescMf as { value: string } | null)?.value) ?? "",
           collections: ((node.collections as { edges: { node: { title: string } }[] })?.edges ?? []).map(e => e.node.title),
@@ -1696,7 +1697,7 @@ serve(async (req: Request) => {
             if (title !== undefined) input.title = title;
             if (productType !== undefined) input.productType = productType;
             if (vendor !== undefined) input.vendor = vendor;
-            const updateResult = await shopifyGraphQL(PRODUCT_UPDATE_MUTATION, { input });
+            const updateResult = await shopifyGraphQL(PRODUCT_UPDATE_MUTATION, { product: input });
             const { userErrors } = updateResult.data?.productUpdate ?? {};
             if (userErrors?.length) throw new Error(userErrors.map((e: { message: string }) => e.message).join(", "));
           }

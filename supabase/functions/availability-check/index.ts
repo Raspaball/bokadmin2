@@ -262,13 +262,13 @@ async function updateShopifyProductStatus(
 ): Promise<boolean> {
   try {
     const { data } = await shopifyGraphQL<{ productUpdate: { userErrors: Array<unknown> } }>(
-      `mutation productUpdate($input: ProductInput!) {
-        productUpdate(input: $input) {
+      `mutation productUpdate($product: ProductUpdateInput!) {
+        productUpdate(product: $product) {
           product { id status }
           userErrors { field message }
         }
       }`,
-      { input: { id: productId, status: newStatus } }
+      { product: { id: productId, status: newStatus } }
     );
     return !data.productUpdate?.userErrors?.length;
   } catch {
