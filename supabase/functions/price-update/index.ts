@@ -3,8 +3,8 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
+import { shopifyGraphQL } from "../_shared/shopify.ts";
 
-const SHOPIFY_API_VERSION = "2025-01";
 const PAGE_SIZE = 250;
 const TIMEOUT_MS = 45_000; // Leave 15s headroom
 
@@ -18,44 +18,6 @@ function getSupabase() {
   const url = Deno.env.get("SUPABASE_URL")!;
   const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || Deno.env.get("SUPABASE_ANON_KEY")!;
   return createClient(url, key);
-}
-
-// ── Shopify GraphQL with throttle-retry ─────────────────────────────────────
-async function shopifyGql(
-  shopDomain: string,
-  accessToken: string,
-  query: string,
-  variables: Record<string, unknown> = {}
-): Promise<unknown> {
-  const MAX_RETRIES = 3;
-  let wait = 1000;
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    const res = await fetch(
-      `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": accessToken,
-        },
-        body: JSON.stringify({ query, variables }),
-      }
-    );
-    if (!res.ok) throw new Error(`Shopify HTTP ${res.status}`);
-    const json = await res.json() as {
-      data?: unknown;
-      errors?: Array<{ extensions?: { code?: string }; message?: string }>;
-    };
-    const isThrottled = json.errors?.some(e => e.extensions?.code === "THROTTLED");
-    if (isThrottled && attempt < MAX_RETRIES - 1) {
-      await new Promise(r => setTimeout(r, wait));
-      wait *= 2;
-      continue;
-    }
-    if (json.errors?.length) throw new Error(`Shopify GQL error: ${json.errors[0].message}`);
-    return json.data;
-  }
-  throw new Error("Shopify throttled after retries");
 }
 
 // ── Shopify helpers ─────────────────────────────────────────────────────────
@@ -83,8 +45,6 @@ interface ShopifyPage {
 }
 
 interface UserSettingsRow {
-  shopify_shop_domain?: string | null;
-  shopify_access_token?: string | null;
   bokbasen_client_id?: string | null;
   bokbasen_client_secret?: string | null;
 }
@@ -117,7 +77,7 @@ async function getUserSettings(userId: string | null): Promise<UserSettingsRow |
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const res = await fetch(
-      `${supabaseUrl}/rest/v1/user_settings?user_id=eq.${userId}&select=shopify_shop_domain,shopify_access_token,bokbasen_client_id,bokbasen_client_secret`,
+      `${supabaseUrl}/rest/v1/user_settings?user_id=eq.${userId}&select=bokbasen_client_id,bokbasen_client_secret`,
       { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } }
     );
     const rows = await res.json();
@@ -125,21 +85,6 @@ async function getUserSettings(userId: string | null): Promise<UserSettingsRow |
   } catch {
     return null;
   }
-}
-
-async function getShopifyConfig(userId: string | null) {
-  const settings = await getUserSettings(userId);
-  if (settings?.shopify_shop_domain && settings?.shopify_access_token) {
-    return {
-      shopDomain: settings.shopify_shop_domain,
-      accessToken: settings.shopify_access_token,
-    };
-  }
-
-  return {
-    shopDomain: Deno.env.get("SHOPIFY_SHOP_DOMAIN")!,
-    accessToken: Deno.env.get("SHOPIFY_ACCESS_TOKEN")!,
-  };
 }
 
 async function getBokbasenCredentials(userId: string | null): Promise<BokbasenCredentials> {
@@ -182,13 +127,13 @@ async function getBokbasenToken(userId: string | null): Promise<string> {
   return token;
 }
 
+// userId-parameterne beholdes for jobbenes kallsignatur. Shopify-tilgangen er
+// felles for hele serveren (se _shared/shopify.ts).
 async function fetchShopifyProductsPage(
-  userId: string | null,
+  _userId: string | null,
   cursor: string | null,
   pageSize: number = PAGE_SIZE
 ): Promise<ShopifyPage> {
-  const { shopDomain, accessToken } = await getShopifyConfig(userId);
-
   // Explicitly fetch all statuses — without this Shopify defaults to ACTIVE only,
   // meaning DRAFT and ARCHIVED products never get their prices checked.
   const query = `
@@ -216,12 +161,12 @@ async function fetchShopifyProductsPage(
     }
   `;
 
-  const data = await shopifyGql(shopDomain, accessToken, query, { first: pageSize, after: cursor }) as {
+  const { data } = await shopifyGraphQL<{
     products: {
       pageInfo: { hasNextPage: boolean; endCursor: string | null };
       edges: Array<{ node: ShopifyProduct }>;
     };
-  };
+  }>(query, { first: pageSize, after: cursor });
 
   return {
     products: data.products.edges.map(e => e.node),
@@ -230,12 +175,11 @@ async function fetchShopifyProductsPage(
   };
 }
 
-async function getShopifyProductCount(userId: string | null): Promise<number> {
-  const { shopDomain, accessToken } = await getShopifyConfig(userId);
+async function getShopifyProductCount(_userId: string | null): Promise<number> {
   try {
-    const data = await shopifyGql(shopDomain, accessToken, `{ productsCount(query: "status:active OR status:draft OR status:archived") { count } }`) as {
-      productsCount: { count: number };
-    };
+    const { data } = await shopifyGraphQL<{ productsCount: { count: number } }>(
+      `{ productsCount(query: "status:active OR status:draft OR status:archived") { count } }`
+    );
     return data.productsCount?.count || 0;
   } catch {
     return 0;
@@ -300,14 +244,13 @@ async function fetchBokbasenPrice(isbn: string, userId: string | null): Promise<
 }
 
 async function updateShopifyPrice(
-  userId: string | null,
+  _userId: string | null,
   productId: string,
   variantId: string,
   newPrice: number
 ): Promise<boolean> {
-  const { shopDomain, accessToken } = await getShopifyConfig(userId);
   try {
-    const data = await shopifyGql(shopDomain, accessToken,
+    const { data } = await shopifyGraphQL<{ productVariantsBulkUpdate: { userErrors: Array<unknown> } }>(
       `mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
         productVariantsBulkUpdate(productId: $productId, variants: $variants) {
           productVariants { id price }
@@ -315,7 +258,7 @@ async function updateShopifyPrice(
         }
       }`,
       { productId, variants: [{ id: variantId, price: String(newPrice) }] }
-    ) as { productVariantsBulkUpdate: { userErrors: Array<unknown> } };
+    );
     return !data.productVariantsBulkUpdate?.userErrors?.length;
   } catch {
     return false;

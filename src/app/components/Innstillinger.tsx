@@ -10,14 +10,10 @@ export function Innstillinger() {
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Shopify fields
-  const [shopDomain, setShopDomain] = useState('');
-  const [accessToken, setAccessToken] = useState('');
+  // Shopify — styres av serveren (Dev Dashboard-app, Supabase-hemmeligheter)
   const [testStatus, setTestStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
   const [testError, setTestError] = useState('');
-  const [shopName, setShopName] = useState('');
-  const [savingShopify, setSavingShopify] = useState(false);
-  const [shopifySaved, setShopifySaved] = useState(false);
+  const [shopInfo, setShopInfo] = useState<{ name: string; domain: string; productsCount: number } | null>(null);
 
   // Bokbasen fields
   const [bokbasenClientId, setBokbasenClientId] = useState('');
@@ -108,23 +104,16 @@ export function Innstillinger() {
     userSettings.get().then(s => {
       setSettings(s);
       if (s) {
-        setShopDomain(s.shopify_shop_domain ?? '');
         setBokbasenClientId(s.bokbasen_client_id ?? '');
       }
       setLoading(false);
     });
   }, []);
 
-  const normalizeDomain = (d: string) =>
-    d.replace(/^https?:\/\//, '').replace(/\/.*$/, '').trim();
-
   const handleTestShopify = async () => {
-    const domain = normalizeDomain(shopDomain);
-    if (!domain || !accessToken.trim()) return;
-
     setTestStatus('loading');
     setTestError('');
-    setShopName('');
+    setShopInfo(null);
 
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -139,35 +128,23 @@ export function Innstillinger() {
           Authorization: `Bearer ${token ?? supabaseKey}`,
           apikey: supabaseKey,
         },
-        body: JSON.stringify({ shopDomain: domain, accessToken: accessToken.trim() }),
+        body: JSON.stringify({}),
       });
 
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || 'Ukjent feil');
-      setShopName(data.shopName ?? domain);
+      setShopInfo({ name: data.shopName, domain: data.shopDomain, productsCount: data.productsCount });
       setTestStatus('ok');
+      // Lagre kun navn og domene (ingen nøkler) slik at sidemenyen viser butikken
+      if (data.shopDomain && data.shopDomain !== settings?.shopify_shop_domain) {
+        setSettings(await userSettings.save({
+          shopify_shop_domain: data.shopDomain,
+          shopify_shop_name: data.shopName ?? null,
+        }));
+      }
     } catch (e) {
       setTestError((e as Error).message);
       setTestStatus('error');
-    }
-  };
-
-  const handleSaveShopify = async () => {
-    setSavingShopify(true);
-    setShopifySaved(false);
-    try {
-      await userSettings.save({
-        shopify_shop_domain: normalizeDomain(shopDomain),
-        shopify_access_token: accessToken.trim() || undefined,
-        shopify_shop_name: shopName || null,
-      });
-      setShopifySaved(true);
-      setTestStatus('idle');
-      setAccessToken('');
-    } catch (e) {
-      setTestError((e as Error).message);
-    } finally {
-      setSavingShopify(false);
     }
   };
 
@@ -299,34 +276,24 @@ export function Innstillinger() {
           <CardDescription>
             {settings?.shopify_shop_domain
               ? <>Koblet til: <strong>{settings.shopify_shop_domain}</strong></>
-              : 'Ingen Shopify-butikk er koblet til ennå.'}
+              : 'Test tilkoblingen for å se hvilken butikk serveren er koblet til.'}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="shop-domain">Butikkdomene</Label>
-            <Input
-              id="shop-domain"
-              placeholder="din-butikk.myshopify.com"
-              value={shopDomain}
-              onChange={e => { setShopDomain(e.target.value); setTestStatus('idle'); }}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="access-token">Nytt Access Token (la stå tomt for å beholde nåværende)</Label>
-            <Input
-              id="access-token"
-              type="password"
-              placeholder="shpat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-              value={accessToken}
-              onChange={e => { setAccessToken(e.target.value); setTestStatus('idle'); }}
-            />
-          </div>
+          <p className="text-sm text-gray-600">
+            Shopify styres av serveren. Bokadmin bruker en Shopify-app fra Dev Dashboard, og
+            butikkdomene og app-nøkler settes som Supabase-hemmeligheter
+            (<code>SHOPIFY_SHOP_DOMAIN</code>, <code>SHOPIFY_CLIENT_ID</code>, <code>SHOPIFY_CLIENT_SECRET</code>).
+            Tilgangsnøkkelen fornyes automatisk.
+          </p>
 
-          {testStatus === 'ok' && (
+          {testStatus === 'ok' && shopInfo && (
             <div className="flex items-center gap-2 text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-sm">
               <CheckCircle2 className="size-4 flex-shrink-0" />
-              Tilkobling bekreftet! Butikk: <strong>{shopName}</strong>
+              <span>
+                Tilkobling bekreftet! Butikk: <strong>{shopInfo.name}</strong> ({shopInfo.domain}),{' '}
+                {shopInfo.productsCount} produkter
+              </span>
             </div>
           )}
           {testStatus === 'error' && (
@@ -335,28 +302,14 @@ export function Innstillinger() {
               <span>{testError}</span>
             </div>
           )}
-          {shopifySaved && (
-            <p className="text-sm text-green-600 flex items-center gap-1">
-              <CheckCircle2 className="size-4" /> Innstillinger lagret.
-            </p>
-          )}
-
-          <div className="flex gap-3">
-            {accessToken && (
-              <Button
-                variant="outline"
-                onClick={handleTestShopify}
-                disabled={testStatus === 'loading'}
-              >
-                {testStatus === 'loading' && <Loader2 className="size-4 mr-2 animate-spin" />}
-                Test tilkobling
-              </Button>
-            )}
-            <Button onClick={handleSaveShopify} disabled={savingShopify}>
-              {savingShopify && <Loader2 className="size-4 mr-2 animate-spin" />}
-              Lagre Shopify-innstillinger
-            </Button>
-          </div>
+          <Button
+            variant="outline"
+            onClick={handleTestShopify}
+            disabled={testStatus === 'loading'}
+          >
+            {testStatus === 'loading' && <Loader2 className="size-4 mr-2 animate-spin" />}
+            Test tilkobling
+          </Button>
         </CardContent>
       </Card>
 

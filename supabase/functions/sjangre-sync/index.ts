@@ -3,8 +3,8 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
+import { shopifyGraphQL } from "../_shared/shopify.ts";
 
-const SHOPIFY_API_VERSION = "2025-01";
 const PAGE_SIZE = 50;
 const TIMEOUT_MS = 100_000;
 
@@ -27,26 +27,6 @@ function getUserIdFromJWT(authHeader: string): string | null {
   } catch {
     return null;
   }
-}
-
-async function getShopifyConfig(userId: string | null): Promise<{ shopDomain: string; accessToken: string }> {
-  if (userId) {
-    const url = Deno.env.get("SUPABASE_URL")!;
-    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const res = await fetch(
-      `${url}/rest/v1/user_settings?user_id=eq.${userId}&select=shopify_shop_domain,shopify_access_token&limit=1`,
-      { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } }
-    );
-    const rows = await res.json();
-    const s = rows?.[0];
-    if (s?.shopify_shop_domain && s?.shopify_access_token) {
-      return { shopDomain: s.shopify_shop_domain, accessToken: s.shopify_access_token };
-    }
-  }
-  return {
-    shopDomain: Deno.env.get("SHOPIFY_SHOP_DOMAIN")!,
-    accessToken: Deno.env.get("SHOPIFY_ACCESS_TOKEN")!,
-  };
 }
 
 // ── Bokbasen auth ─────────────────────────────────────────────────────────────
@@ -110,28 +90,6 @@ function extractBokgruppekode(xml: string): string | null {
   return null;
 }
 
-// ── Shopify GraphQL ───────────────────────────────────────────────────────────
-
-async function shopifyGql(
-  shopDomain: string,
-  accessToken: string,
-  query: string,
-  variables: Record<string, unknown> = {}
-): Promise<Record<string, unknown>> {
-  const res = await fetch(
-    `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
-      body: JSON.stringify({ query, variables }),
-    }
-  );
-  if (!res.ok) throw new Error(`Shopify API error: ${res.status} ${await res.text()}`);
-  const data = await res.json();
-  if (data.errors) throw new Error(`Shopify GraphQL: ${JSON.stringify(data.errors)}`);
-  return data;
-}
-
 function bokgruppeTagsForKode(kode: string): string[] {
   const tags: string[] = [];
   if (kode.length >= 1) tags.push(`bkg-${kode[0]}`);
@@ -185,11 +143,7 @@ interface CollectionSyncResult {
   details: Array<{ code: string; status: string; error?: string }>;
 }
 
-async function ensureCollections(
-  shopDomain: string,
-  accessToken: string,
-  koder: Set<string>
-): Promise<CollectionSyncResult> {
+async function ensureCollections(koder: Set<string>): Promise<CollectionSyncResult> {
   const allCodes = new Set<string>();
   for (const kode of koder) {
     if (!kode || kode === "ukjent") continue;
@@ -207,14 +161,14 @@ async function ensureCollections(
     const handle = `bkg-${code}`;
     const title = COLLECTION_NAMES[code] ?? `Bokgruppe ${code}`;
     try {
-      const r = await shopifyGql(shopDomain, accessToken,
+      const r = await shopifyGraphQL(
         `query($h: String!) { collectionByHandle(handle: $h) { id } }`, { h: handle });
       const col = (r.data as Record<string, unknown>)?.collectionByHandle as { id: string } | null;
       if (col?.id) {
         existing++;
         details.push({ code, status: "existing" });
       } else {
-        const cr = await shopifyGql(shopDomain, accessToken, `
+        const cr = await shopifyGraphQL(`
           mutation($input: CollectionInput!) {
             collectionCreate(input: $input) {
               collection { id }
@@ -257,12 +211,10 @@ interface SyncJobConfig {
 async function runCollectionsPhase(
   jobId: string,
   config: SyncJobConfig,
-  shopDomain: string,
-  accessToken: string,
   supabase: SupabaseClient
 ) {
   const koder = new Set<string>(config.koder_found.filter(Boolean));
-  const colResult = await ensureCollections(shopDomain, accessToken, koder);
+  const colResult = await ensureCollections(koder);
 
   await supabase.from("jobs").update({
     status: "completed",
@@ -300,12 +252,11 @@ async function processSyncBatch(jobId: string) {
     koder_found: [], tagged: 0, already_tagged: 0, no_kode: 0, tag_errors: 0, processed: 0,
   };
 
-  const { shopDomain, accessToken } = await getShopifyConfig(userId);
 
   try {
     if (config.phase === "tagging") {
       if (!config.total_products) {
-        const countResult = await shopifyGql(shopDomain, accessToken, `{ productsCount { count } }`, {});
+        const countResult = await shopifyGraphQL(`{ productsCount { count } }`, {});
         config.total_products = ((countResult.data as Record<string, unknown>)?.productsCount as { count: number })?.count ?? 0;
         await supabase.from("jobs").update({ total_items: config.total_products, config }).eq("id", jobId);
       }
@@ -313,7 +264,7 @@ async function processSyncBatch(jobId: string) {
       const vars: Record<string, unknown> = { first: PAGE_SIZE };
       if (config.cursor) vars.after = config.cursor;
 
-      const r = await shopifyGql(shopDomain, accessToken, `
+      const r = await shopifyGraphQL(`
         query($first: Int!, $after: String) {
           products(first: $first, after: $after) {
             pageInfo { hasNextPage endCursor }
@@ -332,7 +283,7 @@ async function processSyncBatch(jobId: string) {
       if (products.length === 0) {
         config.phase = "collections";
         await supabase.from("jobs").update({ config, processed: config.processed }).eq("id", jobId);
-        await runCollectionsPhase(jobId, config, shopDomain, accessToken, supabase);
+        await runCollectionsPhase(jobId, config, supabase);
         return;
       }
 
@@ -366,7 +317,7 @@ async function processSyncBatch(jobId: string) {
             if (missingTags.length === 0) {
               config.already_tagged++;
             } else {
-              const ur = await shopifyGql(shopDomain, accessToken,
+              const ur = await shopifyGraphQL(
                 `mutation($input: ProductInput!) { productUpdate(input: $input) { userErrors { message } } }`,
                 { input: { id: product.id, tags: [...product.tags, ...missingTags] } });
               const errs = (ur.data as Record<string, unknown>)?.productUpdate as { userErrors: { message: string }[] } | null;
@@ -386,12 +337,12 @@ async function processSyncBatch(jobId: string) {
       if (!pageInfo?.hasNextPage) {
         config.phase = "collections";
         await supabase.from("jobs").update({ config, processed: config.processed }).eq("id", jobId);
-        await runCollectionsPhase(jobId, config, shopDomain, accessToken, supabase);
+        await runCollectionsPhase(jobId, config, supabase);
       } else {
         await supabase.from("jobs").update({ status: "paused", processed: config.processed, config }).eq("id", jobId);
       }
     } else {
-      await runCollectionsPhase(jobId, config, shopDomain, accessToken, supabase);
+      await runCollectionsPhase(jobId, config, supabase);
     }
   } catch (err) {
     await supabase.from("jobs").update({ status: "paused", error_message: String(err), config }).eq("id", jobId);
@@ -428,7 +379,6 @@ async function processEnrichBatch(jobId: string) {
     found_kode: 0, already_cached: 0, no_data: 0, errors: 0,
   };
 
-  const { shopDomain, accessToken } = await getShopifyConfig(userId);
   const bokbasenConfig = await getBokbasenConfig(userId);
 
   if (!bokbasenConfig) {
@@ -441,7 +391,7 @@ async function processEnrichBatch(jobId: string) {
 
   try {
     if (!config.total_products) {
-      const countResult = await shopifyGql(shopDomain, accessToken, `{ productsCount { count } }`, {});
+      const countResult = await shopifyGraphQL(`{ productsCount { count } }`, {});
       config.total_products = ((countResult.data as Record<string, unknown>)?.productsCount as { count: number })?.count ?? 0;
       await supabase.from("jobs").update({ total_items: config.total_products, config }).eq("id", jobId);
     }
@@ -449,7 +399,7 @@ async function processEnrichBatch(jobId: string) {
     const vars: Record<string, unknown> = { first: PAGE_SIZE };
     if (config.cursor) vars.after = config.cursor;
 
-    const r = await shopifyGql(shopDomain, accessToken, `
+    const r = await shopifyGraphQL(`
       query($first: Int!, $after: String) {
         products(first: $first, after: $after) {
           pageInfo { hasNextPage endCursor }
@@ -588,9 +538,8 @@ serve(async (req) => {
 
     // GET /sjangre-sync/analyze
     if (path === "analyze" && req.method === "GET") {
-      const { shopDomain, accessToken } = await getShopifyConfig(userId);
 
-      const countResult = await shopifyGql(shopDomain, accessToken, `{ productsCount { count } }`, {});
+      const countResult = await shopifyGraphQL(`{ productsCount { count } }`, {});
       const totalShopifyProducts = ((countResult.data as Record<string, unknown>)?.productsCount as { count: number })?.count ?? 0;
 
       const { count: withKode } = await supabase
@@ -616,7 +565,7 @@ serve(async (req) => {
       while (true) {
         const vars: Record<string, unknown> = { first: 250 };
         if (after) vars.after = after;
-        const r = await shopifyGql(shopDomain, accessToken, `
+        const r = await shopifyGraphQL(`
           query($first: Int!, $after: String) {
             collections(first: $first, after: $after) {
               pageInfo { hasNextPage endCursor }
@@ -651,8 +600,7 @@ serve(async (req) => {
       const { data: existing } = await exQ.single();
       if (existing) return new Response(JSON.stringify({ error: "En synk kjøres allerede", jobId: existing.id }), { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
-      const { shopDomain, accessToken } = await getShopifyConfig(userId);
-      const countResult = await shopifyGql(shopDomain, accessToken, `{ productsCount { count } }`, {});
+      const countResult = await shopifyGraphQL(`{ productsCount { count } }`, {});
       const totalProducts = ((countResult.data as Record<string, unknown>)?.productsCount as { count: number })?.count ?? 0;
 
       const { data: job, error } = await supabase.from("jobs").insert({
@@ -747,7 +695,6 @@ serve(async (req) => {
     // GET /sjangre-sync/catalog-bkg-stats
     // Henter alle Shopify-produkter (kun tags), parser bkg-NNN og returnerer telling per kode.
     if (path === "catalog-bkg-stats" && req.method === "GET") {
-      const { shopDomain, accessToken } = await getShopifyConfig(userId);
       const byKode: Record<string, number> = {};
       let withKode = 0, withoutKode = 0;
       let after: string | null = null;
@@ -755,7 +702,7 @@ serve(async (req) => {
       while (true) {
         const vars: Record<string, unknown> = { first: 250 };
         if (after) vars.after = after;
-        const result = await shopifyGql(shopDomain, accessToken, `
+        const result = await shopifyGraphQL(`
           query($first: Int!, $after: String) {
             products(first: $first, after: $after) {
               pageInfo { hasNextPage endCursor }
@@ -789,7 +736,6 @@ serve(async (req) => {
 
     // POST /sjangre-sync/delete-empty-collections
     if (path === "delete-empty-collections" && req.method === "POST") {
-      const { shopDomain, accessToken } = await getShopifyConfig(userId);
       const toDelete: { id: string; handle: string }[] = [];
       let after: string | null = null;
       let checked = 0;
@@ -797,7 +743,7 @@ serve(async (req) => {
       while (true) {
         const vars: Record<string, unknown> = { first: 250 };
         if (after) vars.after = after;
-        const result = await shopifyGql(shopDomain, accessToken, `
+        const result = await shopifyGraphQL(`
           query($first: Int!, $after: String) {
             collections(first: $first, after: $after) {
               pageInfo { hasNextPage endCursor }
@@ -831,7 +777,7 @@ serve(async (req) => {
       let errors = 0;
       for (const col of toDelete) {
         try {
-          const r = await shopifyGql(shopDomain, accessToken, `
+          const r = await shopifyGraphQL(`
             mutation($id: ID!) {
               collectionDelete(input: { id: $id }) {
                 deletedCollectionId

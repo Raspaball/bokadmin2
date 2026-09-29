@@ -1,9 +1,8 @@
 // supabase/functions/shopify/index.ts
-// Deploy: supabase functions deploy shopify
+// Deploy: supabase functions deploy shopify --no-verify-jwt
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-
-const SHOPIFY_API_VERSION = "2025-01";
+import { getShopDomain, shopifyGraphQL } from "../_shared/shopify.ts";
 
 // ── Bokbasen auth (for ISBN → bokgruppekode lookup during catalog sync) ───────
 const BOKBASEN_AUTH_URL = "https://auth.bokbasen.io/oauth/token";
@@ -14,9 +13,9 @@ interface BokbasenCredentials {
   clientSecret: string;
 }
 
+// Shopify-tilgangen er felles for hele serveren (se _shared/shopify.ts).
+// Kun Bokbasen kan fortsatt settes per bruker i user_settings.
 interface CredentialBundle {
-  shopDomain: string;
-  accessToken: string;
   bokbasen: BokbasenCredentials;
 }
 
@@ -361,48 +360,6 @@ function bokgruppeTagsForKode(kode: string): string[] {
   return tags;
 }
 
-// ── Shopify GraphQL ─────────────────────────────────────────────────────────
-
-async function shopifyGraphQL(
-  shopDomain: string,
-  accessToken: string,
-  query: string,
-  variables: Record<string, unknown>,
-  retries = 3,
-) {
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    const res = await fetch(
-      `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": accessToken,
-        },
-        body: JSON.stringify({ query, variables }),
-      }
-    );
-    if (!res.ok) throw new Error(`Shopify API error: ${res.status} ${await res.text()}`);
-    const data = await res.json();
-
-    // Retry on THROTTLED with exponential backoff
-    const isThrottled = data.errors?.some(
-      (e: { extensions?: { code?: string } }) => e.extensions?.code === "THROTTLED"
-    );
-    if (isThrottled) {
-      if (attempt === retries) throw new Error(`Shopify rate limit exceeded after ${retries} retries`);
-      const delay = 1000 * 2 ** attempt; // 1s, 2s, 4s
-      await new Promise(r => setTimeout(r, delay));
-      continue;
-    }
-
-    if (data.errors) {
-      throw new Error(`GraphQL errors: ${JSON.stringify(data.errors)}`);
-    }
-    return data;
-  }
-}
-
 // ── Product mutations ────────────────────────────────────────────────────────
 
 const PRODUCT_BY_HANDLE_QUERY = `
@@ -485,20 +442,21 @@ const PUBLISHABLE_PUBLISH_MUTATION = `
 // Sales channels ("publications") a product must be published to so it doesn't
 // sit at "0 salgskanaler" after export. Cached per shop for the life of the
 // function instance — the set of channels rarely changes.
-async function getAllPublicationIds(shopDomain: string, accessToken: string): Promise<string[]> {
+async function getAllPublicationIds(): Promise<string[]> {
+  const shopDomain = getShopDomain();
   const cached = publicationsCache.get(shopDomain);
   if (cached && Date.now() < cached.expiry) return cached.ids;
 
-  const result = await shopifyGraphQL(shopDomain, accessToken, PUBLICATIONS_QUERY, {});
+  const result = await shopifyGraphQL(PUBLICATIONS_QUERY, {});
   const ids = ((result.data?.publications?.edges as { node: { id: string } }[]) || []).map((e) => e.node.id);
   publicationsCache.set(shopDomain, { ids, expiry: Date.now() + 30 * 60 * 1000 });
   return ids;
 }
 
-async function publishToAllChannels(shopDomain: string, accessToken: string, productId: string): Promise<void> {
-  const publicationIds = await getAllPublicationIds(shopDomain, accessToken);
+async function publishToAllChannels(productId: string): Promise<void> {
+  const publicationIds = await getAllPublicationIds();
   if (!publicationIds.length) return;
-  await shopifyGraphQL(shopDomain, accessToken, PUBLISHABLE_PUBLISH_MUTATION, {
+  await shopifyGraphQL(PUBLISHABLE_PUBLISH_MUTATION, {
     id: productId,
     input: publicationIds.map((publicationId) => ({ publicationId })),
   });
@@ -560,8 +518,6 @@ const CATALOG_PRODUCTS_QUERY = `
 // ── Push one book ────────────────────────────────────────────────────────────
 
 async function pushOneBook(
-  shopDomain: string,
-  accessToken: string,
   book: BookMetadata
 ): Promise<{ shopifyId: string; handle: string; variantId?: string }> {
   // Build tag list: author, title + bokgruppekode hierarchy
@@ -579,7 +535,7 @@ async function pushOneBook(
   let alreadyHasImage = false;
 
   try {
-    const lookupResult = await shopifyGraphQL(shopDomain, accessToken, PRODUCT_BY_HANDLE_QUERY, { handle });
+    const lookupResult = await shopifyGraphQL(PRODUCT_BY_HANDLE_QUERY, { handle });
     const existing = lookupResult.data?.productByHandle;
     if (existing?.id) {
       product = existing;
@@ -600,12 +556,12 @@ async function pushOneBook(
 
   if (isUpdate && product) {
     productInput.id = product.id;
-    const updateResult = await shopifyGraphQL(shopDomain, accessToken, PRODUCT_UPDATE_MUTATION, { input: productInput });
+    const updateResult = await shopifyGraphQL(PRODUCT_UPDATE_MUTATION, { input: productInput });
     const { product: updated, userErrors } = updateResult.data?.productUpdate || {};
     if (userErrors?.length) throw new Error(userErrors.map((e: { message: string }) => e.message).join(", "));
     if (updated) product = updated;
   } else {
-    const createResult = await shopifyGraphQL(shopDomain, accessToken, PRODUCT_CREATE_MUTATION, { input: productInput });
+    const createResult = await shopifyGraphQL(PRODUCT_CREATE_MUTATION, { input: productInput });
     const { product: created, userErrors } = createResult.data?.productCreate || {};
     if (userErrors?.length) throw new Error(userErrors.map((e: { message: string }) => e.message).join(", "));
     product = created;
@@ -617,14 +573,14 @@ async function pushOneBook(
   // on its own, so a freshly exported product would otherwise sit at "0
   // salgskanaler" until someone publishes it manually in Shopify Admin.
   try {
-    await publishToAllChannels(shopDomain, accessToken, product.id as string);
+    await publishToAllChannels(product.id as string);
   } catch (_) { /* non-critical — product still exists, just unpublished */ }
 
   const variantId = (product.variants as { edges: { node: { id: string } }[] })?.edges?.[0]?.node?.id;
 
   // Step 2: Update variant price + barcode
   if (variantId) {
-    await shopifyGraphQL(shopDomain, accessToken, VARIANT_UPDATE_MUTATION, {
+    await shopifyGraphQL(VARIANT_UPDATE_MUTATION, {
       productId: product.id,
       variants: [{
         id: variantId,
@@ -637,19 +593,19 @@ async function pushOneBook(
     // Step 2b: Update inventory item (SKU + weight)
     try {
       const variantQuery = `{ productVariant(id: "${variantId}") { inventoryItem { id } } }`;
-      const variantData = await shopifyGraphQL(shopDomain, accessToken, variantQuery, {});
+      const variantData = await shopifyGraphQL(variantQuery, {});
       const inventoryItemId = variantData.data?.productVariant?.inventoryItem?.id;
       if (inventoryItemId) {
         const invInput: Record<string, unknown> = { sku: book.isbn };
         if (book.vekt) invInput.measurement = { weight: { value: book.vekt, unit: "GRAMS" } };
-        await shopifyGraphQL(shopDomain, accessToken, INVENTORY_ITEM_UPDATE, { id: inventoryItemId, input: invInput });
+        await shopifyGraphQL(INVENTORY_ITEM_UPDATE, { id: inventoryItemId, input: invInput });
       }
     } catch (_) { /* non-critical */ }
   }
 
   // Step 3: SEO via metafields
   try {
-    await shopifyGraphQL(shopDomain, accessToken, `
+    await shopifyGraphQL(`
       mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
         metafieldsSet(metafields: $metafields) {
           metafields { id key value }
@@ -668,7 +624,7 @@ async function pushOneBook(
   const imageUrl = book.imageUrl || book.image_url;
   if (imageUrl && !alreadyHasImage) {
     try {
-      await shopifyGraphQL(shopDomain, accessToken, PRODUCT_IMAGE_MUTATION, {
+      await shopifyGraphQL(PRODUCT_IMAGE_MUTATION, {
         productId: product.id,
         media: [{ originalSource: imageUrl, alt: book.title, mediaContentType: "IMAGE" }],
       });
@@ -720,10 +676,7 @@ interface AnalyzeResult {
   };
 }
 
-async function analyzeCollections(
-  shopDomain: string,
-  accessToken: string,
-): Promise<AnalyzeResult> {
+async function analyzeCollections(): Promise<AnalyzeResult> {
   // Hent alle produkter (kun id, handle, tags)
   const allProducts: Array<{ handle: string; tags: string[] }> = [];
   let after: string | null = null;
@@ -731,7 +684,7 @@ async function analyzeCollections(
   while (true) {
     const variables: Record<string, unknown> = { first: 250 };
     if (after) variables.after = after;
-    const result = await shopifyGraphQL(shopDomain, accessToken, `
+    const result = await shopifyGraphQL(`
       query($first: Int!, $after: String) {
         products(first: $first, after: $after) {
           pageInfo { hasNextPage endCursor }
@@ -778,7 +731,7 @@ async function analyzeCollections(
   while (true) {
     const variables: Record<string, unknown> = { first: 250 };
     if (colAfter) variables.after = colAfter;
-    const result = await shopifyGraphQL(shopDomain, accessToken, `
+    const result = await shopifyGraphQL(`
       query($first: Int!, $after: String) {
         collections(first: $first, after: $after) {
           pageInfo { hasNextPage endCursor }
@@ -810,8 +763,6 @@ async function analyzeCollections(
 }
 
 async function ensureCollections(
-  shopDomain: string,
-  accessToken: string,
   koder: Set<string>
 ): Promise<CollectionSyncResult> {
   // Expand each 3-digit code to 1-digit, 2-digit, and 3-digit codes
@@ -837,14 +788,14 @@ async function ensureCollections(
     const level = code.length;
 
     try {
-      const lookupResult = await shopifyGraphQL(shopDomain, accessToken, COLLECTION_BY_HANDLE_QUERY, { handle });
+      const lookupResult = await shopifyGraphQL(COLLECTION_BY_HANDLE_QUERY, { handle });
       const existingCol = lookupResult.data?.collectionByHandle;
 
       if (existingCol?.id) {
         existing++;
         details.push({ code, level, title, status: "existing", id: existingCol.id });
       } else {
-        const createResult = await shopifyGraphQL(shopDomain, accessToken, COLLECTION_CREATE_MUTATION, {
+        const createResult = await shopifyGraphQL(COLLECTION_CREATE_MUTATION, {
           input: {
             title,
             handle,
@@ -873,8 +824,6 @@ async function ensureCollections(
 }
 
 async function fullSyncCollections(
-  shopDomain: string,
-  accessToken: string,
   bokbasenCredentials: BokbasenCredentials,
 ): Promise<FullSyncResult> {
   // ── Step 1: Fetch all Shopify products (paginated) ─────────────────────────
@@ -885,7 +834,7 @@ async function fullSyncCollections(
     const variables: Record<string, unknown> = { first: 50 };
     if (after) variables.after = after;
 
-    const result = await shopifyGraphQL(shopDomain, accessToken, ALL_PRODUCTS_QUERY, variables);
+    const result = await shopifyGraphQL(ALL_PRODUCTS_QUERY, variables);
     const edges: Array<{ cursor: string; node: { id: string; handle: string; tags: string[] } }> =
       result.data?.products?.edges ?? [];
     const pageInfo: { hasNextPage: boolean } = result.data?.products?.pageInfo ?? {};
@@ -946,7 +895,7 @@ async function fullSyncCollections(
     if (missingTags.length === 0) { alreadyTagged++; continue; }
 
     try {
-      const updateResult = await shopifyGraphQL(shopDomain, accessToken, PRODUCT_UPDATE_MUTATION, {
+      const updateResult = await shopifyGraphQL(PRODUCT_UPDATE_MUTATION, {
         input: { id: product.id, tags: [...product.tags, ...missingTags] },
       });
       const { userErrors } = updateResult.data?.productUpdate ?? {};
@@ -960,7 +909,7 @@ async function fullSyncCollections(
   }
 
   // ── Step 4: Create / verify Smart Collections ──────────────────────────────
-  const collections = await ensureCollections(shopDomain, accessToken, koderFound);
+  const collections = await ensureCollections(koderFound);
 
   return {
     products: { total: allProducts.length, updated, alreadyTagged, noKode, tagErrors },
@@ -1020,13 +969,13 @@ interface MenuItemInput {
 }
 
 // Fetch bkg-* collections that have at least 1 product
-async function getActiveBkgCodes(shopDomain: string, accessToken: string): Promise<Set<string>> {
+async function getActiveBkgCodes(): Promise<Set<string>> {
   const activeCodes = new Set<string>();
   let colAfter: string | null = null;
   while (true) {
     const variables: Record<string, unknown> = { first: 50 };
     if (colAfter) variables.after = colAfter;
-    const result = await shopifyGraphQL(shopDomain, accessToken, `
+    const result = await shopifyGraphQL(`
       query($first: Int!, $after: String) {
         collections(first: $first, after: $after) {
           pageInfo { hasNextPage endCursor }
@@ -1134,8 +1083,6 @@ function buildMenuStructure(maxDepth: 2 | 3 = 2): MenuItemInput[] {
 
 
 async function buildMegaMenu(
-  shopDomain: string,
-  accessToken: string,
   menuHandle: string,
 ): Promise<{ success: boolean; itemsCount?: number }> {
   menuHandle = menuHandle.toLowerCase().trim();
@@ -1198,7 +1145,7 @@ async function buildMegaMenu(
       }
     }
   `;
-  const menuData = await shopifyGraphQL(shopDomain, accessToken, menuQuery, {});
+  const menuData = await shopifyGraphQL(menuQuery, {});
   const allMenus: Array<{ id: string; title: string; handle: string; items?: ExistingMenuItem[] }> =
     (menuData.data?.menus?.edges ?? []).map(
       (e: { node: { id: string; title: string; handle: string; items?: ExistingMenuItem[] } }) => e.node
@@ -1211,7 +1158,7 @@ async function buildMegaMenu(
 
   // 2 levels under "Nettbutikk" = 3 total (Shopify max)
   // Only include categories that have actual products in Shopify
-  const activeCodes = await getActiveBkgCodes(shopDomain, accessToken);
+  const activeCodes = await getActiveBkgCodes();
   const menuStructure = activeCodes.size > 0
     ? buildMenuStructureFromCodes(activeCodes, 2)
     : buildMenuStructure(2); // fallback to full tree if no active codes found
@@ -1289,7 +1236,7 @@ async function buildMegaMenu(
       }
     }
   `;
-  const updateData = await shopifyGraphQL(shopDomain, accessToken, updateMutation, {});
+  const updateData = await shopifyGraphQL(updateMutation, {});
   const { userErrors } = updateData.data?.menuUpdate ?? {};
   if (userErrors?.length) {
     throw new Error(userErrors.map((e: { message: string }) => e.message).join(", "));
@@ -1310,25 +1257,24 @@ function getUserIdFromJWT(authHeader: string): string | null {
   }
 }
 
-// Look up per-user credentials from user_settings, fall back to env vars
+// Look up per-user Bokbasen credentials from user_settings, fall back to env vars.
+// Shopify is server-wide and handled by _shared/shopify.ts.
 async function getCredentials(userId: string | null): Promise<CredentialBundle> {
   if (userId) {
     try {
       const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
       const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
       const res = await fetch(
-        `${supabaseUrl}/rest/v1/user_settings?user_id=eq.${userId}&select=shopify_shop_domain,shopify_access_token,bokbasen_client_id,bokbasen_client_secret`,
+        `${supabaseUrl}/rest/v1/user_settings?user_id=eq.${userId}&select=bokbasen_client_id,bokbasen_client_secret`,
         { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } }
       );
       const rows = await res.json();
       const settings = rows?.[0];
-      if (settings?.shopify_shop_domain && settings?.shopify_access_token) {
+      if (settings?.bokbasen_client_id || settings?.bokbasen_client_secret) {
         return {
-          shopDomain: settings.shopify_shop_domain,
-          accessToken: settings.shopify_access_token,
           bokbasen: {
-            clientId: settings?.bokbasen_client_id || Deno.env.get("BOKBASEN_CLIENT_ID")!,
-            clientSecret: settings?.bokbasen_client_secret || Deno.env.get("BOKBASEN_CLIENT_SECRET")!,
+            clientId: settings.bokbasen_client_id || Deno.env.get("BOKBASEN_CLIENT_ID")!,
+            clientSecret: settings.bokbasen_client_secret || Deno.env.get("BOKBASEN_CLIENT_SECRET")!,
           },
         };
       }
@@ -1336,8 +1282,6 @@ async function getCredentials(userId: string | null): Promise<CredentialBundle> 
   }
   // Fall back to global env vars (admin user or development)
   return {
-    shopDomain: Deno.env.get("SHOPIFY_SHOP_DOMAIN")!,
-    accessToken: Deno.env.get("SHOPIFY_ACCESS_TOKEN")!,
     bokbasen: {
       clientId: Deno.env.get("BOKBASEN_CLIENT_ID")!,
       clientSecret: Deno.env.get("BOKBASEN_CLIENT_SECRET")!,
@@ -1430,8 +1374,8 @@ const COLLECTION_REORDER_MUTATION = `
   }
 `;
 
-async function feedsList(shopDomain: string, accessToken: string) {
-  const result = await shopifyGraphQL(shopDomain, accessToken, FEEDS_LIST_QUERY, { first: 100, query: "collection_type:custom" });
+async function feedsList() {
+  const result = await shopifyGraphQL(FEEDS_LIST_QUERY, { first: 100, query: "collection_type:custom" });
   const edges = result.data?.collections?.edges ?? [];
   return edges
     .filter((e: any) => !e.node.handle?.startsWith('bkg-'))
@@ -1448,8 +1392,8 @@ async function feedsList(shopDomain: string, accessToken: string) {
     }));
 }
 
-async function feedGet(shopDomain: string, accessToken: string, collectionId: string) {
-  const result = await shopifyGraphQL(shopDomain, accessToken, FEED_GET_QUERY, { id: collectionId, first: 250 });
+async function feedGet(collectionId: string) {
+  const result = await shopifyGraphQL(FEED_GET_QUERY, { id: collectionId, first: 250 });
   const col = result.data?.collection;
   if (!col) throw new Error("Collection not found");
   const products = (col.products?.edges ?? []).map((e: any) => ({
@@ -1476,8 +1420,8 @@ async function feedGet(shopDomain: string, accessToken: string, collectionId: st
   };
 }
 
-async function feedCreate(shopDomain: string, accessToken: string, title: string) {
-  const result = await shopifyGraphQL(shopDomain, accessToken, COLLECTION_CREATE_MUTATION, {
+async function feedCreate(title: string) {
+  const result = await shopifyGraphQL(COLLECTION_CREATE_MUTATION, {
     input: { title, collectionType: "MANUAL" },
   });
   const { collection, userErrors } = result.data?.collectionCreate ?? {};
@@ -1485,16 +1429,16 @@ async function feedCreate(shopDomain: string, accessToken: string, title: string
   return collection;
 }
 
-async function feedDelete(shopDomain: string, accessToken: string, collectionId: string) {
-  const result = await shopifyGraphQL(shopDomain, accessToken, COLLECTION_DELETE_MUTATION, {
+async function feedDelete(collectionId: string) {
+  const result = await shopifyGraphQL(COLLECTION_DELETE_MUTATION, {
     input: { id: collectionId },
   });
   const { userErrors } = result.data?.collectionDelete ?? {};
   if (userErrors?.length) throw new Error(userErrors.map((e: any) => e.message).join(", "));
 }
 
-async function feedAddProducts(shopDomain: string, accessToken: string, collectionId: string, productIds: string[]) {
-  const result = await shopifyGraphQL(shopDomain, accessToken, COLLECTION_ADD_PRODUCTS_MUTATION, {
+async function feedAddProducts(collectionId: string, productIds: string[]) {
+  const result = await shopifyGraphQL(COLLECTION_ADD_PRODUCTS_MUTATION, {
     id: collectionId,
     productIds,
   });
@@ -1502,8 +1446,8 @@ async function feedAddProducts(shopDomain: string, accessToken: string, collecti
   if (userErrors?.length) throw new Error(userErrors.map((e: any) => e.message).join(", "));
 }
 
-async function feedRemoveProducts(shopDomain: string, accessToken: string, collectionId: string, productIds: string[]) {
-  const result = await shopifyGraphQL(shopDomain, accessToken, COLLECTION_REMOVE_PRODUCTS_MUTATION, {
+async function feedRemoveProducts(collectionId: string, productIds: string[]) {
+  const result = await shopifyGraphQL(COLLECTION_REMOVE_PRODUCTS_MUTATION, {
     id: collectionId,
     productIds,
   });
@@ -1511,16 +1455,16 @@ async function feedRemoveProducts(shopDomain: string, accessToken: string, colle
   if (userErrors?.length) throw new Error(userErrors.map((e: any) => e.message).join(", "));
 }
 
-async function feedUpdate(shopDomain: string, accessToken: string, collectionId: string, updates: { sortOrder?: string }) {
+async function feedUpdate(collectionId: string, updates: { sortOrder?: string }) {
   const input: Record<string, unknown> = { id: collectionId };
   if (updates.sortOrder) input.sortOrder = updates.sortOrder;
-  const result = await shopifyGraphQL(shopDomain, accessToken, COLLECTION_UPDATE_MUTATION, { input });
+  const result = await shopifyGraphQL(COLLECTION_UPDATE_MUTATION, { input });
   const { userErrors } = result.data?.collectionUpdate ?? {};
   if (userErrors?.length) throw new Error(userErrors.map((e: any) => e.message).join(", "));
 }
 
-async function feedReorderProducts(shopDomain: string, accessToken: string, collectionId: string, moves: Array<{ id: string; newPosition: string }>) {
-  const result = await shopifyGraphQL(shopDomain, accessToken, COLLECTION_REORDER_MUTATION, {
+async function feedReorderProducts(collectionId: string, moves: Array<{ id: string; newPosition: string }>) {
+  const result = await shopifyGraphQL(COLLECTION_REORDER_MUTATION, {
     id: collectionId,
     moves,
   });
@@ -1539,19 +1483,18 @@ serve(async (req: Request) => {
     const body = req.method !== "GET" ? await req.json().catch(() => ({})) : {};
 
     const userId = getUserIdFromJWT(req.headers.get("Authorization") ?? "");
-    const { shopDomain, accessToken, bokbasen } = await getCredentials(userId);
+    const { bokbasen } = await getCredentials(userId);
 
-    // POST /shopify/test — verify credentials (credentials passed in body, not from DB)
+    // POST /shopify/test — verify the server's Shopify connection (Dev Dashboard app,
+    // credentials from Supabase secrets). Returns shop name, domain and product count.
     if (path === "test" && req.method === "POST") {
-      const { shopDomain: testDomain, accessToken: testToken } = body;
-      if (!testDomain || !testToken) {
-        return new Response(JSON.stringify({ error: "shopDomain og accessToken er påkrevd" }), {
-          status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-      const result = await shopifyGraphQL(testDomain, testToken, `{ shop { name id } }`, {});
-      const shopName = result.data?.shop?.name;
-      return new Response(JSON.stringify({ success: true, shopName }), {
+      const result = await shopifyGraphQL(`{ shop { name myshopifyDomain } productsCount { count } }`, {});
+      return new Response(JSON.stringify({
+        success: true,
+        shopName: result.data?.shop?.name,
+        shopDomain: result.data?.shop?.myshopifyDomain,
+        productsCount: result.data?.productsCount?.count ?? 0,
+      }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
@@ -1562,7 +1505,7 @@ serve(async (req: Request) => {
       if (!book?.isbn) return new Response(JSON.stringify({ error: "Missing book data" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
-      const result = await pushOneBook(shopDomain, accessToken, book);
+      const result = await pushOneBook(book);
       return new Response(JSON.stringify({ success: true, ...result }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -1574,7 +1517,7 @@ serve(async (req: Request) => {
       const results = [];
       for (const book of books) {
         try {
-          const result = await pushOneBook(shopDomain, accessToken, book);
+          const result = await pushOneBook(book);
           results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle });
         } catch (e) {
           results.push({ isbn: book.isbn, success: false, error: String(e) });
@@ -1588,7 +1531,7 @@ serve(async (req: Request) => {
 
     // GET /shopify/analyze-collections — les-bare analyse: tagger, collections, plassering
     if (path === "analyze-collections" && req.method === "GET") {
-      const result = await analyzeCollections(shopDomain, accessToken);
+      const result = await analyzeCollections();
       return new Response(JSON.stringify(result), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -1596,7 +1539,7 @@ serve(async (req: Request) => {
 
     // POST /shopify/sync-collections — tag all Shopify products + create Smart Collections
     if (path === "sync-collections" && req.method === "POST") {
-      const result = await fullSyncCollections(shopDomain, accessToken, bokbasen);
+      const result = await fullSyncCollections(bokbasen);
       return new Response(JSON.stringify(result), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -1604,7 +1547,7 @@ serve(async (req: Request) => {
 
     // GET /shopify/count — hent totalt antall produkter med én query
     if (path === "count" && req.method === "GET") {
-      const result = await shopifyGraphQL(shopDomain, accessToken, `{ productsCount { count } }`, {});
+      const result = await shopifyGraphQL(`{ productsCount { count } }`, {});
       const count: number = result.data?.productsCount?.count ?? 0;
       return new Response(JSON.stringify({ count }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -1620,7 +1563,7 @@ serve(async (req: Request) => {
       const variables: Record<string, unknown> = { first, sortKey, reverse };
       if (after) variables.after = after;
 
-      const result = await shopifyGraphQL(shopDomain, accessToken, CATALOG_PRODUCTS_QUERY, variables);
+      const result = await shopifyGraphQL(CATALOG_PRODUCTS_QUERY, variables);
       const edges: Array<{ cursor: string; node: Record<string, unknown> }> =
         result.data?.products?.edges ?? [];
       const pageInfo: { hasNextPage: boolean; endCursor: string } =
@@ -1695,7 +1638,7 @@ serve(async (req: Request) => {
       const variables: Record<string, unknown> = { first, query: shopifyQuery };
       if (after) variables.after = after;
 
-      const result = await shopifyGraphQL(shopDomain, accessToken, SEARCH_QUERY, variables);
+      const result = await shopifyGraphQL(SEARCH_QUERY, variables);
       const edges: Array<{ cursor: string; node: Record<string, unknown> }> =
         result.data?.products?.edges ?? [];
       const pageInfo: { hasNextPage: boolean; endCursor: string } =
@@ -1753,14 +1696,14 @@ serve(async (req: Request) => {
             if (title !== undefined) input.title = title;
             if (productType !== undefined) input.productType = productType;
             if (vendor !== undefined) input.vendor = vendor;
-            const updateResult = await shopifyGraphQL(shopDomain, accessToken, PRODUCT_UPDATE_MUTATION, { input });
+            const updateResult = await shopifyGraphQL(PRODUCT_UPDATE_MUTATION, { input });
             const { userErrors } = updateResult.data?.productUpdate ?? {};
             if (userErrors?.length) throw new Error(userErrors.map((e: { message: string }) => e.message).join(", "));
           }
 
           // Update price if provided
           if (price !== undefined && variantId) {
-            const varResult = await shopifyGraphQL(shopDomain, accessToken, VARIANT_UPDATE_MUTATION, {
+            const varResult = await shopifyGraphQL(VARIANT_UPDATE_MUTATION, {
               productId,
               variants: [{ id: variantId, price }],
             });
@@ -1801,7 +1744,7 @@ serve(async (req: Request) => {
 
     // GET /shopify/feeds/list — list all manual collections
     if (path === "feeds/list" && req.method === "GET") {
-      const collections = await feedsList(shopDomain, accessToken);
+      const collections = await feedsList();
       return new Response(JSON.stringify(collections), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -1813,7 +1756,7 @@ serve(async (req: Request) => {
       if (!collectionId) return new Response(JSON.stringify({ error: "collectionId er påkrevd" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
-      const result = await feedGet(shopDomain, accessToken, collectionId);
+      const result = await feedGet(collectionId);
       return new Response(JSON.stringify(result), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -1825,7 +1768,7 @@ serve(async (req: Request) => {
       if (!title) return new Response(JSON.stringify({ error: "title er påkrevd" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
-      const collection = await feedCreate(shopDomain, accessToken, title);
+      const collection = await feedCreate(title);
       return new Response(JSON.stringify(collection), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -1837,7 +1780,7 @@ serve(async (req: Request) => {
       if (!collectionId) return new Response(JSON.stringify({ error: "collectionId er påkrevd" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
-      await feedDelete(shopDomain, accessToken, collectionId);
+      await feedDelete(collectionId);
       return new Response(JSON.stringify({ success: true }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -1849,7 +1792,7 @@ serve(async (req: Request) => {
       if (!collectionId || !productIds?.length) return new Response(JSON.stringify({ error: "collectionId og productIds er påkrevd" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
-      await feedAddProducts(shopDomain, accessToken, collectionId, productIds);
+      await feedAddProducts(collectionId, productIds);
       return new Response(JSON.stringify({ success: true }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -1861,7 +1804,7 @@ serve(async (req: Request) => {
       if (!collectionId || !productIds?.length) return new Response(JSON.stringify({ error: "collectionId og productIds er påkrevd" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
-      await feedRemoveProducts(shopDomain, accessToken, collectionId, productIds);
+      await feedRemoveProducts(collectionId, productIds);
       return new Response(JSON.stringify({ success: true }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -1873,7 +1816,7 @@ serve(async (req: Request) => {
       if (!collectionId) return new Response(JSON.stringify({ error: "collectionId er påkrevd" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
-      await feedUpdate(shopDomain, accessToken, collectionId, { sortOrder });
+      await feedUpdate(collectionId, { sortOrder });
       return new Response(JSON.stringify({ success: true }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -1885,7 +1828,7 @@ serve(async (req: Request) => {
       if (!collectionId || !moves?.length) return new Response(JSON.stringify({ error: "collectionId og moves er påkrevd" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
-      await feedReorderProducts(shopDomain, accessToken, collectionId, moves);
+      await feedReorderProducts(collectionId, moves);
       return new Response(JSON.stringify({ success: true }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -1894,7 +1837,7 @@ serve(async (req: Request) => {
     // POST /shopify/build-menu — bygg megameny i Shopify Navigation
     if (path === "build-menu" && req.method === "POST") {
       const menuHandle: string = body.menuHandle || "kategorier";
-      const result = await buildMegaMenu(shopDomain, accessToken, menuHandle);
+      const result = await buildMegaMenu(menuHandle);
       return new Response(JSON.stringify(result), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
