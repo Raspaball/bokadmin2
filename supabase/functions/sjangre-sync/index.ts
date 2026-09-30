@@ -61,15 +61,20 @@ async function getBokbasenConfig(userId: string | null): Promise<BokbasenConfig 
   return { clientId, clientSecret, subscription: Deno.env.get("BOKBASEN_SUBSCRIPTION") || "extended" };
 }
 
+// Samme innlogging og ONIX-adresse som bokbasen/ og shopify/ (auth.bokbasen.io,
+// metadata-API). Tidligere login.bokbasen.io + api.bokbasen.io/onix/v2 feilet
+// for alle oppslag (testet mot 2.0 2026-09-30).
+const BOKBASEN_ONIX_URL = "https://api.bokbasen.io/metadata/export/onix/v2";
+
 async function getBokbasenToken(config: BokbasenConfig): Promise<string> {
-  const res = await fetch("https://login.bokbasen.io/oauth/token", {
+  const res = await fetch("https://auth.bokbasen.io/oauth/token", {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "client_credentials",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
       client_id: config.clientId,
       client_secret: config.clientSecret,
-      audience: "https://api.bokbasen.io/",
+      audience: "https://api.bokbasen.io/metadata/",
+      grant_type: "client_credentials",
     }),
   });
   if (!res.ok) throw new Error(`Bokbasen auth failed: ${res.status}`);
@@ -77,19 +82,17 @@ async function getBokbasenToken(config: BokbasenConfig): Promise<string> {
   return data.access_token;
 }
 
-// Extract bokgruppekode (SubjectSchemeIdentifier=23) from ONIX XML
-function extractBokgruppekode(xml: string): string | null {
-  const subjects = xml.matchAll(/<Subject[\s\S]*?<\/Subject>/gi);
-  for (const match of subjects) {
-    const block = match[0];
-    if (
-      block.includes("<SubjectSchemeIdentifier>23</SubjectSchemeIdentifier>") ||
-      block.includes("<b067>23</b067>")
-    ) {
-      const m = block.match(/<SubjectCode>(\d+)<\/SubjectCode>/) ||
-                block.match(/<b069>(\d+)<\/b069>/);
-      if (m) return m[1];
-    }
+// Bokgruppekode = SubjectSchemeIdentifier 37 (som bokbasen/ og shopify/).
+// Navnerom-prefikser fjernes først, slik fetchBokgruppekode i shopify/ gjør.
+function extractBokgruppekode(rawXml: string): string | null {
+  const xml = rawXml
+    .replace(/\s+xmlns[^"]*"[^"]*"/g, "")
+    .replace(/<(\w+:)/g, "<")
+    .replace(/<\/(\w+:)/g, "</");
+  for (const s of xml.matchAll(/<Subject[\s\S]*?<\/Subject>/gi)) {
+    const scheme = s[0].match(/<SubjectSchemeIdentifier[^>]*>(.*?)<\/SubjectSchemeIdentifier>/i)?.[1];
+    const code = s[0].match(/<SubjectCode[^>]*>(.*?)<\/SubjectCode>/i)?.[1]?.trim();
+    if (scheme === "37" && code) return code;
   }
   return null;
 }
@@ -139,6 +142,21 @@ const COLLECTION_NAMES: Record<string, string> = {
 };
 
 type SupabaseClient = ReturnType<typeof getSupabase>;
+
+// ISBN → bokgruppekode fra books (Import) og bokgruppe_cache (fylt av enrich).
+// Ikke brukerbegrenset — koden er den samme for alle.
+async function loadKodeMap(supabase: SupabaseClient, isbns: string[]): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  if (!isbns.length) return map;
+  const [{ data: cached }, { data: fromBooks }] = await Promise.all([
+    supabase.from("bokgruppe_cache").select("isbn, bokgruppekode").in("isbn", isbns),
+    supabase.from("books").select("isbn, bokgruppekode").in("isbn", isbns).not("bokgruppekode", "is", null),
+  ]);
+  for (const r of [...(cached ?? []), ...(fromBooks ?? [])] as { isbn: string; bokgruppekode: string }[]) {
+    if (r.bokgruppekode) map.set(r.isbn, r.bokgruppekode);
+  }
+  return map;
+}
 
 // ── Collections helper ────────────────────────────────────────────────────────
 
@@ -293,17 +311,9 @@ async function processSyncBatch(jobId: string) {
         return;
       }
 
-      // Batch-lookup ISBNs in local books cache (not user-scoped — isbn→kode is universal)
+      // Batch-lookup ISBNs in books + bokgruppe_cache
       const isbns = products.map(p => p.isbn).filter((i): i is string => !!i);
-      const { data: cachedBooks } = await supabase
-        .from("books")
-        .select("isbn, bokgruppekode")
-        .in("isbn", isbns)
-        .not("bokgruppekode", "is", null);
-
-      const kodeMap = new Map(
-        (cachedBooks ?? []).map((b: { isbn: string; bokgruppekode: string }) => [b.isbn, b.bokgruppekode])
-      );
+      const kodeMap = await loadKodeMap(supabase, isbns);
 
       for (const product of products) {
         if (Date.now() - startTime > TIMEOUT_MS) {
@@ -433,16 +443,9 @@ async function processEnrichBatch(jobId: string) {
       return;
     }
 
-    // Check which ISBNs are already cached with bokgruppekode
+    // Check which ISBNs are already cached with bokgruppekode (books + bokgruppe_cache)
     const isbns = products.map(p => p.isbn).filter((i): i is string => !!i);
-    const { data: cachedBooks } = await supabase
-      .from("books")
-      .select("isbn, bokgruppekode")
-      .in("isbn", isbns);
-
-    const cachedMap = new Map(
-      (cachedBooks ?? []).map((b: { isbn: string; bokgruppekode: string | null }) => [b.isbn, b.bokgruppekode])
-    );
+    const cachedMap = await loadKodeMap(supabase, isbns);
 
     let bokbasenToken: string | null = null;
 
@@ -466,7 +469,7 @@ async function processEnrichBatch(jobId: string) {
       try {
         if (!bokbasenToken) bokbasenToken = await getBokbasenToken(bokbasenConfig);
 
-        const onixRes = await fetch(`https://api.bokbasen.io/onix/v2/${isbn}`, {
+        const onixRes = await fetch(`${BOKBASEN_ONIX_URL}/${isbn}`, {
           headers: { Authorization: `Bearer ${bokbasenToken}` },
         });
 
@@ -478,26 +481,13 @@ async function processEnrichBatch(jobId: string) {
           const bokgruppekode = extractBokgruppekode(xml);
 
           if (bokgruppekode) {
-            // Upsert to books table: update existing or insert minimal record
-            const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-            const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-            // Try update first
-            const updateRes = await fetch(
-              `${supabaseUrl}/rest/v1/books?isbn=eq.${encodeURIComponent(isbn)}&bokgruppekode=is.null`,
-              {
-                method: "PATCH",
-                headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, "Content-Type": "application/json", Prefer: "return=minimal" },
-                body: JSON.stringify({ bokgruppekode }),
-              }
-            );
-            // If nothing was updated (no row exists), insert minimal record
-            if (updateRes.headers.get("content-range") === "*/0" || updateRes.status === 404) {
-              await fetch(`${supabaseUrl}/rest/v1/books`, {
-                method: "POST",
-                headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, "Content-Type": "application/json", Prefer: "resolution=ignore-duplicates" },
-                body: JSON.stringify({ isbn, bokgruppekode, user_id: userId, title: isbn }),
-              });
-            }
+            // Lagre i bokgruppe_cache. Ingen nye rader i books: books er også
+            // arbeidslista på Import-siden (se migrasjonen 20260930120000_bokgruppe_cache).
+            const { error: cacheErr } = await supabase.from("bokgruppe_cache")
+              .upsert({ isbn, bokgruppekode, updated_at: new Date().toISOString() }, { onConflict: "isbn" });
+            if (cacheErr) throw new Error(`bokgruppe_cache: ${cacheErr.message}`);
+            // Fyll inn koden på en eksisterende bok som mangler den
+            await supabase.from("books").update({ bokgruppekode }).eq("isbn", isbn).is("bokgruppekode", null);
             config.found_kode++;
           } else {
             config.no_data++;

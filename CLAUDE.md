@@ -34,6 +34,7 @@ Prøv i så stor grad som mulig å bruke felles datakilder for viktige data som 
 |---|---|---|
 | ONIX List 65 (tilgjengelighetskoder) | `src/app/utils/availabilityCodes.ts` | Import.tsx, BokbasenOppslag.tsx, TilgjengelighetTab.tsx; availability-check/index.ts har kopi. Full referanse: https://ns.editeur.org/onix/en/65 |
 | Bokgruppekode → navn-mapping | `COLLECTION_NAMES` i shopify/index.ts | shopify-edge function (autoritativ) |
+| ISBN → bokgruppekode (cache) | Tabellen `bokgruppe_cache` + `books.bokgruppekode` via `loadKodeMap()` i sjangre-sync | sjangre-sync (enrich skriver, tagging leser). **Skriv aldri minimale rader i `books`** — books er arbeidslista på Import-siden, og «Tøm liste» sletter hele tabellen |
 | Bokgruppekode → bkg-tagg-hierarki | `bokgruppeTagsForKode()` i shopify/index.ts | pushOneBook (tagging ved eksport til Shopify) |
 | Handle-regel (tittel-forfatter-ISBN-13) | `buildBookHandle()` i `supabase/functions/_shared/handle.js` | pushOneBook, CSV-eksport, handle-migrering, scripts/migrate-handles.mjs |
 | ISBN fra Shopify-produkt | `extractIsbn()` i `supabase/functions/_shared/isbn.js` (bok.isbn → strekkode → SKU → ISBN-handle) | price-update, availability-check, sjangre-sync, shopify (samlinger, migrering), scripts |
@@ -46,7 +47,7 @@ Hvis du legger til data som brukes i mer enn én komponent eller Edge Function, 
 
 ### Planlagte konsolideringsoppgaver (ikke gjennomført ennå)
 
-1. **Bokbasen auth-URL i sjangre-sync** — `sjangre-sync/index.ts` bruker `https://login.bokbasen.io/oauth/token` mens alle andre funksjoner bruker `https://auth.bokbasen.io/oauth/token`. Bør standardiseres (én linjefiks + redeploy). Lav risiko siden auth.bokbasen.io er den kanoniske URL-en brukt av alle andre funksjoner.
+1. ~~**Bokbasen auth-URL i sjangre-sync**~~ — **Gjort 2026-09-30.** sjangre-sync bruker nå `auth.bokbasen.io`, `/metadata/export/onix/v2/` og SubjectSchemeIdentifier 37, som `bokbasen/` og `shopify/`. Den gamle varianten (login.bokbasen.io, `/onix/v2/`, skjema 23) feilet for alle oppslag.
 
 2. **`BOKGRUPPE_LABELS` i Sjangre.tsx → bruk COLLECTION_NAMES** — Sjangre.tsx vedlikeholder sin egen kopi av bokgruppe-labelene (kun 3-sifrede koder + separat `HOOFDKATEGORI` for 1-sifrede). Den autoritative kilden er `COLLECTION_NAMES` i `shopify/index.ts` som har 1-, 2- og 3-sifrede koder. Plan: opprett `src/app/utils/bokgruppe.ts` som eksporterer COLLECTION_NAMES, importer i Sjangre.tsx, fjern BOKGRUPPE_LABELS og HOOFDKATEGORI.
 
@@ -103,7 +104,7 @@ All functions are called via `callEdgeFunction()` in `api.ts`. Passes the user's
 
 ### Database tables (Supabase PostgreSQL)
 
-`books`, `banners`, `featured_books`, `sync_log`, `shopify_catalog_snapshots`, `scheduled_tasks`, `jobs` tables. Schema in `supabase/migrations/`.
+`books`, `banners`, `featured_books`, `sync_log`, `shopify_catalog_snapshots`, `scheduled_tasks`, `jobs`, `bokgruppe_cache` tables. Schema in `supabase/migrations/`.
 
 All tables have a `user_id uuid` column (nullable) for multi-tenant isolation. Table `user_settings` stores per-user Shopify + Bokbasen credentials + `setup_completed` flag. A trigger `set_user_id_on_insert()` auto-fills `user_id = auth.uid()` on every insert from an authenticated session.
 
