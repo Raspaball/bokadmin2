@@ -3,6 +3,10 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { getShopDomain, shopifyGraphQL } from "../_shared/shopify.ts";
+import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
+
+// Felt extractIsbn trenger (bok.isbn, strekkode, SKU) — handle er ikke lenger ISBN
+const PRODUCT_ISBN_FIELDS = `${BOK_ISBN_FIELD} variants(first: 1) { nodes { barcode sku } }`;
 
 // ── Bokbasen auth (for ISBN → bokgruppekode lookup during catalog sync) ───────
 const BOKBASEN_AUTH_URL = "https://auth.bokbasen.io/oauth/token";
@@ -487,7 +491,7 @@ const ALL_PRODUCTS_QUERY = `
     products(first: $first, after: $after) {
       edges {
         cursor
-        node { id handle tags }
+        node { id handle tags ${PRODUCT_ISBN_FIELDS} }
       }
       pageInfo { hasNextPage }
     }
@@ -669,7 +673,7 @@ interface FullSyncResult {
 interface AnalyzeResult {
   totalProducts: number;
   alreadyTagged: number;   // har bkg-NNN tag allerede
-  needsTagging: number;    // mangler bkg-NNN men har ISBN-handle → kan fikses
+  needsTagging: number;    // mangler bkg-NNN men har ISBN (bok.isbn/strekkode/SKU) → kan fikses
   unplaceable: number;     // mangler bkg-tag og er ikke ISBN → kan ikke plasseres automatisk
   collections: {
     existing: number;      // bkg-* collections som allerede finnes i Shopify
@@ -679,7 +683,7 @@ interface AnalyzeResult {
 }
 
 async function analyzeCollections(): Promise<AnalyzeResult> {
-  // Hent alle produkter (kun id, handle, tags)
+  // Hent alle produkter (handle, tags og ISBN-feltene)
   const allProducts: Array<{ handle: string; tags: string[] }> = [];
   let after: string | null = null;
 
@@ -690,7 +694,7 @@ async function analyzeCollections(): Promise<AnalyzeResult> {
       query($first: Int!, $after: String) {
         products(first: $first, after: $after) {
           pageInfo { hasNextPage endCursor }
-          edges { cursor node { handle tags } }
+          edges { cursor node { handle tags ${PRODUCT_ISBN_FIELDS} } }
         }
       }
     `, variables);
@@ -712,7 +716,7 @@ async function analyzeCollections(): Promise<AnalyzeResult> {
     if (tag3) {
       alreadyTagged++;
       koderInUse.add(tag3.slice(4)); // strip "bkg-"
-    } else if (/^\d{10,13}$/.test(product.handle)) {
+    } else if (extractIsbn(product)) {
       needsTagging++;
     } else {
       unplaceable++;
@@ -852,16 +856,17 @@ async function fullSyncCollections(
 
   // ── Step 2: Determine bokgruppekode for each product ──────────────────────
   // If a product already has a 3-digit bkg-NNN tag, we know its kode.
-  // Otherwise look it up from Bokbasen (handle = ISBN).
+  // Otherwise look it up from Bokbasen by ISBN (bok.isbn / strekkode / SKU / ISBN-handle).
   const productToKode = new Map<string, string>(); // product.id → kode
-  const needsLookup: Array<{ id: string; handle: string; tags: string[] }> = [];
+  const needsLookup: Array<{ id: string; isbn: string }> = [];
 
   for (const product of allProducts) {
     const existing = product.tags.find(t => /^bkg-\d{3}$/.test(t));
     if (existing) {
       productToKode.set(product.id, existing.slice(4)); // strip "bkg-"
-    } else if (/^\d{10,13}$/.test(product.handle)) {
-      needsLookup.push(product); // ISBN-shaped handle, look up Bokbasen
+    } else {
+      const isbn = extractIsbn(product);
+      if (isbn) needsLookup.push({ id: product.id, isbn });
     }
   }
 
@@ -871,7 +876,7 @@ async function fullSyncCollections(
     const batch = needsLookup.slice(i, i + batchSize);
     const results = await Promise.allSettled(
       batch.map(async (p) => {
-        const kode = await fetchBokgruppekode(p.handle, bokbasenCredentials);
+        const kode = await fetchBokgruppekode(p.isbn, bokbasenCredentials);
         if (!kode) throw new Error("no_kode");
         return { id: p.id, kode };
       })

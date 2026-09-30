@@ -4,6 +4,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { shopifyGraphQL } from "../_shared/shopify.ts";
+import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 
 const PAGE_SIZE = 250;
 const TIMEOUT_MS = 45_000; // Leave 15s headroom
@@ -26,6 +27,7 @@ interface ShopifyProduct {
   id: string;
   status: string;
   handle: string;
+  bokIsbn?: { value: string } | null;
   variants: {
     edges: Array<{
       node: {
@@ -145,6 +147,7 @@ async function fetchShopifyProductsPage(
             id
             status
             handle
+            ${BOK_ISBN_FIELD}
             variants(first: 1) {
               edges {
                 node {
@@ -186,24 +189,7 @@ async function getShopifyProductCount(_userId: string | null): Promise<number> {
   }
 }
 
-function extractIsbn(product: ShopifyProduct): string | null {
-  const variant = product.variants?.edges?.[0]?.node;
-
-  if (variant?.barcode && /^\d{10,13}$/.test(variant.barcode)) {
-    return variant.barcode;
-  }
-
-  const sku = variant?.inventoryItem?.sku;
-  if (sku && /^\d{10,13}$/.test(sku)) {
-    return sku;
-  }
-
-  if (product.handle && /^\d{10,13}$/.test(product.handle)) {
-    return product.handle;
-  }
-
-  return null;
-}
+// extractIsbn: felles regel i _shared/isbn.js (bok.isbn → strekkode → SKU → ISBN-handle)
 
 // ── ONIX List 65 → Shopify status mapping ───────────────────────────────────
 // Canonical source: src/app/utils/availabilityCodes.ts (frontend).

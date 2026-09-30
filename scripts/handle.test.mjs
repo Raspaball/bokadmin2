@@ -66,3 +66,28 @@ test("ISBN normaliseres (bindestreker, ISBN-10)", () => {
   assert.equal(normalizeIsbn("5784397765"), null, "strekkode som ikke er gyldig ISBN-10");
   assert.equal(normalizeIsbn("9788202921539"), null, "feil kontrollsiffer");
 });
+
+// ── extractIsbn (supabase/functions/_shared/isbn.js) ─────────────────────────
+import { extractIsbn } from "../supabase/functions/_shared/isbn.js";
+
+test("extractIsbn: bok.isbn går foran strekkode, SKU og handle", () => {
+  assert.equal(extractIsbn({
+    handle: "avkledd-nina-brochmann-9788203461392",
+    bokIsbn: { value: "9788203461392" },
+    variants: { nodes: [{ barcode: "9788202921538", sku: "9788202921538" }] },
+  }), "9788203461392");
+});
+
+test("extractIsbn: strekkode, så SKU (edges eller nodes, sku på inventoryItem)", () => {
+  assert.equal(extractIsbn({ handle: "x", variants: { edges: [{ node: { barcode: "978-82-02-92153-8" } }] } }), "9788202921538");
+  assert.equal(extractIsbn({ handle: "x", variants: { edges: [{ node: { barcode: "", inventoryItem: { sku: "9788202921538" } } }] } }), "9788202921538");
+  assert.equal(extractIsbn({ handle: "x", variants: { nodes: [{ barcode: "5784397765", sku: "9788202921538" }] } }), "9788202921538");
+});
+
+test("extractIsbn: handle bare når den er et rent ISBN", () => {
+  assert.equal(extractIsbn({ handle: "9788203461392", variants: { nodes: [] } }), "9788203461392");
+  // ny handle med ISBN i slutten skal ikke tolkes (bruk bok.isbn/strekkode/SKU)
+  assert.equal(extractIsbn({ handle: "avkledd-nina-brochmann-9788203461392", variants: { nodes: [] } }), null);
+  assert.equal(extractIsbn({ handle: "notatbok-a5", variants: { nodes: [{ barcode: null, sku: "NB-A5" }] } }), null);
+  assert.equal(extractIsbn(null), null);
+});

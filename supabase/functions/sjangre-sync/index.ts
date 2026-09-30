@@ -4,6 +4,10 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { shopifyGraphQL } from "../_shared/shopify.ts";
+import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
+
+// Felt extractIsbn trenger (bok.isbn, strekkode, SKU) — handle er ikke lenger ISBN
+const PRODUCT_ISBN_FIELDS = `${BOK_ISBN_FIELD} variants(first: 1) { nodes { barcode sku } }`;
 
 const PAGE_SIZE = 50;
 const TIMEOUT_MS = 100_000;
@@ -268,7 +272,7 @@ async function processSyncBatch(jobId: string) {
         query($first: Int!, $after: String) {
           products(first: $first, after: $after) {
             pageInfo { hasNextPage endCursor }
-            edges { node { id handle tags } }
+            edges { node { id handle tags ${PRODUCT_ISBN_FIELDS} } }
           }
         }`, vars);
 
@@ -277,7 +281,9 @@ async function processSyncBatch(jobId: string) {
         edges: Array<{ node: { id: string; handle: string; tags: string[] } }>;
       } | null;
 
-      const products = productsData?.edges?.map(e => e.node) ?? [];
+      // ISBN hentes fra bok.isbn / strekkode / SKU — handle er ikke lenger ISBN
+      const products = (productsData?.edges?.map(e => e.node) ?? [])
+        .map(p => ({ ...p, isbn: extractIsbn(p) }));
       const pageInfo = productsData?.pageInfo;
 
       if (products.length === 0) {
@@ -288,7 +294,7 @@ async function processSyncBatch(jobId: string) {
       }
 
       // Batch-lookup ISBNs in local books cache (not user-scoped — isbn→kode is universal)
-      const isbns = products.map(p => p.handle);
+      const isbns = products.map(p => p.isbn).filter((i): i is string => !!i);
       const { data: cachedBooks } = await supabase
         .from("books")
         .select("isbn, bokgruppekode")
@@ -305,7 +311,7 @@ async function processSyncBatch(jobId: string) {
           return;
         }
 
-        const kode = kodeMap.get(product.handle);
+        const kode = product.isbn ? kodeMap.get(product.isbn) : undefined;
 
         if (!kode) {
           config.no_kode++;
@@ -403,7 +409,7 @@ async function processEnrichBatch(jobId: string) {
       query($first: Int!, $after: String) {
         products(first: $first, after: $after) {
           pageInfo { hasNextPage endCursor }
-          edges { node { handle } }
+          edges { node { handle ${PRODUCT_ISBN_FIELDS} } }
         }
       }`, vars);
 
@@ -412,7 +418,8 @@ async function processEnrichBatch(jobId: string) {
       edges: Array<{ node: { handle: string } }>;
     } | null;
 
-    const products = productsData?.edges?.map(e => e.node) ?? [];
+    const products = (productsData?.edges?.map(e => e.node) ?? [])
+      .map(p => ({ ...p, isbn: extractIsbn(p) }));
     const pageInfo = productsData?.pageInfo;
 
     if (products.length === 0) {
@@ -427,7 +434,7 @@ async function processEnrichBatch(jobId: string) {
     }
 
     // Check which ISBNs are already cached with bokgruppekode
-    const isbns = products.map(p => p.handle).filter(h => /^\d{10,13}$/.test(h));
+    const isbns = products.map(p => p.isbn).filter((i): i is string => !!i);
     const { data: cachedBooks } = await supabase
       .from("books")
       .select("isbn, bokgruppekode")
@@ -445,8 +452,8 @@ async function processEnrichBatch(jobId: string) {
         return;
       }
 
-      const isbn = product.handle;
-      if (!/^\d{10,13}$/.test(isbn)) { config.processed++; continue; }
+      const isbn = product.isbn;
+      if (!isbn) { config.processed++; continue; }
 
       // Already cached with bokgruppekode
       if (cachedMap.has(isbn) && cachedMap.get(isbn)) {

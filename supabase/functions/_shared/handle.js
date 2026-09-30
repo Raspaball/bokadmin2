@@ -1,3 +1,4 @@
+/* @ts-self-types="./handle.d.ts" */
 // supabase/functions/_shared/handle.js
 // Felles regel for product handles i Bokadmin 2.0.
 //
