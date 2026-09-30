@@ -110,7 +110,7 @@ function LiveCatalog({ onSnapshotDone, onSwitchToSnapshots }: LiveCatalogProps) 
   const [loading, setLoading] = useState(false);
   const [fetched, setFetched] = useState(false);
 
-  // Bokbasen format map: isbn (handle) → format string
+  // Bokbasen format map: isbn → format string
   const [formatMap, setFormatMap] = useState<Record<string, string>>({});
 
   // Product detail dialog
@@ -152,7 +152,7 @@ function LiveCatalog({ onSnapshotDone, onSwitchToSnapshots }: LiveCatalogProps) 
     [products]
   );
   const formats = useMemo(
-    () => [...new Set(products.map(p => formatMap[p.handle]).filter(Boolean))].sort(),
+    () => [...new Set(products.map(p => formatMap[p.isbn ?? '']).filter(Boolean))].sort(),
     [products, formatMap]
   );
 
@@ -161,14 +161,14 @@ function LiveCatalog({ onSnapshotDone, onSwitchToSnapshots }: LiveCatalogProps) 
     let list = products;
     if (filterStatus) list = list.filter(p => p.status === filterStatus);
     if (filterVendor) list = list.filter(p => p.vendor === filterVendor);
-    if (filterFormat) list = list.filter(p => formatMap[p.handle] === filterFormat);
+    if (filterFormat) list = list.filter(p => formatMap[p.isbn ?? ''] === filterFormat);
     return [...list].sort((a, b) => {
       let cmp = 0;
       if (sortField === 'price') {
         cmp = parseFloat(a.price || '0') - parseFloat(b.price || '0');
       } else if (sortField === 'format') {
-        const ai = FORMAT_ORDER.indexOf(formatMap[a.handle] ?? '');
-        const bi = FORMAT_ORDER.indexOf(formatMap[b.handle] ?? '');
+        const ai = FORMAT_ORDER.indexOf(formatMap[a.isbn ?? ''] ?? '');
+        const bi = FORMAT_ORDER.indexOf(formatMap[b.isbn ?? ''] ?? '');
         cmp = (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
       } else {
         const val = (p: ShopifyCatalogProduct) =>
@@ -301,7 +301,7 @@ function LiveCatalog({ onSnapshotDone, onSwitchToSnapshots }: LiveCatalogProps) 
       }
 
       // Look up formats from Bokbasen
-      const isbns = result.products.map(p => p.handle);
+      const isbns = result.products.map(p => p.isbn).filter((i): i is string => !!i);
       try {
         const fmap = await bokbasen.fetchFormats(isbns);
         setFormatMap(prev => ({ ...prev, ...fmap }));
@@ -384,7 +384,7 @@ function LiveCatalog({ onSnapshotDone, onSwitchToSnapshots }: LiveCatalogProps) 
       }
 
       // Look up formats from Bokbasen for the ISBNs on this page
-      const isbns = result.products.map(p => p.handle);
+      const isbns = result.products.map(p => p.isbn).filter((i): i is string => !!i);
       try {
         const fmap = await bokbasen.fetchFormats(isbns);
         setFormatMap(prev => ({ ...prev, ...fmap }));
@@ -640,7 +640,7 @@ function LiveCatalog({ onSnapshotDone, onSwitchToSnapshots }: LiveCatalogProps) 
                     {renderEditableCell(p, 'title', 'font-medium overflow-hidden')}
                     {renderEditableCell(p, 'productType', 'text-gray-600 overflow-hidden')}
                     {renderEditableCell(p, 'vendor', 'text-gray-600 overflow-hidden')}
-                    <TableCell className="text-gray-500 text-sm overflow-hidden"><div className="truncate">{formatMap[p.handle] ?? '—'}</div></TableCell>
+                    <TableCell className="text-gray-500 text-sm overflow-hidden"><div className="truncate">{formatMap[p.isbn ?? ''] ?? '—'}</div></TableCell>
                     <TableCell className="text-gray-500 text-sm overflow-hidden"><div className="truncate">{(p.collections ?? []).join(', ') || '—'}</div></TableCell>
                     {renderEditableCell(p, 'price', 'text-right tabular-nums overflow-hidden', <>{formatPrice(p.price)}</>)}
                     <TableCell>{statusBadge(p.status)}</TableCell>
@@ -688,7 +688,8 @@ function LiveCatalog({ onSnapshotDone, onSwitchToSnapshots }: LiveCatalogProps) 
                   {detailProduct.price && (
                     <p><span className="text-gray-500">Pris:</span> <span className="font-medium">{formatPrice(detailProduct.price)} kr</span></p>
                   )}
-                  <p><span className="text-gray-500">ISBN:</span> <span className="font-mono text-xs">{detailProduct.handle}</span></p>
+                  <p><span className="text-gray-500">ISBN:</span> <span className="font-mono text-xs">{detailProduct.isbn ?? '—'}</span></p>
+                  <p><span className="text-gray-500">Handle:</span> <span className="font-mono text-xs break-all">{detailProduct.handle}</span></p>
                   <div className="pt-1">{statusBadge(detailProduct.status)}</div>
                 </div>
               </div>

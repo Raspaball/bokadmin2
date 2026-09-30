@@ -117,6 +117,8 @@ export interface BokbasenSearchResult {
 export interface ShopifyCatalogProduct {
   id: string;
   handle: string;
+  // Fra bok.isbn / strekkode / SKU (extractIsbn på serveren). Handle er ikke ISBN.
+  isbn: string | null;
   title: string;
   productType: string;
   vendor: string;

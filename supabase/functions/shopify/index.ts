@@ -552,6 +552,7 @@ const CATALOG_PRODUCTS_QUERY = `
           seoTitleMf: metafield(namespace: "global", key: "title_tag") { value }
           seoDescMf: metafield(namespace: "global", key: "description_tag") { value }
           collections(first: 10) { edges { node { title } } }
+          ${BOK_ISBN_FIELD}
         }
       }
       pageInfo { hasNextPage endCursor }
@@ -1965,6 +1966,33 @@ async function rollbackHandleJob(jobId: string | null, userId: string | null) {
   return { jobId: job.id, total: pending.length, restored, failed, remaining, timedOut, errors: errors.slice(0, 20) };
 }
 
+// Katalogprodukt til frontend (katalog, katalogsøk). isbn kommer fra extractIsbn —
+// handle er ikke lenger ISBN for nye og migrerte bøker.
+function toCatalogProduct(node: Record<string, unknown>) {
+  const variant = (node.variants as { edges: { node: Record<string, unknown> }[] })?.edges?.[0]?.node ?? {};
+  return {
+    isbn: extractIsbn(node),
+    id: node.id as string,
+    handle: node.handle as string,
+    title: node.title as string,
+    productType: (node.productType as string) ?? "",
+    vendor: (node.vendor as string) ?? "",
+    status: node.status as string,
+    descriptionHtml: (node.descriptionHtml as string) ?? "",
+    tags: (node.tags as string[]) ?? [],
+    createdAt: (node.createdAt as string) ?? "",
+    price: (variant.price as string) ?? "",
+    compareAtPrice: (variant.compareAtPrice as string | null) ?? null,
+    sku: (variant.sku as string) ?? "",
+    barcode: (variant.barcode as string) ?? "",
+    variantId: (variant.id as string) ?? "",
+    imageUrl: ((node.featuredMedia as { preview?: { image?: { url: string } | null } } | null)?.preview?.image?.url) ?? "",
+    seoTitle: ((node.seoTitleMf as { value: string } | null)?.value) ?? "",
+    seoDescription: ((node.seoDescMf as { value: string } | null)?.value) ?? "",
+    collections: ((node.collections as { edges: { node: { title: string } }[] })?.edges ?? []).map(e => e.node.title),
+  };
+}
+
 // ── Main handler ─────────────────────────────────────────────────────────────
 
 serve(async (req: Request) => {
@@ -2110,29 +2138,7 @@ serve(async (req: Request) => {
       const pageInfo: { hasNextPage: boolean; endCursor: string } =
         result.data?.products?.pageInfo ?? {};
 
-      const products = edges.map(({ node }) => {
-        const variant = (node.variants as { edges: { node: Record<string, unknown> }[] })?.edges?.[0]?.node ?? {};
-        return {
-          id: node.id as string,
-          handle: node.handle as string,
-          title: node.title as string,
-          productType: (node.productType as string) ?? "",
-          vendor: (node.vendor as string) ?? "",
-          status: node.status as string,
-          descriptionHtml: (node.descriptionHtml as string) ?? "",
-          tags: (node.tags as string[]) ?? [],
-          createdAt: (node.createdAt as string) ?? "",
-          price: (variant.price as string) ?? "",
-          compareAtPrice: (variant.compareAtPrice as string | null) ?? null,
-          sku: (variant.sku as string) ?? "",
-          barcode: (variant.barcode as string) ?? "",
-          variantId: (variant.id as string) ?? "",
-          imageUrl: ((node.featuredMedia as { preview?: { image?: { url: string } | null } } | null)?.preview?.image?.url) ?? "",
-          seoTitle: ((node.seoTitleMf as { value: string } | null)?.value) ?? "",
-          seoDescription: ((node.seoDescMf as { value: string } | null)?.value) ?? "",
-          collections: ((node.collections as { edges: { node: { title: string } }[] })?.edges ?? []).map(e => e.node.title),
-        };
-      });
+      const products = edges.map(({ node }) => toCatalogProduct(node));
 
       return new Response(JSON.stringify({ products, pageInfo }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -2148,9 +2154,9 @@ serve(async (req: Request) => {
         });
       }
 
-      // Build Shopify search query — search across title, product_type (author), vendor, and handle (ISBN)
+      // Build Shopify search query — title, product_type (author), vendor, handle, and ISBN via barcode/SKU
       const escaped = searchQuery.replace(/"/g, '\\"');
-      const shopifyQuery = `title:*${escaped}* OR product_type:*${escaped}* OR vendor:*${escaped}* OR handle:*${escaped}*`;
+      const shopifyQuery = `title:*${escaped}* OR product_type:*${escaped}* OR vendor:*${escaped}* OR handle:*${escaped}* OR barcode:${escaped} OR sku:${escaped}`;
       const after: string | undefined = body.after || undefined;
       const first = Math.min(body.first || 50, 100);
 
@@ -2169,6 +2175,7 @@ serve(async (req: Request) => {
                 seoTitleMf: metafield(namespace: "global", key: "title_tag") { value }
                 seoDescMf: metafield(namespace: "global", key: "description_tag") { value }
                 collections(first: 10) { edges { node { title } } }
+                ${BOK_ISBN_FIELD}
               }
             }
             pageInfo { hasNextPage endCursor }
@@ -2185,29 +2192,7 @@ serve(async (req: Request) => {
       const pageInfo: { hasNextPage: boolean; endCursor: string } =
         result.data?.products?.pageInfo ?? {};
 
-      const products = edges.map(({ node }) => {
-        const variant = (node.variants as { edges: { node: Record<string, unknown> }[] })?.edges?.[0]?.node ?? {};
-        return {
-          id: node.id as string,
-          handle: node.handle as string,
-          title: node.title as string,
-          productType: (node.productType as string) ?? "",
-          vendor: (node.vendor as string) ?? "",
-          status: node.status as string,
-          descriptionHtml: (node.descriptionHtml as string) ?? "",
-          tags: (node.tags as string[]) ?? [],
-          createdAt: (node.createdAt as string) ?? "",
-          price: (variant.price as string) ?? "",
-          compareAtPrice: (variant.compareAtPrice as string | null) ?? null,
-          sku: (variant.sku as string) ?? "",
-          barcode: (variant.barcode as string) ?? "",
-          variantId: (variant.id as string) ?? "",
-          imageUrl: ((node.featuredMedia as { preview?: { image?: { url: string } | null } } | null)?.preview?.image?.url) ?? "",
-          seoTitle: ((node.seoTitleMf as { value: string } | null)?.value) ?? "",
-          seoDescription: ((node.seoDescMf as { value: string } | null)?.value) ?? "",
-          collections: ((node.collections as { edges: { node: { title: string } }[] })?.edges ?? []).map(e => e.node.title),
-        };
-      });
+      const products = edges.map(({ node }) => toCatalogProduct(node));
 
       return new Response(JSON.stringify({ products, pageInfo, query: searchQuery }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
