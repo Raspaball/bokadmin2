@@ -304,6 +304,10 @@ export function Handles() {
                 {verify.ok} av {verify.checked} kontrollerte videresendinger er riktige
                 {verify.checked < verify.total && <span className="text-gray-500 font-normal"> (utvalg av {verify.total})</span>}
               </p>
+              <p className="text-xs text-gray-500">
+                Kontrollen leser videresendingene i Shopify. HTTP-svaret fra nettsiden vises for de første fem:
+                301 er riktig; 302 til /password (passordbeskyttet butikk) eller 429 (Shopify begrenser kall fra serveren) betyr at nettsiden ikke kunne sjekkes herfra.
+              </p>
               <div className="divide-y max-h-[300px] overflow-y-auto text-xs">
                 {verify.results.map(r => (
                   <div key={r.oldHandle} className="py-1.5 flex items-start gap-2">

@@ -35,6 +35,9 @@ Prøv i så stor grad som mulig å bruke felles datakilder for viktige data som 
 | ONIX List 65 (tilgjengelighetskoder) | `src/app/utils/availabilityCodes.ts` | Import.tsx, BokbasenOppslag.tsx, TilgjengelighetTab.tsx; availability-check/index.ts har kopi. Full referanse: https://ns.editeur.org/onix/en/65 |
 | Bokgruppekode → navn-mapping | `COLLECTION_NAMES` i shopify/index.ts | shopify-edge function (autoritativ) |
 | Bokgruppekode → bkg-tagg-hierarki | `bokgruppeTagsForKode()` i shopify/index.ts | pushOneBook (tagging ved eksport til Shopify) |
+| Handle-regel (tittel-forfatter-ISBN-13) | `buildBookHandle()` i `supabase/functions/_shared/handle.js` | pushOneBook, CSV-eksport, handle-migrering, scripts/migrate-handles.mjs |
+| ISBN fra Shopify-produkt | `extractIsbn()` i `supabase/functions/_shared/isbn.js` (bok.isbn → strekkode → SKU → ISBN-handle) | price-update, availability-check, sjangre-sync, shopify (samlinger, migrering), scripts |
+| Plan for handle-migrering | `planHandleMigration()` i `supabase/functions/_shared/handle-migration.js` | /shopify/handles/*, scripts/migrate-handles.mjs |
 | Formatfilter (ONIX ProductForm) | `FORMAT_OPTIONS` i Import.tsx | Kun Import.tsx — kan flyttes til utils/ hvis det trengs andre steder |
 
 ### Regel for nye datatyper
@@ -78,6 +81,7 @@ React + TypeScript + Tailwind + shadcn/ui, built with Vite.
 - `ShopifyKatalog.tsx` — Shopify catalog browser with inline edit
 - `TilgjengelighetTab.tsx` — availability check job UI
 - `Feeder.tsx` — manual Shopify collections (feeds) with drag-and-drop product ordering and mosaic cover thumbnail
+- `Handles.tsx` — migrate product handles from ISBN to tittel-forfatter-ISBN (analyze, run, verify redirects, undo)
 
 UI primitives live in `src/app/components/ui/` (shadcn/ui components, do not edit).
 
@@ -85,12 +89,12 @@ UI primitives live in `src/app/components/ui/` (shadcn/ui components, do not edi
 
 Deno-based Edge Functions, each in its own subdirectory with `index.ts`.
 
-Shared code lives in `supabase/functions/_shared/`. **`_shared/shopify.ts` is the only Shopify client:** it holds `SHOPIFY_API_VERSION`, fetches/refreshes the access token (`getShopifyAccessToken()`) and runs `shopifyGraphQL(query, variables)` → `{ data }`. Never define an API version, GraphQL wrapper or Shopify token lookup locally in a function.
+Shared code lives in `supabase/functions/_shared/`. The `.js` modules there (`handle.js`, `isbn.js`, `handle-migration.js`) are plain ESM with `.d.ts` types so both Deno and Node (`scripts/`) can import them — never copy their rules into a function. **`_shared/shopify.ts` is the only Shopify client:** it holds `SHOPIFY_API_VERSION`, fetches/refreshes the access token (`getShopifyAccessToken()`) and runs `shopifyGraphQL(query, variables)` → `{ data }`. Never define an API version, GraphQL wrapper or Shopify token lookup locally in a function.
 
 | Function | Purpose |
 |---|---|
 | `bokbasen/` | Bokbasen ONIX v2 metadata: ISBN lookup, date-range, enrich-db |
-| `shopify/` | Shopify product push (single + bulk), catalog sync, CSV export, Smart Collections, feeds (manual collections) |
+| `shopify/` | Shopify product push (single + bulk), catalog sync, CSV export, Smart Collections, feeds (manual collections), handle migration (`/handles/*`) |
 | `price-update/` | Long-running job: fetch current prices from Bokbasen and update Shopify variants. Endpoints: `/start`, `/status/:jobId`, `/cancel/:jobId`, `/resume/:jobId`, `/resume-paused`, `/active`, `/recent` |
 | `availability-check/` | Long-running job: check ONIX availability codes and optionally update Shopify. Same endpoints as price-update, plus `start` accepts `mode: analyze|update` |
 | `sjangre-sync/` | Long-running job: enrich bokgruppekode → tag products → create Smart Collections. Endpoints: `/start`, `/resume/:jobId`, `/resume-paused`, `/status/:jobId`, `/analyze`, `/active`, `/recent`, `/catalog-bkg-stats`, `/delete-empty-collections` |
@@ -117,7 +121,9 @@ All tables have a `user_id uuid` column (nullable) for multi-tenant isolation. T
 - Validate every new or changed GraphQL string against the schema (Shopify's GraphQL validator) before deploying
 
 **Field mapping (Shopify):**
-- ISBN → handle, SKU, barcode
+- Handle → `buildBookHandle()`: `<hovedtittel, maks 60 tegn>-<første forfatter, fornavn etternavn>-<ISBN-13>`, e.g. `avkledd-nina-brochmann-9788203461392`. Set only when the product is created; a re-push never changes it
+- ISBN → metafield `bok.isbn`, SKU, barcode. **Never read ISBN from `product.handle`** — use `extractIsbn()` and fetch `bok.isbn`, barcode and SKU in the query
+- Lookup before create (pushOneBook): `books.shopify_id` → `bok.isbn` (customId; falls back to barcode/SKU search because Testbutikk's `bok.isbn` definition is not of type `id`) → handle = ISBN (legacy) → handle = new handle → create. `shopify_id` is saved to `books` after every push
 - Author → productType
 - Publisher → vendor
 - Tags = `"author, title"` + bokgruppekode hierarchy tags (`bkg-N`, `bkg-NN`, `bkg-NNN`)
@@ -196,6 +202,23 @@ Jobber kjører i 45s-pulser (Supabase Edge Function timeout). Hvert kall til `pr
 - Etter første kjøring settes `next_run_at = IMORGEN kl HH:00`
 - Kjøringer fra planlagte oppgaver vises i "Siste oppdateringer"/"Siste sjekker" i UI-et — det er ingen distinksjon mellom manuelle og planlagte kjøringer i jobbtabellen
 - Toggle-knappen (▷/⏸) i UI setter `enabled = true/false` — avbryter IKKE en allerede kjørende jobb, forhindrer bare fremtidige kjøringer
+
+## Handles — migrering fra nettsiden
+
+Siden «Handles» og `supabase/functions/shopify/index.ts` (`/handles/*`). Planen lages av `planHandleMigration()` (samme som `scripts/migrate-handles.mjs`).
+
+| Endepunkt | Hva |
+|---|---|
+| `GET /handles/status[/:jobId]` | Butikk, om migrering er tillatt, siste/gitt kjøring. Poller bulk-operasjonen og skriver resultatet til `sync_log` når den er ferdig |
+| `POST /handles/analyze` | Tørrkjøring: tellinger + plan (gammel/ny handle, merknader) |
+| `POST /handles/migrate` | `{ productIds, skipFlagged }`. Lager planen på nytt, hopper alltid over duplikat/kollisjon, starter én `bulkOperationRunMutation` med `productUpdate(product: { id, handle, redirectNewHandle: true, metafields: bok.isbn })` |
+| `GET /handles/verify?jobId=` | Sjekker `urlRedirects` for endringene som fortsatt gjelder (+ HTTP-svar for 5) |
+| `POST /handles/rollback` | `{ jobId? }` Sletter videresendingen fra gammel sti, setter handle tilbake. Pulser på 40 s — kall igjen så lenge `timedOut` er true |
+
+- **Sperre:** `migrate` og `rollback` svarer 403 med mindre `SHOPIFY_SHOP_DOMAIN` er `testbutikk-9434.myshopify.com` eller hemmeligheten `ALLOW_HANDLE_MIGRATION=true` er satt.
+- Jobbtype `handle_migration` i `jobs` (status `running` → `finalizing` → `completed`/`failed`). Radene ligger i `config.rows`, bulk-ID i `config.bulkOperationId`. Ingen pg_cron: resultatet hentes når siden (eller `/handles/status`) spør. Angret kjøring får `result.rolledBackAt`.
+- `sync_log`: `action = handle_migrate` / `handle_rollback`, `message = "<gammel> -> <ny>"`, `shopify_id` = produkt-GID. Angre leser herfra — ikke endre formatet.
+- Storefront-sjekk fra Supabase gir ofte 429, og Testbutikk er passordbeskyttet (302 → /password). Videresendingene kontrolleres derfor i Admin API (`urlRedirects`).
 
 ## Feeder (manual collections)
 
