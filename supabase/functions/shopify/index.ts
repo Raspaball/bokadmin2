@@ -390,6 +390,25 @@ const PRODUCT_BY_ISBN_QUERY = `
   }
 `;
 
+// Reserve for customId: søk på strekkode/SKU (settes av pushOneBook). Treffet
+// kontrolleres med extractIsbn, siden søket ikke er et eksakt oppslag.
+const PRODUCTS_BY_ISBN_SEARCH_QUERY = `
+  query productsByIsbn($q: String!) {
+    products(first: 5, query: $q) {
+      nodes {
+        id title handle
+        ${BOK_ISBN_FIELD}
+        variants(first: 1) { edges { node { id sku price barcode } } }
+        media(first: 1) { edges { node { id } } }
+      }
+    }
+  }
+`;
+
+// Shopify godtar customId-oppslag bare når metafeltdefinisjonen har typen «id».
+// Er bok.isbn definert med en annen type, huskes det og søket over brukes i stedet.
+let customIdUnsupported = false;
+
 const PRODUCT_BY_HANDLE_QUERY = `
   query productByIdentifier($handle: String!) {
     productByIdentifier(identifier: { handle: $handle }) { ${PUSH_PRODUCT_FIELDS} }
@@ -589,9 +608,29 @@ function newBookHandle(book: BookMetadata, isbn: string): string {
   return buildBookHandle({ title: book.title, authors: book.author, isbn }) ?? isbn;
 }
 
+// Oppslag på ISBN: customId på bok.isbn, eller — hvis butikkens definisjon ikke
+// har typen «id» — søk på strekkode/SKU med eksakt ISBN-kontroll.
+async function findProductByIsbn(isbn: string): Promise<Record<string, unknown> | null> {
+  if (!customIdUnsupported) {
+    try {
+      const r = await shopifyGraphQL(PRODUCT_BY_ISBN_QUERY, { isbn });
+      return r.data?.productByIdentifier?.id ? r.data.productByIdentifier : null;
+    } catch (e) {
+      if (!String(e).includes("type 'id' is required")) throw e;
+      customIdUnsupported = true;
+      console.warn("bok.isbn har ikke typen «id» — slår opp på strekkode/SKU i stedet for customId");
+    }
+  }
+  const r = await shopifyGraphQL(PRODUCTS_BY_ISBN_SEARCH_QUERY, {
+    q: `(barcode:${isbn} OR sku:${isbn}) AND (status:active OR status:draft OR status:archived)`,
+  });
+  const nodes: Record<string, unknown>[] = r.data?.products?.nodes ?? [];
+  return nodes.find((n) => extractIsbn(n) === isbn) ?? null;
+}
+
 // Finner et eksisterende produkt for boka, i denne rekkefølgen:
 //   a. shopify_id lagret i books
-//   b. metafeltet bok.isbn (customId)
+//   b. ISBN: metafeltet bok.isbn (customId), ellers strekkode/SKU
 //   c. handle = ISBN (eldre produkter)
 //   d. handle = ny handle (migrerte produkter som ennå ikke har bok.isbn)
 // Returnerer null hvis boka ikke finnes, og da opprettes et nytt produkt.
@@ -604,8 +643,10 @@ async function findExistingProduct(book: BookMetadata, isbn: string): Promise<Re
     } catch (_) { /* slettet eller ugyldig ID — prøv neste */ }
   }
 
+  const byIsbn = await findProductByIsbn(isbn);
+  if (byIsbn) return byIsbn;
+
   const lookups: Array<[string, Record<string, unknown>]> = [
-    [PRODUCT_BY_ISBN_QUERY, { isbn }],
     [PRODUCT_BY_HANDLE_QUERY, { handle: isbn }],
     [PRODUCT_BY_HANDLE_QUERY, { handle: newBookHandle(book, isbn) }],
   ];
