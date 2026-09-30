@@ -96,7 +96,28 @@ Testbutikk står nå med nye handles (andre kjøring). Testboka 9788205621060 li
 
 Gjenstår:
 - Sjekke 301 i nettleseren med storefront-passordet (f.eks. `/products/9788203461392`).
-- ShopifyKatalog bruker fortsatt `handle` som ISBN til formatoppslag og ISBN-visning. Bør bruke strekkode/`bok.isbn`.
+- ~~ShopifyKatalog bruker handle som ISBN~~ — rettet 2026-09-30, se under.
 - `analyzeCollections`, `fullSyncCollections` og sjangre-sync henter produkter uten statusfilter (se CLAUDE.md om `status:active OR …`). Uendret her.
 - `bok.isbn` som typen `id` (se avvik over), og om `bok.forfatter` skal settes ved push.
 - Livebutikken: migreringen er klar, men krever `ALLOW_HANDLE_MIGRATION=true` og at 2.0 har erstattet dagens Bokadmin (live tåler ikke nye handles).
+
+## Funksjoner testet i 2.0 for første gang (2026-09-30)
+
+Mot Testbutikk, via de samme endepunktene som sidene bruker. Livebutikken er ikke rørt, og 2.0 skal ikke prøves mot den ennå.
+
+| Funksjon | Resultat |
+|---|---|
+| Shopifykatalog: ISBN | **Rettet.** Katalog og søk returnerer `isbn` fra `extractIsbn`. 43 av 43 bøker har ISBN, format funnet for 43 av 43 (før: ingen av de migrerte). Søk på ISBN treffer også strekkode/SKU |
+| Katalog: redigering | Tittel og pris endret og satt tilbake på Avkledd. Handle uendret |
+| Prisjobb, analyse | Fant nøyaktig det ene avviket vi la inn (111 → 449 kr) på en migrert bok |
+| Prisjobb, oppdatering | Satte prisen tilbake til 449 kr i Shopify. 64 andre uendret, 0 feil |
+| Tilgjengelighetssjekk, analyse | 65 behandlet, 0 feil. 35 avvik: bøker som ikke er utkommet (ONIX 10: 27, 11: 8) er ACTIVE men skal være DRAFT |
+| Tilgjengelighetssjekk, oppdatering | **Ikke kjørt** (eiers valg): den ville satt 35 av 43 bøker i Testbutikk til utkast |
+| Sjangersynk (hele løpet på Sjangre-siden) | **Feilet først, rettet.** Se under. Etter rettelsen: 43 koder, 7 tagget, 36 tagget fra før, 22 samlinger opprettet + 3 fantes, 0 tomme slettet. `analyze-collections`: 43 tagget, 0 gjenstår |
+
+Feil funnet i sjangersynken (arvet fra live, finnes trolig der også):
+1. Bokbasen-oppslaget brukte `login.bokbasen.io`, `api.bokbasen.io/onix/v2/` og skjema 23. Alle oppslag feilet. Nå likt `bokbasen/` og `shopify/`.
+2. Koder for ISBN uten rad i `books` ble aldri lagret (sjekken på `content-range: */0` slår aldri til), så tagge-fasen fant ingenting. Å rette sjekken ville lagt rader med tittel = ISBN og uten pris i `books`, som er arbeidslista på Import-siden: «Push alle» ville da overskrevet tittel og satt pris 0 i Shopify. Kodene lagres nå i den nye tabellen `bokgruppe_cache` (migrasjon `20260930120000_bokgruppe_cache.sql`, kjørt i 2.0-prosjektet).
+3. «Tøm liste» på Import-siden sletter hele `books`, også bokgruppekodene. Med `bokgruppe_cache` mister sjangersynken ikke lenger kodene sine.
+
+Fortsatt ikke testet i 2.0: tilgjengelighetssjekk i oppdateringsmodus, megamenyen (`build-menu`), strømmer (opprette, legge til, fjerne, sortere, slette), planlagte oppgaver via pg_cron, CSV-eksport og øyeblikksbilder av katalogen.
