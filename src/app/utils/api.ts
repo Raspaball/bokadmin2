@@ -58,7 +58,7 @@ export interface SyncLogEntry {
   id: string;
   isbn: string | null;
   title: string | null;
-  action: "push" | "update" | "csv_export" | "sjangre_enrich" | "sjangre_sync" | "bygg_meny" | "availability_check" | "availability_update" | "import_skipped" | "import_failed";
+  action: "push" | "update" | "csv_export" | "sjangre_enrich" | "sjangre_sync" | "bygg_meny" | "availability_check" | "availability_update" | "import_skipped" | "import_failed" | "handle_migrate" | "handle_rollback";
   status: "success" | "error" | "info";
   message: string;
   shopify_id: string | null;
@@ -904,6 +904,97 @@ export const feeds = {
   },
 };
 
+// ── Handles (migrering ISBN-handle → tittel-forfatter-ISBN) ──────────────────
+// Planen lages på serveren av supabase/functions/_shared/handle-migration.js.
+
+export interface HandlePlanRow {
+  id: string;
+  status: string;
+  title: string;
+  author: string;
+  isbn: string;
+  oldHandle: string;
+  newHandle: string;
+  flags: string[];
+  setIsbn: boolean;
+}
+
+export interface HandleAnalyzeResult {
+  shopDomain: string;
+  allowed: boolean;
+  total: number;
+  plan: HandlePlanRow[];
+  skipped: { ingenIsbn: number; alleredeRiktig: number; egendefinert: number };
+  counts: { planned: number; withFlags: number; blocked: number; missingAuthor: number; ready: number };
+}
+
+export interface HandleJob extends Omit<Job, "status"> {
+  status: Job["status"] | "finalizing";
+  bulkStatus?: string;
+}
+
+export interface HandleVerifyResult {
+  jobId: string;
+  total: number;
+  checked: number;
+  ok: number;
+  storefront: string | null;
+  results: Array<{
+    oldHandle: string;
+    newHandle: string;
+    target: string | null;
+    ok: boolean;
+    http: { status: number; location: string | null } | null;
+  }>;
+}
+
+export interface HandleRollbackResult {
+  jobId: string;
+  total: number;
+  restored: number;
+  failed: number;
+  remaining: number;
+  timedOut: boolean;
+  errors: string[];
+}
+
+// Merknader som stopper en rad (samme regel som isBlockingFlag i handle-migration.js)
+export const isBlockingHandleFlag = (flag: string) => flag.startsWith("DUPLIKAT") || flag === "handle finnes allerede";
+
+export const handles = {
+  async status(jobId?: string): Promise<{ shopDomain: string; shopName: string | null; allowed: boolean; job: HandleJob | null }> {
+    const res = await callEdgeFunction(jobId ? `shopify/handles/status/${jobId}` : "shopify/handles/status");
+    return res.json();
+  },
+
+  async analyze(): Promise<HandleAnalyzeResult> {
+    const res = await callEdgeFunction("shopify/handles/analyze", { method: "POST" });
+    return res.json();
+  },
+
+  async migrate(productIds: string[], skipFlagged: boolean): Promise<{ jobId: string; total: number; skippedBlocked: number }> {
+    const res = await callEdgeFunction("shopify/handles/migrate", {
+      method: "POST",
+      body: JSON.stringify({ productIds, skipFlagged }),
+    });
+    return res.json();
+  },
+
+  async verify(jobId?: string): Promise<HandleVerifyResult> {
+    const res = await callEdgeFunction(`shopify/handles/verify${jobId ? `?jobId=${jobId}` : ""}`);
+    return res.json();
+  },
+
+  // Én puls (maks ~40 s). Kall igjen så lenge timedOut er true.
+  async rollback(jobId?: string): Promise<HandleRollbackResult> {
+    const res = await callEdgeFunction("shopify/handles/rollback", {
+      method: "POST",
+      body: JSON.stringify(jobId ? { jobId } : {}),
+    });
+    return res.json();
+  },
+};
+
 // ── Jobs (all types) ─────────────────────────────────────────────────────────
 
 const JOB_TYPE_LABELS: Record<string, string> = {
@@ -911,6 +1002,7 @@ const JOB_TYPE_LABELS: Record<string, string> = {
   availability_check: "Tilgjengelighetssjekk",
   sjangre_sync: "Sjangre-sync",
   shopify_enrich: "Shopify-berikelse",
+  handle_migration: "Handle-migrering",
 };
 
 export const jobTypeLabel = (type: string) => JOB_TYPE_LABELS[type] ?? type;
@@ -976,6 +1068,7 @@ const api = {
   shopifyEnrich,
   scheduledTasks,
   feeds,
+  handles,
   jobs,
 };
 

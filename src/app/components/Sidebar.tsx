@@ -1,4 +1,4 @@
-import { Settings, Upload, RefreshCw, Rss, Layout, LogOut, BookOpen, Tags, Store } from 'lucide-react';
+import { Settings, Upload, RefreshCw, Rss, Layout, LogOut, BookOpen, Tags, Store, Link2 } from 'lucide-react';
 
 interface MenuItem {
   id: string;
@@ -11,6 +11,7 @@ const menuItems: MenuItem[] = [
   { id: 'import', label: 'Bokbasen', icon: <Upload className="size-4" /> },
   { id: 'update', label: 'Oppdatering', icon: <RefreshCw className="size-4" /> },
   { id: 'genres', label: 'Sjangre', icon: <Tags className="size-4" /> },
+  { id: 'handles', label: 'Handles', icon: <Link2 className="size-4" /> },
   { id: 'feeds', label: 'Strømmer', icon: <Rss className="size-4" /> },
   { id: 'cms', label: 'CMS', icon: <Layout className="size-4" /> },
   { id: 'innstillinger', label: 'Innstillinger', icon: <Settings className="size-4" /> },

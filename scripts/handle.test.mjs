@@ -91,3 +91,47 @@ test("extractIsbn: handle bare når den er et rent ISBN", () => {
   assert.equal(extractIsbn({ handle: "notatbok-a5", variants: { nodes: [{ barcode: null, sku: "NB-A5" }] } }), null);
   assert.equal(extractIsbn(null), null);
 });
+
+// ── planHandleMigration (supabase/functions/_shared/handle-migration.js) ─────
+import { planHandleMigration, isBlockedRow, handleUpdateInput } from "../supabase/functions/_shared/handle-migration.js";
+
+const prod = (id, handle, title, productType, isbn, extra = {}) => ({
+  id: `gid://shopify/Product/${id}`, handle, title, productType, status: "ACTIVE",
+  variants: { nodes: [{ barcode: isbn, sku: isbn }] }, ...extra,
+});
+
+test("planHandleMigration: ny handle, allerede riktig, uten ISBN, egendefinert, mangler forfatter", () => {
+  const r = planHandleMigration([
+    prod(1, "9788203461392", "Avkledd: undertittel", "Brochmann, Nina", "9788203461392"),
+    prod(2, "glukoserevolusjonens-metode-jessie-inchauspe-9788202921538", "Glukoserevolusjonens metode", "Inchauspé, Jessie", "9788202921538"),
+    prod(3, "gavekort", "Gavekort", "", null),
+    prod(4, "min-egen-handle", "Alt starter med en drøm", "Nusa, Antonio", "9788205621060"),
+    prod(5, "9788293891604", "Det hende i Telemark 8", "", "9788293891604"),
+  ]);
+  assert.deepEqual(r.skipped, { ingenIsbn: 1, alleredeRiktig: 1, egendefinert: 1 });
+  assert.equal(r.counts.planned, 2);
+  assert.equal(r.counts.missingAuthor, 1);
+  assert.equal(r.counts.blocked, 0);
+  assert.equal(r.plan[0].newHandle, "avkledd-nina-brochmann-9788203461392");
+  assert.deepEqual(r.plan[1].flags, ["mangler forfatter"]);
+  assert.equal(r.plan[0].setIsbn, true);
+});
+
+test("planHandleMigration: duplikat-ISBN og kollisjon blokkerer", () => {
+  const r = planHandleMigration([
+    prod(1, "9788203461392", "Avkledd", "Brochmann, Nina", "9788203461392"),
+    prod(2, "8203461392", "Avkledd", "Brochmann, Nina", "9788203461392"),
+    prod(3, "9788202921538", "Glukose", "Inchauspé, Jessie", "9788202921538"),
+    prod(4, "glukose-jessie-inchauspe-9788202921538", "Noe annet", "", null),
+  ]);
+  assert.equal(r.counts.blocked, 3);
+  assert.ok(r.plan.every(isBlockedRow));
+  assert.ok(r.plan.find((p) => p.oldHandle === "9788202921538").flags.includes("handle finnes allerede"));
+});
+
+test("handleUpdateInput: 301 og bok.isbn bare når det mangler", () => {
+  assert.deepEqual(handleUpdateInput({ id: "gid://shopify/Product/1", newHandle: "a-b-9788203461392", isbn: "9788203461392", setIsbn: false }),
+    { id: "gid://shopify/Product/1", handle: "a-b-9788203461392", redirectNewHandle: true });
+  assert.deepEqual(handleUpdateInput({ id: "x", newHandle: "h", isbn: "9788203461392", setIsbn: true }).metafields,
+    [{ namespace: "bok", key: "isbn", value: "9788203461392" }]);
+});

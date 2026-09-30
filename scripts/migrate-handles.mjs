@@ -5,7 +5,9 @@
 // Shopify lager automatisk 301-videresending fra gammel adresse (redirectNewHandle).
 //
 // Regelen ligger i supabase/functions/_shared/handle.js og er den samme som
-// Bokadmin 2.0 bruker ved eksport.
+// Bokadmin 2.0 bruker ved eksport. Selve planen (hvilke produkter, ny handle,
+// merknader) lages av _shared/handle-migration.js — den samme som Handles-siden
+// i Bokadmin 2.0 bruker (POST /shopify/handles/analyze).
 //
 // KJØRING (fra prosjektmappa):
 //   node scripts/migrate-handles.mjs --dry-run              # lag plan, endrer ingenting
@@ -30,10 +32,12 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildBookHandle, normalizeIsbn } from "../supabase/functions/_shared/handle.js";
+import {
+  SAFE_STORES, MIGRATION_PRODUCTS_QUERY, HANDLE_UPDATE_MUTATION,
+  planHandleMigration, isBlockedRow, handleUpdateInput,
+} from "../supabase/functions/_shared/handle-migration.js";
 
 const API_VERSION = "2026-07"; // samme som supabase/functions/_shared/shopify.ts
-const SAFE_STORES = ["testbutikk-9434.myshopify.com"];
 const PLAN_MAX_AGE_HOURS = 24;
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -120,41 +124,14 @@ async function gql(query, variables = {}, attempt = 0) {
   return json.data;
 }
 
-const PRODUCTS_QUERY = `
-query Products($cursor: String) {
-  products(first: 250, after: $cursor, query: "status:active OR status:draft OR status:archived") {
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      id handle title productType status
-      forfatter: metafield(namespace: "bok", key: "forfatter") { value }
-      isbnFelt: metafield(namespace: "bok", key: "isbn") { value }
-      variants(first: 1) { nodes { barcode sku } }
-    }
-  }
-}`;
-
-const PRODUCT_UPDATE = `
-mutation ($product: ProductUpdateInput!) {
-  productUpdate(product: $product) {
-    product { id handle }
-    userErrors { field message }
-  }
-}`;
-
 // ── Hjelpere ───────────────────────────────────────────────────────────────
-const isIsbnHandle = (h) => /^\d{10,13}$/.test(h);
-function productIsbn(p) {
-  const v = p.variants?.nodes?.[0];
-  return normalizeIsbn(p.isbnFelt?.value) || normalizeIsbn(v?.barcode) || normalizeIsbn(v?.sku)
-    || (isIsbnHandle(p.handle) ? normalizeIsbn(p.handle) : null);
-}
 const csvCell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
 
 async function fetchAllProducts() {
   const all = [];
   let cursor = null;
   do {
-    const data = await gql(PRODUCTS_QUERY, { cursor });
+    const data = await gql(MIGRATION_PRODUCTS_QUERY, { cursor });
     all.push(...data.products.nodes);
     cursor = data.products.pageInfo.hasNextPage ? data.products.pageInfo.endCursor : null;
     process.stdout.write(`\r  Hentet ${all.length} produkter …`);
@@ -167,41 +144,10 @@ async function fetchAllProducts() {
 async function dryRun() {
   console.log(`\nTørrkjøring mot ${SHOP} (ingenting endres)\n`);
   const products = INPUT_FILE ? JSON.parse(readFileSync(INPUT_FILE, "utf8")) : await fetchAllProducts();
-  const existing = new Set(products.map((p) => p.handle));
-  const plan = [];
-  const skipped = { ingenIsbn: 0, alleredeRiktig: 0, egendefinert: 0 };
-  const warnings = [];
-
-  for (const p of products) {
-    if (plan.length >= LIMIT) break;
-    const isbn = productIsbn(p);
-    if (!isbn) { skipped.ingenIsbn++; continue; }
-    const authors = p.forfatter?.value || p.productType;
-    const newHandle = buildBookHandle({ title: p.title, authors, isbn });
-    if (!newHandle || newHandle === p.handle) { skipped.alleredeRiktig++; continue; }
-    if (!isIsbnHandle(p.handle) && !INCLUDE_CUSTOM) { skipped.egendefinert++; continue; }
-    const flags = [];
-    if (!authors) flags.push("mangler forfatter");
-    if (newHandle.length > 120) flags.push("lang handle");
-    plan.push({ id: p.id, status: p.status, title: p.title, author: authors || "", isbn, oldHandle: p.handle, newHandle, flags });
-  }
-
-  // Samme ISBN på flere produkter (duplikater i katalogen)
-  const byIsbn = new Map();
-  for (const p of products) {
-    const isbn = productIsbn(p);
-    if (isbn) byIsbn.set(isbn, (byIsbn.get(isbn) ?? 0) + 1);
-  }
-  for (const row of plan) if (byIsbn.get(row.isbn) > 1) row.flags.push("DUPLIKAT: samme ISBN på flere produkter");
-
-  // Kollisjoner: to produkter med samme nye handle, eller ny handle som allerede er i bruk
-  const seen = new Map();
-  for (const row of plan) {
-    if (seen.has(row.newHandle)) { row.flags.push("DUPLIKAT i planen"); seen.get(row.newHandle).flags.push("DUPLIKAT i planen"); }
-    else seen.set(row.newHandle, row);
-    if (existing.has(row.newHandle)) row.flags.push("handle finnes allerede");
-  }
-  for (const row of plan) if (row.flags.length) warnings.push(row);
+  // Eldre eksporter brukte aliaset isbnFelt for bok.isbn
+  for (const p of products) if (p.isbnFelt && !p.bokIsbn) p.bokIsbn = p.isbnFelt;
+  const { plan, skipped } = planHandleMigration(products, { includeCustom: INCLUDE_CUSTOM, limit: LIMIT });
+  const warnings = plan.filter((r) => r.flags.length);
 
   writeFileSync(planFile, JSON.stringify({ shop: SHOP, createdAt: new Date().toISOString(), plan }, null, 2));
   writeFileSync(planCsv, "﻿" + ["status,tittel,forfatter,isbn,gammel_handle,ny_handle,merknad",
@@ -227,7 +173,7 @@ function readPlan() {
   if (data.shop !== SHOP) fail(`Planen er laget for ${data.shop}, ikke ${SHOP}.`);
   const ageH = (Date.now() - Date.parse(data.createdAt)) / 36e5;
   if (ageH > PLAN_MAX_AGE_HOURS) fail(`Planen er ${ageH.toFixed(0)} timer gammel. Kjør --dry-run på nytt.`);
-  const blocked = data.plan.filter((r) => r.flags.some((f) => f.startsWith("DUPLIKAT") || f === "handle finnes allerede"));
+  const blocked = data.plan.filter(isBlockedRow);
   if (blocked.length && !SKIP_FLAGGED) fail(`${blocked.length} rader har duplikat eller kollisjon. Rett dem, eller kjør med --skip-flagged for å hoppe over dem (se CSV).`);
   if (blocked.length) console.log(`  Hopper over ${blocked.length} rader med duplikat eller kollisjon (--skip-flagged).`);
   const blockedIds = new Set(blocked.map((r) => r.id));
@@ -239,9 +185,8 @@ async function runDirect(rows, label) {
   let i = 0;
   for (const row of rows) {
     i++;
-    const input = { id: row.id, handle: row.targetHandle, redirectNewHandle: true };
     try {
-      const data = await gql(PRODUCT_UPDATE, { product: input });
+      const data = await gql(HANDLE_UPDATE_MUTATION, { product: row.input });
       const errs = data.productUpdate.userErrors;
       if (errs.length) { log({ mode: label, id: row.id, error: errs }); console.log(`\n  ✖ ${row.fromHandle}: ${errs.map((e) => e.message).join("; ")}`); }
       else { done.push({ ...row, resultHandle: data.productUpdate.product.handle }); log({ mode: label, id: row.id, from: row.fromHandle, to: data.productUpdate.product.handle }); }
@@ -256,7 +201,7 @@ async function runDirect(rows, label) {
 }
 
 async function runBulk(rows, label) {
-  const jsonl = rows.map((r) => JSON.stringify({ product: { id: r.id, handle: r.targetHandle, redirectNewHandle: true } })).join("\n");
+  const jsonl = rows.map((r) => JSON.stringify({ product: r.input })).join("\n");
   const staged = await gql(`mutation { stagedUploadsCreate(input: [{ resource: BULK_MUTATION_VARIABLES, filename: "handles.jsonl", mimeType: "text/jsonl", httpMethod: POST }]) { stagedTargets { url parameters { name value } } userErrors { field message } } }`);
   const target = staged.stagedUploadsCreate.stagedTargets[0];
   if (!target) fail(`Opplasting feilet: ${JSON.stringify(staged.stagedUploadsCreate.userErrors)}`);
@@ -268,7 +213,7 @@ async function runBulk(rows, label) {
   const key = target.parameters.find((p) => p.name === "key").value;
 
   const run = await gql(`mutation ($mutation: String!, $path: String!) { bulkOperationRunMutation(mutation: $mutation, stagedUploadPath: $path) { bulkOperation { id status } userErrors { field message } } }`,
-    { mutation: PRODUCT_UPDATE, path: key });
+    { mutation: HANDLE_UPDATE_MUTATION, path: key });
   const op = run.bulkOperationRunMutation.bulkOperation;
   if (!op) fail(`Bulk-jobben startet ikke: ${JSON.stringify(run.bulkOperationRunMutation.userErrors)}`);
   console.log(`  Bulk-jobb startet: ${op.id}`);
@@ -307,7 +252,7 @@ async function execute() {
   const current = new Map((await fetchAllProducts()).map((p) => [p.id, p.handle]));
   const rows = plan
     .filter((r) => current.get(r.id) === r.oldHandle)
-    .map((r) => ({ id: r.id, fromHandle: r.oldHandle, targetHandle: r.newHandle, oldHandle: r.oldHandle, newHandle: r.newHandle }));
+    .map((r) => ({ id: r.id, fromHandle: r.oldHandle, oldHandle: r.oldHandle, newHandle: r.newHandle, input: handleUpdateInput(r) }));
   const stale = plan.length - rows.length;
   if (stale) console.log(`  ${stale} produkter er endret siden planen ble laget, og hoppes over.`);
   if (!rows.length) return console.log("Ingenting å gjøre.\n");
@@ -353,7 +298,8 @@ async function rollback() {
       await gql(`mutation ($id: ID!) { urlRedirectDelete(id: $id) { deletedUrlRedirectId userErrors { message } } }`, { id: n.id });
     }
   }
-  const rows = done.map((d) => ({ id: d.id, fromHandle: d.newHandle, targetHandle: d.oldHandle }));
+  // Uten redirectNewHandle: den nye adressen skal ikke videresendes tilbake
+  const rows = done.map((d) => ({ id: d.id, fromHandle: d.newHandle, input: { id: d.id, handle: d.oldHandle, redirectNewHandle: false } }));
   const restored = await runDirect(rows, "rollback");
   const restoredIds = new Set(restored.map((r) => r.id));
   writeFileSync(doneFile, JSON.stringify(done.filter((d) => !restoredIds.has(d.id)), null, 2));

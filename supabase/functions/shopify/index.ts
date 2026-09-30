@@ -5,6 +5,10 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { getShopDomain, shopifyGraphQL } from "../_shared/shopify.ts";
 import { buildBookHandle, normalizeIsbn } from "../_shared/handle.js";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
+import {
+  SAFE_STORES, MIGRATION_PRODUCTS_QUERY, HANDLE_UPDATE_MUTATION,
+  planHandleMigration, isBlockedRow, handleUpdateInput, type HandlePlanRow,
+} from "../_shared/handle-migration.js";
 
 // Felt extractIsbn trenger (bok.isbn, strekkode, SKU) — handle er ikke lenger ISBN
 const PRODUCT_ISBN_FIELDS = `${BOK_ISBN_FIELD} variants(first: 1) { nodes { barcode sku } }`;
@@ -1586,6 +1590,340 @@ async function feedReorderProducts(collectionId: string, moves: Array<{ id: stri
   if (userErrors?.length) throw new Error(userErrors.map((e: any) => e.message).join(", "));
 }
 
+// ── Handle-migrering (Handles-siden) ─────────────────────────────────────────
+// Planen lages av _shared/handle-migration.js (samme som scripts/migrate-handles.mjs).
+// Utføring: én Shopify bulk-operasjon (bulkOperationRunMutation) per kjøring,
+// registrert som jobb i jobs-tabellen. GET /handles/status/:jobId poller
+// bulk-operasjonen og skriver resultatet til sync_log når den er ferdig.
+// Angre kjøres i pulser på maks HANDLE_PULSE_MS fra nettleseren.
+
+const HANDLE_JOB_TYPE = "handle_migration";
+const HANDLE_LOG_MIGRATE = "handle_migrate";
+const HANDLE_LOG_ROLLBACK = "handle_rollback";
+const HANDLE_PULSE_MS = 40_000;
+const BULK_ACTIVE = ["CREATED", "RUNNING", "CANCELING"];
+
+class HttpError extends Error {
+  constructor(public status: number, message: string) { super(message); }
+}
+
+interface HandleJobRow {
+  id: string; oldHandle: string; newHandle: string; title: string; isbn: string;
+}
+
+// Migrering (endring av handles) er bare lov mot Testbutikk, eller når
+// hemmeligheten ALLOW_HANDLE_MIGRATION=true er satt bevisst.
+function handleMigrationAllowed(): boolean {
+  return SAFE_STORES.includes(getShopDomain()) || Deno.env.get("ALLOW_HANDLE_MIGRATION") === "true";
+}
+
+function requireHandleMigrationAllowed(): void {
+  if (!handleMigrationAllowed()) {
+    throw new HttpError(403, `Endring av handles er ikke tillatt mot ${getShopDomain()}. ` +
+      `Kun Testbutikk, eller med hemmeligheten ALLOW_HANDLE_MIGRATION=true.`);
+  }
+}
+
+async function fetchMigrationProducts(): Promise<unknown[]> {
+  const all: unknown[] = [];
+  let cursor: string | null = null;
+  do {
+    const r: { data: { products?: { nodes: unknown[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } } } =
+      await shopifyGraphQL(MIGRATION_PRODUCTS_QUERY, { cursor });
+    all.push(...(r.data?.products?.nodes ?? []));
+    cursor = r.data?.products?.pageInfo?.hasNextPage ? r.data.products.pageInfo.endCursor : null;
+  } while (cursor);
+  return all;
+}
+
+// deno-lint-ignore no-explicit-any
+async function restJson(pathAndQuery: string, init: RequestInit = {}): Promise<any> {
+  const res = await supabaseRest(pathAndQuery, init);
+  if (!res.ok) throw new Error(`Supabase ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
+}
+
+// deno-lint-ignore no-explicit-any
+async function getHandleJob(jobId: string): Promise<any | null> {
+  const rows = await restJson(`jobs?id=eq.${encodeURIComponent(jobId)}&type=eq.${HANDLE_JOB_TYPE}&select=*`);
+  return rows?.[0] ?? null;
+}
+
+// deno-lint-ignore no-explicit-any
+async function latestHandleJob(filter = ""): Promise<any | null> {
+  const rows = await restJson(`jobs?type=eq.${HANDLE_JOB_TYPE}${filter}&select=*&order=created_at.desc&limit=1`);
+  return rows?.[0] ?? null;
+}
+
+// Oppdaterer jobben. extraFilter (f.eks. "&status=eq.running") gjør oppdateringen
+// betinget; returnerer de oppdaterte radene.
+// deno-lint-ignore no-explicit-any
+async function patchHandleJob(jobId: string, patch: Record<string, unknown>, extraFilter = ""): Promise<any[]> {
+  return await restJson(`jobs?id=eq.${encodeURIComponent(jobId)}${extraFilter}`, {
+    method: "PATCH",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify(patch),
+  }) ?? [];
+}
+
+async function insertSyncLog(entries: Record<string, unknown>[]): Promise<void> {
+  for (let i = 0; i < entries.length; i += 500) {
+    await restJson("sync_log", {
+      method: "POST",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify(entries.slice(i, i + 500)),
+    });
+  }
+}
+
+// Endringer fra en kjøring som fortsatt gjelder (migrert og ikke angret),
+// lest fra sync_log. message har formen "<gammel> -> <ny>".
+async function activeHandleChanges(jobId: string): Promise<Array<{ id: string; oldHandle: string; newHandle: string; isbn: string; title: string }>> {
+  // deno-lint-ignore no-explicit-any
+  const entries: any[] = [];
+  for (let offset = 0; ; offset += 1000) {
+    const page = await restJson(
+      `sync_log?job_id=eq.${encodeURIComponent(jobId)}&status=eq.success` +
+      `&action=in.(${HANDLE_LOG_MIGRATE},${HANDLE_LOG_ROLLBACK})` +
+      `&select=action,message,shopify_id,isbn,title,created_at&order=created_at.asc&limit=1000&offset=${offset}`);
+    entries.push(...(page ?? []));
+    if (!page || page.length < 1000) break;
+  }
+  const active = new Map<string, { id: string; oldHandle: string; newHandle: string; isbn: string; title: string }>();
+  for (const e of entries) {
+    if (e.action === HANDLE_LOG_ROLLBACK) { active.delete(e.shopify_id); continue; }
+    const [oldHandle, newHandle] = String(e.message ?? "").split(" -> ");
+    if (e.shopify_id && oldHandle && newHandle) {
+      active.set(e.shopify_id, { id: e.shopify_id, oldHandle, newHandle, isbn: e.isbn ?? "", title: e.title ?? "" });
+    }
+  }
+  return [...active.values()];
+}
+
+async function startHandleBulk(rows: HandlePlanRow[]): Promise<string> {
+  const staged = await shopifyGraphQL(`mutation { stagedUploadsCreate(input: [{ resource: BULK_MUTATION_VARIABLES, filename: "handles.jsonl", mimeType: "text/jsonl", httpMethod: POST }]) { stagedTargets { url parameters { name value } } userErrors { field message } } }`);
+  const target = staged.data?.stagedUploadsCreate?.stagedTargets?.[0];
+  if (!target) throw new Error(`Opplasting feilet: ${JSON.stringify(staged.data?.stagedUploadsCreate?.userErrors)}`);
+
+  const jsonl = rows.map((r) => JSON.stringify({ product: handleUpdateInput(r) })).join("\n");
+  const form = new FormData();
+  for (const p of target.parameters as { name: string; value: string }[]) form.append(p.name, p.value);
+  form.append("file", new Blob([jsonl], { type: "text/jsonl" }), "handles.jsonl");
+  const up = await fetch(target.url, { method: "POST", body: form });
+  if (!up.ok) throw new Error(`Opplasting til Shopify feilet (HTTP ${up.status}).`);
+  const key = (target.parameters as { name: string; value: string }[]).find((p) => p.name === "key")?.value;
+
+  const run = await shopifyGraphQL(
+    `mutation ($mutation: String!, $path: String!) { bulkOperationRunMutation(mutation: $mutation, stagedUploadPath: $path) { bulkOperation { id status } userErrors { field message } } }`,
+    { mutation: HANDLE_UPDATE_MUTATION, path: key });
+  const op = run.data?.bulkOperationRunMutation?.bulkOperation;
+  if (!op?.id) {
+    const errs = run.data?.bulkOperationRunMutation?.userErrors ?? [];
+    throw new Error(`Bulk-jobben startet ikke: ${errs.map((e: { message: string }) => e.message).join("; ") || "ukjent feil"}`);
+  }
+  return op.id;
+}
+
+// POST /handles/migrate
+async function startHandleMigration(productIds: string[] | undefined, skipFlagged: boolean, userId: string | null) {
+  requireHandleMigrationAllowed();
+  const running = await latestHandleJob("&status=in.(running,finalizing)");
+  if (running) throw new HttpError(409, "En handle-migrering kjører allerede. Vent til den er ferdig.");
+
+  // Lag planen på nytt her — stol ikke på handles fra nettleseren
+  const { plan } = planHandleMigration(await fetchMigrationProducts());
+  const wanted = productIds?.length ? new Set(productIds) : null;
+  let rows = wanted ? plan.filter((r) => wanted.has(r.id)) : plan;
+  const blocked = rows.filter(isBlockedRow);
+  if (blocked.length && !skipFlagged) {
+    throw new HttpError(400, `${blocked.length} rader har duplikat eller kollisjon. Kryss av for å hoppe over dem.`);
+  }
+  rows = rows.filter((r) => !isBlockedRow(r));
+  if (!rows.length) throw new HttpError(400, "Ingen produkter å endre.");
+
+  const jobRows: HandleJobRow[] = rows.map((r) => ({ id: r.id, oldHandle: r.oldHandle, newHandle: r.newHandle, title: r.title, isbn: r.isbn }));
+  const [job] = await restJson("jobs", {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({
+      type: HANDLE_JOB_TYPE,
+      status: "running",
+      total_items: rows.length,
+      skipped: blocked.length,
+      user_id: userId,
+      started_at: new Date().toISOString(),
+      config: { shop: getShopDomain(), rows: jobRows, skippedBlocked: blocked.length },
+    }),
+  });
+
+  try {
+    const bulkOperationId = await startHandleBulk(rows);
+    await patchHandleJob(job.id, { config: { ...job.config, bulkOperationId } });
+  } catch (e) {
+    await patchHandleJob(job.id, { status: "failed", error_message: String(e), completed_at: new Date().toISOString() });
+    throw e;
+  }
+  return { jobId: job.id, total: rows.length, skippedBlocked: blocked.length };
+}
+
+// Poller bulk-operasjonen; når den er ferdig skrives hver endring til sync_log.
+// deno-lint-ignore no-explicit-any
+async function refreshHandleJob(job: any): Promise<any> {
+  if (job?.status !== "running" || !job.config?.bulkOperationId) return job;
+
+  const r = await shopifyGraphQL(
+    `query ($id: ID!) { node(id: $id) { ... on BulkOperation { id status errorCode objectCount url partialDataUrl } } }`,
+    { id: job.config.bulkOperationId });
+  const op = r.data?.node;
+  if (!op) return job;
+  if (BULK_ACTIVE.includes(op.status)) {
+    const processed = Number(op.objectCount ?? 0);
+    if (processed !== job.processed) await patchHandleJob(job.id, { processed });
+    return { ...job, processed, bulkStatus: op.status };
+  }
+
+  // Lås: bare ett kall får skrive resultatet
+  const locked = await patchHandleJob(job.id, { status: "finalizing" }, "&status=eq.running");
+  if (!locked.length) return await getHandleJob(job.id);
+
+  try {
+    const rows: HandleJobRow[] = job.config.rows ?? [];
+    const outcome = new Map<number, { handle?: string; error?: string }>();
+    const resultUrl = op.url || op.partialDataUrl;
+    if (resultUrl) {
+      const text = await (await fetch(resultUrl)).text();
+      for (const line of text.split("\n").filter(Boolean)) {
+        const res = JSON.parse(line);
+        const n = Number(res.__lineNumber);
+        const upd = res.data?.productUpdate;
+        if (res.errors?.length) outcome.set(n, { error: res.errors.map((e: { message: string }) => e.message).join("; ") });
+        else if (upd?.userErrors?.length) outcome.set(n, { error: upd.userErrors.map((e: { message: string }) => e.message).join("; ") });
+        else if (upd?.product?.handle) outcome.set(n, { handle: upd.product.handle });
+      }
+    }
+
+    const now = new Date().toISOString();
+    let succeeded = 0, failed = 0;
+    const mismatched: Array<{ id: string; planned: string; actual: string }> = [];
+    const log = rows.map((row, i) => {
+      const o = outcome.get(i) ?? { error: `Ingen resultat fra Shopify (bulk-status ${op.status}${op.errorCode ? `, ${op.errorCode}` : ""})` };
+      if (o.handle) {
+        succeeded++;
+        if (o.handle !== row.newHandle) mismatched.push({ id: row.id, planned: row.newHandle, actual: o.handle });
+      } else {
+        failed++;
+      }
+      return {
+        isbn: row.isbn, title: row.title, action: HANDLE_LOG_MIGRATE,
+        status: o.handle ? "success" : "error",
+        message: o.handle ? `${row.oldHandle} -> ${o.handle}` : `${row.oldHandle}: ${o.error}`,
+        shopify_id: row.id, job_id: job.id, user_id: job.user_id ?? null, created_at: now,
+      };
+    });
+    await insertSyncLog(log);
+
+    const [updated] = await patchHandleJob(job.id, {
+      status: op.status === "COMPLETED" || succeeded > 0 ? "completed" : "failed",
+      processed: rows.length, succeeded, failed,
+      error_message: op.status === "COMPLETED" ? null : `Bulk-operasjonen endte med ${op.status}${op.errorCode ? ` (${op.errorCode})` : ""}`,
+      result: { changed: succeeded, errors: failed, mismatched, bulkStatus: op.status },
+      completed_at: now,
+    });
+    return updated;
+  } catch (e) {
+    await patchHandleJob(job.id, { status: "running" }); // lås opp, prøv igjen ved neste poll
+    throw e;
+  }
+}
+
+// GET /handles/verify — sjekker urlRedirects (og storefront-svaret for noen få)
+async function verifyHandleJob(jobId: string | null) {
+  const job = jobId ? await getHandleJob(jobId) : await latestHandleJob("&status=eq.completed");
+  if (!job) throw new HttpError(404, "Fant ingen utført handle-migrering.");
+  const changes = await activeHandleChanges(job.id);
+  const step = Math.max(1, Math.ceil(changes.length / 50));
+  const sample = changes.filter((_, i) => i % step === 0);
+
+  let storefront: string | null = null;
+  try {
+    const s = await shopifyGraphQL(`{ shop { primaryDomain { url } } }`);
+    storefront = s.data?.shop?.primaryDomain?.url ?? null;
+  } catch { /* hopp over storefront-sjekken */ }
+
+  const results = [];
+  let ok = 0;
+  for (const [i, c] of sample.entries()) {
+    const path = `/products/${c.oldHandle}`;
+    const r = await shopifyGraphQL(`query ($q: String!) { urlRedirects(first: 5, query: $q) { nodes { id path target } } }`, { q: `path:${path}` });
+    const hit = (r.data?.urlRedirects?.nodes ?? []).find((n: { path: string }) => n.path === path);
+    const good = !!hit && String(hit.target).endsWith(`/products/${c.newHandle}`);
+    if (good) ok++;
+    // Selve nettsiden for de første fem: forventet 301 med Location til ny adresse
+    let http: { status: number; location: string | null } | null = null;
+    if (storefront && i < 5) {
+      try {
+        const res = await fetch(`${storefront}${path}`, { redirect: "manual" });
+        await res.body?.cancel();
+        http = { status: res.status, location: res.headers.get("location") };
+      } catch { /* nettverksfeil — vis uten http */ }
+    }
+    results.push({ oldHandle: c.oldHandle, newHandle: c.newHandle, target: hit?.target ?? null, ok: good, http });
+  }
+  return { jobId: job.id, total: changes.length, checked: sample.length, ok, storefront, results };
+}
+
+// POST /handles/rollback — setter tilbake fra sync_log, i pulser
+async function rollbackHandleJob(jobId: string | null, userId: string | null) {
+  requireHandleMigrationAllowed();
+  const job = jobId
+    ? await getHandleJob(jobId)
+    : await latestHandleJob("&status=eq.completed&result->>rolledBackAt=is.null");
+  if (!job) throw new HttpError(404, "Fant ingen kjøring å angre.");
+  if (job.status !== "completed" && job.status !== "failed") throw new HttpError(409, "Kjøringen er ikke ferdig ennå.");
+
+  const pending = await activeHandleChanges(job.id);
+  const started = Date.now();
+  let restored = 0, failed = 0, timedOut = false;
+  const errors: string[] = [];
+  const log: Record<string, unknown>[] = [];
+
+  for (const c of pending) {
+    if (Date.now() - started > HANDLE_PULSE_MS) { timedOut = true; break; }
+    const path = `/products/${c.oldHandle}`;
+    try {
+      const cur = await shopifyGraphQL(`query ($id: ID!) { product(id: $id) { handle } }`, { id: c.id });
+      const handle = cur.data?.product?.handle;
+      if (!handle) throw new Error("produktet finnes ikke lenger");
+      if (handle !== c.oldHandle) {
+        if (handle !== c.newHandle) throw new Error(`handle er endret siden migreringen (nå ${handle})`);
+        // Videresendingen fra gammel sti må bort før produktet kan få stien tilbake
+        const r = await shopifyGraphQL(`query ($q: String!) { urlRedirects(first: 5, query: $q) { nodes { id path target } } }`, { q: `path:${path}` });
+        for (const n of (r.data?.urlRedirects?.nodes ?? []).filter((n: { path: string }) => n.path === path)) {
+          await shopifyGraphQL(`mutation ($id: ID!) { urlRedirectDelete(id: $id) { deletedUrlRedirectId userErrors { field message } } }`, { id: n.id });
+        }
+        const u = await shopifyGraphQL(HANDLE_UPDATE_MUTATION, { product: { id: c.id, handle: c.oldHandle, redirectNewHandle: false } });
+        const errs = u.data?.productUpdate?.userErrors ?? [];
+        if (errs.length) throw new Error(errs.map((e: { message: string }) => e.message).join("; "));
+      }
+      restored++;
+      log.push({ isbn: c.isbn, title: c.title, action: HANDLE_LOG_ROLLBACK, status: "success", message: `${c.newHandle} -> ${c.oldHandle}`, shopify_id: c.id, job_id: job.id, user_id: userId });
+    } catch (e) {
+      failed++;
+      const msg = e instanceof Error ? e.message : String(e);
+      errors.push(`${c.newHandle}: ${msg}`);
+      log.push({ isbn: c.isbn, title: c.title, action: HANDLE_LOG_ROLLBACK, status: "error", message: `${c.newHandle}: ${msg}`, shopify_id: c.id, job_id: job.id, user_id: userId });
+    }
+  }
+  await insertSyncLog(log);
+
+  const remaining = pending.length - restored;
+  if (!timedOut && remaining === 0) {
+    await patchHandleJob(job.id, { result: { ...(job.result ?? {}), rolledBackAt: new Date().toISOString() } });
+  }
+  return { jobId: job.id, total: pending.length, restored, failed, remaining, timedOut, errors: errors.slice(0, 20) };
+}
+
 // ── Main handler ─────────────────────────────────────────────────────────────
 
 serve(async (req: Request) => {
@@ -1611,6 +1949,54 @@ serve(async (req: Request) => {
       }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
+    }
+
+    // /shopify/handles/* — handle-migrering (Handles-siden)
+    if (path.startsWith("handles/")) {
+      const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), {
+        status, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+      try {
+        // GET /handles/status[/:jobId] — butikk, om migrering er tillatt, og siste (eller gitt) kjøring
+        if (path.startsWith("handles/status") && req.method === "GET") {
+          const jobId = path.split("/")[2] || null;
+          const job = jobId ? await getHandleJob(jobId) : await latestHandleJob();
+          const shop = await shopifyGraphQL(`{ shop { name myshopifyDomain } }`);
+          const refreshed = job ? await refreshHandleJob(job) : null;
+          // Radlisten i config er stor og trengs ikke i nettleseren
+          if (refreshed?.config) refreshed.config = { ...refreshed.config, rows: undefined };
+          return json({
+            shopDomain: shop.data?.shop?.myshopifyDomain ?? getShopDomain(),
+            shopName: shop.data?.shop?.name ?? null,
+            allowed: handleMigrationAllowed(),
+            job: refreshed,
+          });
+        }
+
+        // POST /handles/analyze — tørrkjøring, endrer ingenting
+        if (path === "handles/analyze" && req.method === "POST") {
+          const result = planHandleMigration(await fetchMigrationProducts());
+          return json({ shopDomain: getShopDomain(), allowed: handleMigrationAllowed(), ...result });
+        }
+
+        // POST /handles/migrate { productIds?: string[], skipFlagged?: boolean }
+        if (path === "handles/migrate" && req.method === "POST") {
+          return json(await startHandleMigration(body.productIds, !!body.skipFlagged, userId));
+        }
+
+        // GET /handles/verify?jobId=… — kontroller videresendinger
+        if (path === "handles/verify" && req.method === "GET") {
+          return json(await verifyHandleJob(url.searchParams.get("jobId")));
+        }
+
+        // POST /handles/rollback { jobId? } — angre (siste) kjøring, kall igjen så lenge timedOut er true
+        if (path === "handles/rollback" && req.method === "POST") {
+          return json(await rollbackHandleJob(body.jobId ?? null, userId));
+        }
+      } catch (e) {
+        if (e instanceof HttpError) return json({ error: e.message }, e.status);
+        throw e;
+      }
     }
 
     // POST /shopify/push — push one book

@@ -7,6 +7,7 @@ import { Sjangre } from './Sjangre';
 import { ShopifyKatalog } from './ShopifyKatalog';
 import { Innstillinger } from './Innstillinger';
 import Feeder from './Feeder';
+import { Handles } from './Handles';
 
 interface ContentAreaProps {
   activeItem: string;
@@ -29,6 +30,9 @@ export function ContentArea({ activeItem }: ContentAreaProps) {
 
       case 'katalog':
         return <ShopifyKatalog />;
+
+      case 'handles':
+        return <Handles />;
 
       case 'feeds':
         return <Feeder />;
