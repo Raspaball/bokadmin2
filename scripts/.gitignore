@@ -1,2 +1,4 @@
 clean-tags-state.json
 clean-tags-log.jsonl
+out/
+.env.local
