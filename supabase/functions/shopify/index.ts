@@ -3,6 +3,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { getShopDomain, shopifyGraphQL } from "../_shared/shopify.ts";
+import { buildBookHandle, normalizeIsbn } from "../_shared/handle.js";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 
 // Felt extractIsbn trenger (bok.isbn, strekkode, SKU) — handle er ikke lenger ISBN
@@ -366,13 +367,28 @@ function bokgruppeTagsForKode(kode: string): string[] {
 
 // ── Product mutations ────────────────────────────────────────────────────────
 
+// Felt pushOneBook trenger fra et eksisterende produkt
+const PUSH_PRODUCT_FIELDS = `
+  id title handle
+  variants(first: 1) { edges { node { id sku price } } }
+  media(first: 1) { edges { node { id } } }
+`;
+
+const PRODUCT_BY_ID_QUERY = `
+  query productById($id: ID!) {
+    product(id: $id) { ${PUSH_PRODUCT_FIELDS} }
+  }
+`;
+
+const PRODUCT_BY_ISBN_QUERY = `
+  query productByIsbn($isbn: String!) {
+    productByIdentifier(identifier: { customId: { namespace: "bok", key: "isbn", value: $isbn } }) { ${PUSH_PRODUCT_FIELDS} }
+  }
+`;
+
 const PRODUCT_BY_HANDLE_QUERY = `
   query productByIdentifier($handle: String!) {
-    productByIdentifier(identifier: { handle: $handle }) {
-      id title handle
-      variants(first: 1) { edges { node { id sku price } } }
-      media(first: 1) { edges { node { id } } }
-    }
+    productByIdentifier(identifier: { handle: $handle }) { ${PUSH_PRODUCT_FIELDS} }
   }
 `;
 
@@ -522,9 +538,83 @@ const CATALOG_PRODUCTS_QUERY = `
 
 // ── Push one book ────────────────────────────────────────────────────────────
 
+// Supabase REST med service-nøkkelen (samme mønster som getCredentials)
+function supabaseRest(pathAndQuery: string, init: RequestInit = {}): Promise<Response> {
+  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  return fetch(`${supabaseUrl}/rest/v1/${pathAndQuery}`, {
+    ...init,
+    headers: {
+      apikey: serviceKey,
+      Authorization: `Bearer ${serviceKey}`,
+      "Content-Type": "application/json",
+      ...(init.headers || {}),
+    },
+  });
+}
+
+async function getStoredShopifyId(isbn: string): Promise<string | null> {
+  try {
+    const res = await supabaseRest(`books?isbn=eq.${encodeURIComponent(isbn)}&shopify_id=not.is.null&select=shopify_id&limit=1`);
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return rows?.[0]?.shopify_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveShopifyIdToBooks(isbn: string, shopifyId: string, handle: string, variantId?: string): Promise<void> {
+  try {
+    await supabaseRest(`books?isbn=eq.${encodeURIComponent(isbn)}`, {
+      method: "PATCH",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({
+        shopify_id: shopifyId,
+        shopify_handle: handle,
+        shopify_variant_id: variantId ?? null,
+        synced_at: new Date().toISOString(),
+      }),
+    });
+  } catch (e) {
+    console.error(`[push ${isbn}] Kunne ikke lagre shopify_id i books: ${String(e)}`);
+  }
+}
+
+function newBookHandle(book: BookMetadata, isbn: string): string {
+  return buildBookHandle({ title: book.title, authors: book.author, isbn }) ?? isbn;
+}
+
+// Finner et eksisterende produkt for boka, i denne rekkefølgen:
+//   a. shopify_id lagret i books
+//   b. metafeltet bok.isbn (customId)
+//   c. handle = ISBN (eldre produkter)
+//   d. handle = ny handle (migrerte produkter som ennå ikke har bok.isbn)
+// Returnerer null hvis boka ikke finnes, og da opprettes et nytt produkt.
+async function findExistingProduct(book: BookMetadata, isbn: string): Promise<Record<string, unknown> | null> {
+  const storedId = await getStoredShopifyId(isbn);
+  if (storedId) {
+    try {
+      const r = await shopifyGraphQL(PRODUCT_BY_ID_QUERY, { id: storedId });
+      if (r.data?.product?.id) return r.data.product;
+    } catch (_) { /* slettet eller ugyldig ID — prøv neste */ }
+  }
+
+  const lookups: Array<[string, Record<string, unknown>]> = [
+    [PRODUCT_BY_ISBN_QUERY, { isbn }],
+    [PRODUCT_BY_HANDLE_QUERY, { handle: isbn }],
+    [PRODUCT_BY_HANDLE_QUERY, { handle: newBookHandle(book, isbn) }],
+  ];
+  for (const [query, variables] of lookups) {
+    const r = await shopifyGraphQL(query, variables);
+    if (r.data?.productByIdentifier?.id) return r.data.productByIdentifier;
+  }
+  return null;
+}
+
 async function pushOneBook(
   book: BookMetadata
-): Promise<{ shopifyId: string; handle: string; variantId?: string }> {
+): Promise<{ shopifyId: string; handle: string; variantId?: string; created: boolean; warning?: string }> {
   // Build tag list: author, title + bokgruppekode hierarchy
   const tagList = [book.author, book.title].filter(Boolean);
   if (book.bokgruppekode) {
@@ -532,26 +622,18 @@ async function pushOneBook(
   }
   const tags = tagList.join(", ");
 
-  const handle = book.isbn;
+  const isbn = normalizeIsbn(book.isbn);
+  if (!isbn) throw new Error(`Ugyldig ISBN: ${book.isbn}`);
 
-  // Step 1: Check if product exists, then create or update
-  let product: Record<string, unknown> | null = null;
-  let isUpdate = false;
-  let alreadyHasImage = false;
-
-  try {
-    const lookupResult = await shopifyGraphQL(PRODUCT_BY_HANDLE_QUERY, { handle });
-    const existing = lookupResult.data?.productByIdentifier;
-    if (existing?.id) {
-      product = existing;
-      isUpdate = true;
-      alreadyHasImage = (existing.media as { edges: unknown[] })?.edges?.length > 0;
-    }
-  } catch (_) { /* not found — create */ }
+  // Step 1: Finn eksisterende produkt (se findExistingProduct), ellers opprett.
+  // Handle settes bare ved opprettelse — eksisterende produkter beholder sin.
+  const existing = await findExistingProduct(book, isbn);
+  let product: Record<string, unknown> | null = existing;
+  const isUpdate = !!existing;
+  const alreadyHasImage = ((existing?.media as { edges: unknown[] } | undefined)?.edges?.length ?? 0) > 0;
 
   const productInput: Record<string, unknown> = {
     title: book.title,
-    handle,
     descriptionHtml: toHtml(book.description || ""),
     vendor: book.publisher || "",
     productType: book.author || "",
@@ -566,6 +648,7 @@ async function pushOneBook(
     if (userErrors?.length) throw new Error(userErrors.map((e: { message: string }) => e.message).join(", "));
     if (updated) product = updated;
   } else {
+    productInput.handle = newBookHandle(book, isbn);
     const createResult = await shopifyGraphQL(PRODUCT_CREATE_MUTATION, { product: productInput });
     const { product: created, userErrors } = createResult.data?.productCreate || {};
     if (userErrors?.length) throw new Error(userErrors.map((e: { message: string }) => e.message).join(", "));
@@ -589,7 +672,7 @@ async function pushOneBook(
       productId: product.id,
       variants: [{
         id: variantId,
-        barcode: book.isbn,
+        barcode: isbn,
         price: book.price ? String(book.price) : "0",
         taxable: false,
       }],
@@ -601,7 +684,7 @@ async function pushOneBook(
       const variantData = await shopifyGraphQL(variantQuery, {});
       const inventoryItemId = variantData.data?.productVariant?.inventoryItem?.id;
       if (inventoryItemId) {
-        const invInput: Record<string, unknown> = { sku: book.isbn };
+        const invInput: Record<string, unknown> = { sku: isbn };
         if (book.vekt) invInput.measurement = { weight: { value: book.vekt, unit: "GRAMS" } };
         await shopifyGraphQL(INVENTORY_ITEM_UPDATE, { id: inventoryItemId, input: invInput });
       }
@@ -626,6 +709,26 @@ async function pushOneBook(
     });
   } catch (_) { /* non-critical */ }
 
+  // Step 3b: bok.isbn — brukes til oppslag ved neste push (customId). Eget kall,
+  // slik at en feil her ikke stopper SEO-feltene over. Typen kommer fra
+  // metafeltdefinisjonen i butikken.
+  let warning: string | undefined;
+  try {
+    const mf = await shopifyGraphQL(`
+      mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
+          metafields { id }
+          userErrors { field message }
+        }
+      }
+    `, { metafields: [{ ownerId: product.id, namespace: "bok", key: "isbn", value: isbn }] });
+    const errs = mf.data?.metafieldsSet?.userErrors as { message: string }[] | undefined;
+    if (errs?.length) warning = `bok.isbn ble ikke satt: ${errs.map(e => e.message).join(", ")}`;
+  } catch (e) {
+    warning = `bok.isbn ble ikke satt: ${String(e)}`;
+  }
+  if (warning) console.error(`[push ${isbn}] ${warning}`);
+
   // Step 4: Image — only add if product has no image yet
   const imageUrl = book.imageUrl || book.image_url;
   if (imageUrl && !alreadyHasImage) {
@@ -637,7 +740,10 @@ async function pushOneBook(
     } catch (_) { /* non-critical */ }
   }
 
-  return { shopifyId: product.id as string, handle: product.handle as string, variantId };
+  // Step 5: Lagre produkt-ID i books, slik at neste push finner produktet direkte
+  await saveShopifyIdToBooks(isbn, product.id as string, product.handle as string, variantId);
+
+  return { shopifyId: product.id as string, handle: product.handle as string, variantId, created: !isUpdate, warning };
 }
 
 // ── Sync Smart Collections ────────────────────────────────────────────────────
@@ -952,8 +1058,9 @@ function booksToShopifyCSV(books: BookMetadata[]): string {
     const tags = tagList.join(", ");
     const imageUrl = book.imageUrl || book.image_url || "";
 
+    const isbn = normalizeIsbn(book.isbn);
     return [
-      book.isbn, book.title, book.description || "", book.publisher || "",
+      isbn ? newBookHandle(book, isbn) : book.isbn, book.title, book.description || "", book.publisher || "",
       book.author || "", tags, "TRUE", "active", "Title", "Default Title",
       book.isbn, book.isbn, book.price ?? "", "FALSE", "Media > Books > Print Books",
       "continue", "", book.vekt ?? "", "g", "manual", "TRUE", "FALSE",
@@ -1525,7 +1632,7 @@ serve(async (req: Request) => {
       for (const book of books) {
         try {
           const result = await pushOneBook(book);
-          results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle });
+          results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle, created: result.created, warning: result.warning });
         } catch (e) {
           results.push({ isbn: book.isbn, success: false, error: String(e) });
         }

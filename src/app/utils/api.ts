@@ -494,7 +494,7 @@ export const bokbasen = {
 
 export const shopify = {
   // Push one book to Shopify
-  async pushBook(book: BokbasenSearchResult | Book): Promise<{ shopifyId: string; handle: string; variantId?: string }> {
+  async pushBook(book: BokbasenSearchResult | Book): Promise<{ shopifyId: string; handle: string; variantId?: string; created?: boolean; warning?: string }> {
     const res = await callEdgeFunction("shopify/push", {
       method: "POST",
       body: JSON.stringify({ book }),

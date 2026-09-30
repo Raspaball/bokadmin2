@@ -423,6 +423,7 @@ export function Import() {
         b.id === bookId ? { ...b, pushing: false, pushed: true, shopify_id: result.shopifyId, shopify_handle: result.handle } : b
       ));
       toast.success(`"${book.title}" pushet til Shopify`);
+      if (result.warning) toast.warning(result.warning);
     } catch (error) {
       await syncLog.add({
         isbn: book.isbn,
