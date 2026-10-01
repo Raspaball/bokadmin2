@@ -275,6 +275,55 @@ Testet i Testbutikk (shopify og bokbasen deployet):
 | Avkledd med pris | Som før: 449, ACTIVE, ingen notat |
 | Antall produkter etter testene | 65 |
 
+## Pakke C: kommende og midlertidig utsolgte bøker (2026-10-02)
+
+Oppgaven: `oppgaver/pakke-c-tilgjengelighet.md`. Beslutning (Eirik): kommende og midlertidig utsolgte bøker skal være synlige og kunne kjøpes, ikke utkast (utkast gir 404, og Google mister siden akkurat når kommende bøker gir søketrafikk). Prisregelen (List 58) er ikke endret.
+
+### Regel (`availabilityRule` i `_shared/availability.ts`)
+
+| ONIX List 65 | Status | Kan kjøpes | `bok.tilgjengelighet` |
+|---|---|---|---|
+| 20–23 | ACTIVE | Ja | `tilgjengelig` |
+| 10, 11, 12 | ACTIVE | Ja (forhåndsbestilling) | `kommer` |
+| 30–34 | ACTIVE | Ja (vi bestiller) | `midlertidig_utsolgt` |
+| 43, 46, 49 | ARCHIVED | Nei | `utgatt` |
+| Alt annet, også tom/ukjent kode | DRAFT | Nei | `ikke_tilgjengelig` |
+
+Brukt av tilgjengelighetssjekken, push og CSV-eksporten. Frontend-kopi i `src/app/utils/availabilityCodes.ts`. Importfilteret har nå gruppene Tilgjengelig, Kommer og Midlertidig utsolgt på som standard, og Ikke tilgjengelig, Utgått og Ukjent av.
+
+**Kjøpbarhet.** Funnet i Testbutikk: bøker Bokadmin har laget, har lager som ikke spores (alltid kjøpbare). De migrerte har sporet lager, `inventoryPolicy: DENY` og ulik beholdning, og kan ikke kjøpes når beholdningen er 0. Valgt: den minste endringen er `inventoryPolicy: CONTINUE` på varianten, bare når lageret spores, policyen er DENY og boka skal kunne kjøpes. Beholdning, sporing og lokasjoner røres ikke. CSV-eksporten hadde allerede «continue».
+
+**Utgivelsesdato** (`bok.utgivelsesdato`, `extractPublishingDate` i `_shared/onix.js`). Oppgaven sa PublishingDate rolle 01, ellers PublicationDate. Kontroll mot 103 rå ONIX 3.1-poster: rolle 01 er **alltid bare årstall** (dateformat 05), og PublicationDate finnes ikke i ONIX 3. Hele datoen står i MarketDate rolle 01 for kommende bøker (33 av 33 med kode 10/11) og i PublishingDate rolle 11 for utgitte. Rekkefølgen er derfor: rolle 01 hvis hel dato → MarketDate 01 → PublishingDate 11 → PublicationDate (2.1). Bare årstall gir ingen dato. Importen ga før ingen dato for kommende bøker (den forkastet årstall fram i tid). `publishingDate` (YYYY-MM-DD) er nytt i importsvaret.
+
+### Del for del
+
+| Del | Commit | Innhold |
+|---|---|---|
+| 1. Metafelt | 8dc3412 | `bok.tilgjengelighet` (single_line_text_field, choices-validering) og `bok.utgivelsesdato` (date), festet, Storefront PUBLIC_READ. Laget i Testbutikk med `node scripts/tilgjengelighet-definisjoner.mjs --create` |
+| 2. Tilgjengelighetssjekken | d93a024 | Setter status, metafeltene og `CONTINUE`. Logg: «Ville endret/Endret: Kommer 15.10.2026: ACTIVE, kan forhåndsbestilles (status … → …, tilgjengelighet … → kommer, utgivelsesdato … → 2026-10-15, salg uten lager)». Bokbasen-feil: ingen endring |
+| 3. Push og CSV | a9527e8 | Push: status og metafelt etter regelen (ikke lenger alltid ACTIVE), `CONTINUE` ved sporet lager. Ny bok uten pris er fortsatt alltid utkast. Mangler kode eller dato, hentes ONIX én gang (felles med prisårsaken). Bokbasen nede: eksisterende bok beholder status, ny blir utkast. Svaret har `availabilityNote` og `status`, og Import-siden logger notatet. CSV: uten pris `draft`, ellers etter regelen |
+
+### Test i Testbutikk (del 4)
+
+Deployet: `availability-check`, `shopify`, `bokbasen`. Ingen migrasjoner.
+
+| Test | Resultat |
+|---|---|
+| Sjekkmodus | 43 ville endres, 22 uten ISBN hoppet over, 0 feil. Kommer 33, midlertidig utsolgt 1, tilgjengelig 9. **0 statusendringer**: alle forblir ACTIVE (med den gamle regelen ville 35 blitt utkast). 7 migrerte bøker (4 kommer, 3 tilgjengelig) ville fått `CONTINUE`. Alle 43 får dato |
+| Oppdateringsmodus | 43 endret, 0 feil. Ny sjekk etterpå: 0 avvik |
+| Tre bøker kontrollert | H (Minier, kode 10, sporet lager, beholdning 5): ACTIVE, `kommer`, 2026-10-02, `CONTINUE`, kan kjøpes. Jeg kommer hjem (kode 31): ACTIVE, `midlertidig_utsolgt`, 2026-09-30, kan kjøpes. Avkledd (21): ACTIVE, `tilgjengelig`, 2026-02-26, kan kjøpes. Naturen er kuren (10): `kommer`, 2026-08-21 |
+| Handlekurv på nettsiden | H (Minier) lagt i handlekurven (Eirik, i nettleseren) |
+| Push av Naturen er kuren | Importen gir `availability` 10 og `publishingDate` 2026-08-21. Push: «Kommer 21.08.2026: ACTIVE, kan forhåndsbestilles» |
+| CSV | Kode 10 og 31 → `active`, 43 → `archived`, uten pris → `draft` og tom pris |
+| Priser og status | 65 av 65 produkter med samme pris og status som før testene |
+
+Gjenstår:
+- Lage metafeltdefinisjonene i livebutikken før 2.0 går live.
+- Visningen i temaet («Kommer 15. november», «Forhåndsbestill», «Midlertidig utsolgt – vi bestiller den til deg»): Folio.
+- 301-videresending for utgåtte bøker (43, 46, 49) og kode 41: senere.
+- Noen kommende bøker har en utgivelsesdato som er passert (f.eks. 21.08.2026), men har fortsatt kode 10 i Bokbasen. De vises som «kommer» til Bokbasen oppdaterer koden.
+- CSV-eksporten leser koden fra boka og henter ikke ONIX. Bøker i arbeidslista uten `availability_code` blir `draft` i CSV.
+
 ## Status pakke A2, prissikring
 
 Oppgaven: `oppgaver/pakke-a2-prissikring.md`.

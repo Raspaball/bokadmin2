@@ -33,7 +33,8 @@ Prøv i så stor grad som mulig å bruke felles datakilder for viktige data som 
 
 | Data | Kilde | Brukt av |
 |---|---|---|
-| ONIX List 65 (tilgjengelighetskoder) | `src/app/utils/availabilityCodes.ts` | Import.tsx, BokbasenOppslag.tsx, TilgjengelighetTab.tsx; availability-check/index.ts har kopi. Full referanse: https://ns.editeur.org/onix/en/65 |
+| ONIX List 65 (tilgjengelighetsregel) | `availabilityRule()` i `supabase/functions/_shared/availability.ts` (status, `bok.tilgjengelighet`, kjøpbarhet) | availability-check, pushOneBook, CSV-eksport; frontend-kopi i `src/app/utils/availabilityCodes.ts` (Import.tsx, BokbasenOppslag.tsx). Full referanse: https://ns.editeur.org/onix/en/65 |
+| Tilgjengelighetskode og utgivelsesdato fra ONIX | `extractAvailabilityCode()` / `extractPublishingDate()` i `_shared/onix.js` | bokbasen (import), availability-check, shopify (push) |
 | Bokgruppekode → navn-mapping | `COLLECTION_NAMES` i `supabase/functions/_shared/collection-names.ts` (autoritativ, flyttet fra shopify/index.ts i pakke A2 del 6) | shopify (samlinger, megameny), sjangre-sync |
 | Samlingskall (2026-07) | `COLLECTION_CREATE_MUTATION` / `COLLECTION_UPDATE_MUTATION` / `tagSources()` i `_shared/collections.ts` (`collection:` + `sources`, ikke utfaset `input:` + `ruleSet`) | shopify (bkg-samlinger, strømmer), sjangre-sync |
 | Pris ved push/CSV (aldri 0) | `decidePushPrice()` / `csvPriceAndStatus()` i `_shared/push-price.ts` | pushOneBook, CSV-eksport |
@@ -163,18 +164,18 @@ Prioritetsrekkefølge i `choosePrice()` (høyest prioritet først, priser med mv
 - **NB**: Ikke ta første prisblokk i XML-rekkefølge — iterer alle og velg etter prioritet
 - Bare priser i NOK, for Norge og gyldige i dag (Europe/Oslo) godtas; ved lik type vinner nyest startdato. Ingen godkjent pris → `null` + årsak i `sync_log`. Se BOKADMIN2_OPPSETT.md
 
-**ONIX List 65 → Shopify status (availability-check):**
+**ONIX List 65 → status, `bok.tilgjengelighet` og kjøpbarhet (pakke C, 2026-10-02):**
 Full referanse (norsk): https://ns.editeur.org/onix/nb/65
-Kanonisk kilde: `src/app/utils/availabilityCodes.ts` — kopi i `availability-check/index.ts` (må holdes i sync).
-- **ACTIVE**: 20 (tilgjengelig), 21 (på lager), 22 (skaffes på bestilling), 23 (POD)
-- **ARCHIVED** (kun genuint permanente): 43 (ikke lenger distribuert), 46 (trukket tilbake fra salg), 49 (tilbakekalt)
-- **DRAFT** — alt annet, inkl.:
-  - 01 (vil ikke utkomme), 09–12 (ikke tilgjengelig ennå)
-  - 30–34 (midlertidig utilgjengelig, under opptrykk, nytt opplag ventes)
-  - 40 (ikke tilgjengelig generisk), 41 (erstattet av nytt produkt), 42 (annet format)
-  - 44 (bestilles direkte fra vareeier — IKKE permanent), 45 (selges ikke enkeltvis — IKKE permanent)
-  - 47 (nedsettelse), 48 (utsolgt/POD), 50 (selges kun enkeltvis), 51 (utgiver angir utsolgt), 52 (ikke dette marked)
-  - 97–99 (ukjent / kontakt kundetjeneste)
+Kanonisk kilde: `availabilityRule()` i `supabase/functions/_shared/availability.ts`, brukt av availability-check, pushOneBook og CSV-eksporten. Frontend-kopi i `src/app/utils/availabilityCodes.ts` (må holdes lik).
+- **20–23** → ACTIVE, `tilgjengelig`, kan kjøpes
+- **10, 11, 12** → ACTIVE, `kommer`, kan kjøpes (forhåndsbestilling). Ikke lenger utkast: utkast gir 404 og mister søketrafikken
+- **30–34** → ACTIVE, `midlertidig_utsolgt`, kan kjøpes (vi bestiller)
+- **43, 46, 49** → ARCHIVED, `utgatt`
+- **Alt annet** (også tom/ukjent kode: 01, 09, 40–42, 44, 45, 47, 48, 50–52, 97–99) → DRAFT, `ikke_tilgjengelig`
+- «Kan kjøpes» uansett lager: varianter med sporet lager og `inventoryPolicy: DENY` får `CONTINUE` (`needsContinuePolicy`). Beholdning, sporing og lokasjoner endres aldri. Varianter Bokadmin lager selv spores ikke
+- `bok.utgivelsesdato` (date) fra `extractPublishingDate()` i `_shared/onix.js`: PublishingDate 01 hvis hel dato → MarketDate 01 → PublishingDate 11 → PublicationDate. Hos Bokbasen er PublishingDate 01 alltid bare årstall; kommende bøker har datoen i MarketDate 01
+- Push: ny bok uten godkjent pris er alltid DRAFT (pakke A2). Bokbasen nede og ingen kode i boka: eksisterende bok beholder status, ny blir DRAFT
+- Metafeltdefinisjonene lages med `node scripts/tilgjengelighet-definisjoner.mjs --create` (laget i Testbutikk; må lages i livebutikken før live)
 - **NB**: Shopify `products`-/`productsCount`-spørringer som skal treffe hele katalogen bruker `query: "${ALL_PRODUCT_STATUSES}"` fra `_shared/shopify.ts` (Testbutikk 2026-10-01: arkiverte kom med også uten filter, utkast ikke kontrollert — filteret settes uansett)
 
 ### Job resume-arkitektur (kritisk — ikke endre uten å lese dette)
