@@ -294,7 +294,7 @@ function parseOnix(xmlText: string, isbn: string): BookMetadata | null {
     if (name) authors.push(name.trim());
   }
 
-  // Pris: samme regel som prisjobben, 0 eller lavere gir null (se _shared/price.ts)
+  // Pris: samme regel som prisjobben (NOK, Norge, gyldig i dag), 0 eller lavere gir null (se _shared/price.ts)
   const price = pickValidPrice(xml);
 
   // Image URL — ONIX 3: <SupportingResource> with ResourceContentType 01

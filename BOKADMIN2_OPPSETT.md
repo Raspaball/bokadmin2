@@ -193,6 +193,37 @@ Gammel kode (lest ordrett fra live-Bokadmin, `C:\Bokadmin`) mot ny, på de samme
 - Tester: `scripts/price.test.mjs`, der import og prisjobb gir samme pris i alle tilfellene (også 02 og 04 med ulike beløp).
 - Med dagens data blir det ingen synlig forskjell: alle 85 hentede poster med pris har én prisblokk (nye: 04, eldre: 02).
 
+## Valuta og gyldighetsdato i prisvalget (2026-10-01, del 8)
+
+### Rådata
+
+Rå ONIX for 103 titler (bare lesing): 43 nye i Testbutikk (2025–26, flere forhåndsbestillinger med tilgjengelighet 10/11), 46 eldre (1990–2012) og 14 fra 2018–2025. Alle er ONIX **3.1**.
+
+| Felt | Funn |
+|---|---|
+| `CurrencyCode` | Står i hver `Price` (99 av 99 priser). Alltid NOK |
+| `DefaultCurrencyCode` i headeren | Finnes ikke (feltet finnes bare i ONIX 2.1) |
+| `PriceEffectiveFrom` / `PriceEffectiveUntil` (ONIX 2.1) | Finnes ikke |
+| `PriceDate` (ONIX 3) | Bare `PriceDateRole` 15 (til-dato), på 10 av 41 fastpriser (04), f.eks. Avkledd til 2027-02-25, Årstidskvartetten til 2026-10-05. Rolle 14 (fra) finnes ikke |
+| `Territory` / `CountriesIncluded` i `Price` | Finnes ikke |
+| `Market` → `Territory` | `CountriesIncluded` = NO på 7 av 14 titler fra 2018–2025, ellers ingen |
+| Antall priser per bok | Høyst én. 4 bøker uten pris |
+| Utløpt fastprisperiode | Bokbasen erstatter 04 med 02 (veiledende) uten datoer. Ingen utløpte 04 er funnet i dataene |
+
+### Regel (`choosePrice` i `_shared/price.ts`, brukt av import og prisjobb)
+
+1. **Valuta:** bare NOK. Mangler `CurrencyCode`, brukes `DefaultCurrencyCode`; mangler begge, regnes prisen som NOK. Aldri annen valuta som reserve.
+2. **Territorium:** står det et territorium i `Price` (ellers i `Market` for samme `ProductSupply`), godtas prisen bare hvis NO er med (eller regionen er WORLD uten at NO er unntatt).
+3. **Dato:** bare priser som gjelder i dag i Europe/Oslo (`PriceEffectiveFrom/Until` eller `PriceDate` 14/15, til og med sluttdatoen). Pris uten datoer gjelder alltid.
+4. **Valg:** blant godkjente priser 04 > 03 > 02 > 01 > andre. Ved flere av samme type vinner nyest startdato.
+5. **Ingen godkjent pris** gir `null`: prisen endres ikke, og prisjobben logger årsaken i `sync_log` («Ingen endring: ingen NOK-pris», «… ingen pris for Norge», «… ingen gyldig pris i dag», «… ingen pris»). Importen får `null` som før.
+
+**Bevisst strengere enn gamle Bokadmin**, som tar første beløp uansett valuta, territorium og dato.
+
+Tester: `scripts/price.test.mjs` (ONIX 3 og 2.1: NOK og EUR med samme type, bare EUR, `DefaultCurrencyCode`, 04 fra i morgen mot 02 nå, 04 utløpt i går mot 01 uten datoer, to 04 med ulike startdatoer, territorium uten NO, ingen godkjent pris, Oslo-tid).
+
+Kontroll mot Testbutikk (lokalt, bare lesing, 2026-10-01): 65 produkter, 22 uten ISBN, 43 med samme pris som regelen gir, 0 med ny pris, 0 uten godkjent pris. Ingen priser er endret.
+
 ## Funksjoner testet i 2.0 for første gang (2026-09-30)
 
 Mot Testbutikk, via de samme endepunktene som sidene bruker. Livebutikken er ikke rørt, og 2.0 skal ikke prøves mot den ennå.

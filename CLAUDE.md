@@ -141,7 +141,7 @@ Both `price-update` and `availability-check` share the same job pattern:
 - Cancellation: `POST /cancel/:jobId` sets status to `failed` with `error_message: "Avbrutt av bruker"`. The processing loop checks DB status each iteration.
 - `sync_log` entries include `job_id` for per-job log views, and can be deleted individually via `syncLog.deleteEntry(id)` (RLS: owner or NULL rows)
 
-**ONIX List 58 → Bokbasen-pris (price-update):**
+**ONIX List 58 → Bokbasen-pris (`choosePrice()` i `_shared/price.ts`, brukt av import og price-update):**
 Full referanse: https://ns.editeur.org/onix/nb/58 | Bokbasen-dok: https://bokbasen.jira.com/wiki/spaces/api/pages/3049947145/Fixed+prices+in+Onix+from+Bokbasen
 Norge har fastprislov for bøker fra 1. januar 2024. Norske bøker har 0% mva, så eks/inkl-beløp er like i praksis.
 Prioritetsrekkefølge i `fetchBokbasenPrice()` (høyest prioritet først):
@@ -150,7 +150,8 @@ Prioritetsrekkefølge i `fetchBokbasenPrice()` (høyest prioritet først):
 - **02** Veiledende utsalgspris inkl. mva.
 - **01** Veiledende utsalgspris uten mva.
 - Fallback: første pris med beløp uansett type
-- **NB**: Ikke ta første prisblokk i XML-rekkefølge — iterer alle og velg etter prioritet (se `fetchBokbasenPrice()` i price-update/index.ts)
+- **NB**: Ikke ta første prisblokk i XML-rekkefølge — iterer alle og velg etter prioritet
+- Bare priser i NOK, for Norge og gyldige i dag (Europe/Oslo) godtas; ved lik type vinner nyest startdato. Ingen godkjent pris → `null` + årsak i `sync_log`. Se BOKADMIN2_OPPSETT.md
 
 **ONIX List 65 → Shopify status (availability-check):**
 Full referanse (norsk): https://ns.editeur.org/onix/nb/65

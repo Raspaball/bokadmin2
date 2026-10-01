@@ -4,8 +4,8 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
-import { getBokbasenToken } from "../_shared/bokbasen-auth.ts";
-import { pickPriceUpdatePrice } from "../_shared/price.ts";
+import { BOKBASEN_ONIX_URL, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
+import { choosePrice, type PriceChoice } from "../_shared/price.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 
 const PAGE_SIZE = 250;
@@ -120,20 +120,15 @@ async function getShopifyProductCount(_userId: string | null): Promise<number> {
 
 // extractIsbn: felles regel i _shared/isbn.js (bok.isbn → strekkode → SKU → ISBN-handle)
 
-async function fetchBokbasenPrice(isbn: string, userId: string | null): Promise<number | null> {
+// Pris fra Bokbasen etter regelen i _shared/price.ts (NOK, Norge, gyldig i dag,
+// 04 > 03 > 02 > 01 > andre). price = null med årsak når ingen pris godkjennes.
+async function fetchBokbasenPrice(isbn: string, userId: string | null): Promise<PriceChoice> {
   const token = await getBokbasenToken(userId);
-  const res = await fetch(`https://api.bokbasen.io/metadata/export/onix/v2/${isbn}`, {
+  const res = await fetch(`${BOKBASEN_ONIX_URL}/${isbn}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  if (!res.ok) return null;
-
-  const xml = (await res.text())
-    .replace(/\s+xmlns[^"]*"[^"]*"/g, "")
-    .replace(/<(\w+:)/g, "<")
-    .replace(/<\/(\w+:)/g, "</");
-
-  // Prisjobbens regel fra gamle Bokadmin: 04 > 03 > 02 > 01 > andre (se _shared/price.ts)
-  return pickPriceUpdatePrice(xml);
+  if (!res.ok) return { price: null };
+  return choosePrice(await res.text());
 }
 
 async function updateShopifyPrice(
@@ -237,7 +232,7 @@ async function processBatch(jobId: string) {
       }
 
       try {
-        const bokbasenPrice = await fetchBokbasenPrice(isbn, userId);
+        const { price: bokbasenPrice, reason } = await fetchBokbasenPrice(isbn, userId);
 
         if (bokbasenPrice === null) {
           failed++;
@@ -246,7 +241,8 @@ async function processBatch(jobId: string) {
             title: product.handle,
             action: "update",
             status: "error",
-            message: "Kunne ikke hente pris fra Bokbasen",
+            // Ingen godkjent pris: prisen endres ikke («ingen NOK-pris», «ingen gyldig pris i dag» …)
+            message: reason ? `Ingen endring: ${reason}` : "Kunne ikke hente pris fra Bokbasen",
             shopify_id: product.id,
             job_id: jobId,
             user_id: userId,
