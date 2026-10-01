@@ -173,7 +173,7 @@ Alle 89: skjema 37 finnes i alle, alltid 3 sifre. Skjema 23 finnes i ingen. (And
 - Lesingen ligger nå i `extractBokgruppekode()` i `_shared/onix.js` (ren JS + `.d.ts`), brukt av `bokbasen`, `shopify` og `sjangre-sync`. Første kode med 1–3 sifre vinner. Før tok `bokbasen` den siste og godtok hva som helst; for dataene over gir det samme resultat. Tester: `scripts/onix.test.mjs`.
 - Ingen bkg-tagger i Testbutikk er endret.
 
-## Prisregler flyttet til _shared/price.ts (2026-10-01)
+## Prisregler flyttet til _shared/price.ts (2026-10-01, del 6)
 
 Begge reglene fra gamle Bokadmin er flyttet uendret til `_shared/price.ts`:
 
@@ -183,6 +183,15 @@ Begge reglene fra gamle Bokadmin er flyttet uendret til `_shared/price.ts`:
 Tester: `scripts/price.test.mjs` (bare 01, 02 og 04 med ulike beløp, bare 03, ingen type, beløp 0, ingen pris).
 
 Gammel kode (lest ordrett fra live-Bokadmin, `C:\Bokadmin`) mot ny, på de samme 10 ekte ISBN-ene: 10 av 10 like for både import og prisjobb. Nye bøker har én Price med type 04, eldre én med type 02. Ingen av 89 hentede poster har mer enn én prisblokk, så reglene gir i dag samme pris.
+
+## Én prisregel: importen bruker fastprisregelen (2026-10-01, del 7)
+
+**Bevisst avvik fra gamle Bokadmin.** Importen i 2.0 velger pris som prisjobben (04 > 03 > 02 > 01 > andre). Gamle Bokadmin tar veiledende pris (første 01/02) ved import. Livebutikken ender uansett på fastprisen når prisjobben har vært innom.
+
+- `pickValidPrice(xml)` i `_shared/price.ts` = `pickPriceUpdatePrice`, men 0 eller lavere godtas ikke. Ingen godkjent pris gir `null`, som før (push setter da pris 0, uendret oppførsel). `pickImportPrice` er fjernet.
+- Eneste sted som leser pris fra ONIX er `parseOnix` i `bokbasen`, og den brukes av ISBN-oppslag, søk og datointervall. Produktopprettelse, push og CSV-eksport bruker `book.price` fra den, og får derfor fastprisen.
+- Tester: `scripts/price.test.mjs`, der import og prisjobb gir samme pris i alle tilfellene (også 02 og 04 med ulike beløp).
+- Med dagens data blir det ingen synlig forskjell: alle 85 hentede poster med pris har én prisblokk (nye: 04, eldre: 02).
 
 ## Funksjoner testet i 2.0 for første gang (2026-09-30)
 

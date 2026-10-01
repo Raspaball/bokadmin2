@@ -1,48 +1,43 @@
 // node --test scripts/*.test.mjs
 // Prisvalg fra ONIX (supabase/functions/_shared/price.ts). Utdragene følger
 // strukturen i ONIX 3.1 fra Bokbasen (navnerom fjernet).
+//
+// Bokadmin 2.0 har én prisregel: importen (pickValidPrice) og prisjobben
+// (pickPriceUpdatePrice + avvisning av 0 eller lavere) skal gi samme pris.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pickImportPrice, pickPriceUpdatePrice } from "../supabase/functions/_shared/price.ts";
+import { pickPriceUpdatePrice, pickValidPrice } from "../supabase/functions/_shared/price.ts";
 
 const price = (type, amount) =>
   `<Price>${type ? `<PriceType>${type}</PriceType>` : ""}<PriceAmount>${amount}</PriceAmount><Tax><TaxType>01</TaxType><TaxRatePercent>0</TaxRatePercent></Tax><CurrencyCode>NOK</CurrencyCode></Price>`;
 const onix = (...prices) =>
   `<ONIXMessage release="3.1"><Product><ProductSupply><SupplyDetail><ProductAvailability>21</ProductAvailability>${prices.join("")}</SupplyDetail></ProductSupply></Product></ONIXMessage>`;
 
-test("bare 01", () => {
-  const xml = onix(price("01", "349"));
-  assert.equal(pickImportPrice(xml), 349);
-  assert.equal(pickPriceUpdatePrice(xml), 349);
-});
+// Prisen prisjobben ender på: valgt pris, men 0 eller lavere avvises (ingen endring)
+const priceJob = (xml) => {
+  const p = pickPriceUpdatePrice(xml);
+  return p !== null && p > 0 ? p : null;
+};
 
-test("både 02 og 04 med ulike beløp: import tar 02, prisjobben 04", () => {
-  const xml = onix(price("02", "399"), price("04", "449"));
-  assert.equal(pickImportPrice(xml), 399);
-  assert.equal(pickPriceUpdatePrice(xml), 449);
-  // Rekkefølgen i XML endrer ikke prisjobbens valg
-  assert.equal(pickPriceUpdatePrice(onix(price("04", "449"), price("02", "399"))), 449);
-});
+const cases = [
+  ["bare 01", onix(price("01", "349")), 349],
+  ["02 og 04 med ulike beløp: fastprisen (04) vinner", onix(price("02", "399"), price("04", "449")), 449],
+  ["04 før 02 i XML: fortsatt 04", onix(price("04", "449"), price("02", "399")), 449],
+  ["bare 03", onix(price("03", "299")), 299],
+  ["01 og 03: 03 vinner", onix(price("01", "349"), price("03", "329")), 329],
+  ["ingen type", onix(price(null, "199")), 199],
+  ["beløp 0 godtas ikke", onix(price("04", "0")), null],
+  ["negativt beløp godtas ikke", onix(price("04", "-10")), null],
+  ["ingen pris", onix(), null],
+];
 
-test("bare 03: import faller tilbake til første beløp", () => {
-  const xml = onix(price("03", "299"));
-  assert.equal(pickImportPrice(xml), 299);
-  assert.equal(pickPriceUpdatePrice(xml), 299);
-});
+for (const [name, xml, expected] of cases) {
+  test(name, () => {
+    assert.equal(pickValidPrice(xml), expected, "import");
+    assert.equal(priceJob(xml), expected, "prisjobb");
+  });
+}
 
-test("ingen type", () => {
-  const xml = onix(price(null, "199"));
-  assert.equal(pickImportPrice(xml), 199);
-  assert.equal(pickPriceUpdatePrice(xml), 199);
-});
-
-test("beløp 0 velges av begge; prisjobben avviser det selv (<= 0)", () => {
-  const xml = onix(price("04", "0"));
-  assert.equal(pickImportPrice(xml), 0);
-  assert.equal(pickPriceUpdatePrice(xml), 0);
-});
-
-test("ingen pris gir null", () => {
-  assert.equal(pickImportPrice(onix()), null);
-  assert.equal(pickPriceUpdatePrice(onix()), null);
+test("pickPriceUpdatePrice returnerer 0 slik at prisjobben kan logge avvisningen", () => {
+  assert.equal(pickPriceUpdatePrice(onix(price("04", "0"))), 0);
 });

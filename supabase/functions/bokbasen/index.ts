@@ -4,7 +4,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { extractBokgruppekode } from "../_shared/onix.js";
-import { pickImportPrice } from "../_shared/price.ts";
+import { pickValidPrice } from "../_shared/price.ts";
 
 const BOKBASEN_API_BASE = "https://api.bokbasen.io/metadata";
 
@@ -294,8 +294,8 @@ function parseOnix(xmlText: string, isbn: string): BookMetadata | null {
     if (name) authors.push(name.trim());
   }
 
-  // Pris: importregelen fra gamle Bokadmin (se _shared/price.ts)
-  const price = pickImportPrice(xml);
+  // Pris: samme regel som prisjobben, 0 eller lavere gir null (se _shared/price.ts)
+  const price = pickValidPrice(xml);
 
   // Image URL — ONIX 3: <SupportingResource> with ResourceContentType 01
   // ONIX 2: <MediaFile> with MediaFileTypeCode 04 (front cover)

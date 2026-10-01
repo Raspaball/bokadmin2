@@ -2,30 +2,15 @@
 // Prisvalg fra ONIX (Bokbasen). Ren TypeScript uten Deno-API-er, slik at
 // testene i scripts/ kan importere fila direkte med Node.
 //
-// Begge reglene speiler gamle Bokadmin (C:\Bokadmin, branch utvikling)
-// nøyaktig: bokbasen/index.ts (import) og price-update/index.ts (prisjobben).
-// Ikke endre hvilken pris som velges her uten at det er en bevisst beslutning.
+// Bokadmin 2.0 har én prisregel: pickPriceUpdatePrice, prisjobbens regel fra
+// gamle Bokadmin (price-update/index.ts). Importen bruker den samme via
+// pickValidPrice. Bevisst avvik fra gamle Bokadmin, der importen tok
+// veiledende pris (første 01/02). Ikke endre hvilken pris som velges her uten
+// at det er en bevisst beslutning.
 //
 // `xml` er ONIX-teksten med navnerom fjernet (se stripNamespaces i onix.js).
 
 const PRICE_BLOCK = /<Price[\s\S]*?<\/Price>/gi;
-
-/**
- * Importregelen (gamle Bokadmin, bokbasen/index.ts): første Price med
- * PriceType 01 eller 02 vinner. Finnes ingen slik, brukes første beløp som
- * finnes. Ingen pris gir null.
- */
-export function pickImportPrice(xml: string): number | null {
-  let price = "";
-  const priceBlocks = [...xml.matchAll(PRICE_BLOCK)];
-  for (const p of priceBlocks) {
-    const pt = p[0].match(/<PriceType[^>]*>(.*?)<\/PriceType>/i)?.[1];
-    const amt = p[0].match(/<PriceAmount[^>]*>(.*?)<\/PriceAmount>/i)?.[1];
-    if ((pt === "01" || pt === "02") && amt) { price = amt; break; }
-    if (!price && amt) price = amt;
-  }
-  return price ? parseFloat(price) : null;
-}
 
 /**
  * Prisjobbens regel (gamle Bokadmin, price-update/index.ts): prioritet
@@ -55,4 +40,13 @@ export function pickPriceUpdatePrice(xml: string): number | null {
     }
   }
   return bestAmount;
+}
+
+/**
+ * Pris for import og alt annet som leser pris fra ONIX: pickPriceUpdatePrice,
+ * men 0 eller lavere godtas ikke. Ingen godkjent pris gir null.
+ */
+export function pickValidPrice(xml: string): number | null {
+  const price = pickPriceUpdatePrice(xml);
+  return price !== null && price > 0 ? price : null;
 }
