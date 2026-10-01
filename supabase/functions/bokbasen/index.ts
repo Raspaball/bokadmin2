@@ -4,6 +4,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { extractBokgruppekode } from "../_shared/onix.js";
+import { pickImportPrice } from "../_shared/price.ts";
 
 const BOKBASEN_API_BASE = "https://api.bokbasen.io/metadata";
 
@@ -293,15 +294,8 @@ function parseOnix(xmlText: string, isbn: string): BookMetadata | null {
     if (name) authors.push(name.trim());
   }
 
-  // Price (PriceType 01 or 02)
-  let price = "";
-  const priceBlocks = [...xml.matchAll(/<Price[\s\S]*?<\/Price>/gi)];
-  for (const p of priceBlocks) {
-    const pt = p[0].match(/<PriceType[^>]*>(.*?)<\/PriceType>/i)?.[1];
-    const amt = p[0].match(/<PriceAmount[^>]*>(.*?)<\/PriceAmount>/i)?.[1];
-    if ((pt === "01" || pt === "02") && amt) { price = amt; break; }
-    if (!price && amt) price = amt;
-  }
+  // Pris: importregelen fra gamle Bokadmin (se _shared/price.ts)
+  const price = pickImportPrice(xml);
 
   // Image URL — ONIX 3: <SupportingResource> with ResourceContentType 01
   // ONIX 2: <MediaFile> with MediaFileTypeCode 04 (front cover)
@@ -389,7 +383,7 @@ function parseOnix(xmlText: string, isbn: string): BookMetadata | null {
     year,
     publicationDate: publicationDate || null,
     format,
-    price: price ? parseFloat(price) : null,
+    price,
     description,
     imageUrl,
     genre,

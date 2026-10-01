@@ -173,6 +173,17 @@ Alle 89: skjema 37 finnes i alle, alltid 3 sifre. Skjema 23 finnes i ingen. (And
 - Lesingen ligger nå i `extractBokgruppekode()` i `_shared/onix.js` (ren JS + `.d.ts`), brukt av `bokbasen`, `shopify` og `sjangre-sync`. Første kode med 1–3 sifre vinner. Før tok `bokbasen` den siste og godtok hva som helst; for dataene over gir det samme resultat. Tester: `scripts/onix.test.mjs`.
 - Ingen bkg-tagger i Testbutikk er endret.
 
+## Prisregler flyttet til _shared/price.ts (2026-10-01)
+
+Begge reglene fra gamle Bokadmin er flyttet uendret til `_shared/price.ts`:
+
+- `pickImportPrice(xml)` (import, `bokbasen`): første Price med PriceType 01 eller 02, ellers første beløp.
+- `pickPriceUpdatePrice(xml)` (prisjobben): 04 > 03 > 02 > 01 > andre. Prisjobben avviser selv beløp på 0 eller lavere, og avvik under 0,01 kr regnes som ingen endring.
+
+Tester: `scripts/price.test.mjs` (bare 01, 02 og 04 med ulike beløp, bare 03, ingen type, beløp 0, ingen pris).
+
+Gammel kode (lest ordrett fra live-Bokadmin, `C:\Bokadmin`) mot ny, på de samme 10 ekte ISBN-ene: 10 av 10 like for både import og prisjobb. Nye bøker har én Price med type 04, eldre én med type 02. Ingen av 89 hentede poster har mer enn én prisblokk, så reglene gir i dag samme pris.
+
 ## Funksjoner testet i 2.0 for første gang (2026-09-30)
 
 Mot Testbutikk, via de samme endepunktene som sidene bruker. Livebutikken er ikke rørt, og 2.0 skal ikke prøves mot den ennå.

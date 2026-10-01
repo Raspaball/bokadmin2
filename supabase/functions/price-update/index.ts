@@ -5,6 +5,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
 import { getBokbasenToken } from "../_shared/bokbasen-auth.ts";
+import { pickPriceUpdatePrice } from "../_shared/price.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 
 const PAGE_SIZE = 250;
@@ -131,30 +132,8 @@ async function fetchBokbasenPrice(isbn: string, userId: string | null): Promise<
     .replace(/<(\w+:)/g, "<")
     .replace(/<\/(\w+:)/g, "</");
 
-  const priceBlocks = [...xml.matchAll(/<Price[\s\S]*?<\/Price>/gi)];
-
-  // Collect all price type → amount pairs, then pick by priority.
-  // Norwegian books have 0% VAT so eks/inkl amounts are equal, but we
-  // prefer fastpris (03/04) over veiledende (01/02) since fastpris is
-  // the legally binding price under the Norwegian fixed-price law (from 2024).
-  // Priority: 04 > 03 > 02 > 01 > any other type (fallback).
-  const PRIORITY: Record<string, number> = { "04": 1, "03": 2, "02": 3, "01": 4 };
-  let bestPriority = Infinity;
-  let bestAmount: number | null = null;
-
-  for (const p of priceBlocks) {
-    const pt = p[0].match(/<PriceType[^>]*>(.*?)<\/PriceType>/i)?.[1]?.trim();
-    const amtStr = p[0].match(/<PriceAmount[^>]*>(.*?)<\/PriceAmount>/i)?.[1];
-    if (!amtStr) continue;
-    const amt = parseFloat(amtStr);
-    if (isNaN(amt)) continue;
-    const priority = PRIORITY[pt ?? ""] ?? 5;
-    if (priority < bestPriority) {
-      bestPriority = priority;
-      bestAmount = amt;
-    }
-  }
-  return bestAmount;
+  // Prisjobbens regel fra gamle Bokadmin: 04 > 03 > 02 > 01 > andre (se _shared/price.ts)
+  return pickPriceUpdatePrice(xml);
 }
 
 async function updateShopifyPrice(
