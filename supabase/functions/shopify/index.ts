@@ -20,6 +20,7 @@ import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
 import { bookFieldsFromOnix, bookMetafields, type BookFields } from "../_shared/book-standard.ts";
 import { CATEGORY_IDS, CATEGORY_NAMES } from "../_shared/book-format.ts";
 import { bookSeo, decideSeo, legacySeo, parseSeoAuto, seoMetafields } from "../_shared/book-seo.ts";
+import { coverAlt, coverChanges, coverFilename, type CoverChange } from "../_shared/book-cover.ts";
 import {
   SAFE_STORES, MIGRATION_PRODUCTS_QUERY, HANDLE_UPDATE_MUTATION,
   planHandleMigration, isBlockedRow, handleUpdateInput, type HandlePlanRow,
@@ -110,7 +111,7 @@ const PUSH_PRODUCT_FIELDS = `
   id title handle
   ${EGEN_PRIS_FIELD}
   variants(first: 1) { edges { node { id sku price compareAtPrice inventoryPolicy inventoryItem { tracked } } } }
-  media(first: 1) { edges { node { id } } }
+  media(first: 1) { edges { node { id alt ... on MediaImage { image { url } } } } }
   seoTitleMf: metafield(namespace: "global", key: "title_tag") { value }
   seoDescMf: metafield(namespace: "global", key: "description_tag") { value }
   seoAuto: metafield(namespace: "bokadmin", key: "seo_auto") { value }
@@ -138,7 +139,7 @@ const PRODUCTS_BY_ISBN_SEARCH_QUERY = `
         ${BOK_ISBN_FIELD}
         ${EGEN_PRIS_FIELD}
         variants(first: 1) { edges { node { id sku price compareAtPrice barcode inventoryPolicy inventoryItem { tracked } } } }
-        media(first: 1) { edges { node { id } } }
+        media(first: 1) { edges { node { id alt ... on MediaImage { image { url } } } } }
         seoTitleMf: metafield(namespace: "global", key: "title_tag") { value }
         seoDescMf: metafield(namespace: "global", key: "description_tag") { value }
         seoAuto: metafield(namespace: "bokadmin", key: "seo_auto") { value }
@@ -203,11 +204,34 @@ const INVENTORY_ITEM_UPDATE = `
 const PRODUCT_IMAGE_MUTATION = `
   mutation productAddMedia($product: ProductUpdateInput!, $media: [CreateMediaInput!]!) {
     productUpdate(product: $product, media: $media) {
-      product { id }
+      product { id media(first: 1) { nodes { id } } }
       userErrors { field message }
     }
   }
 `;
+
+// Endrer filnavn og/eller alt-tekst på et bilde (MediaImage er en fil) uten ny
+// opplasting. Et nytt bilde er ofte ikke ferdig behandlet med en gang; da
+// prøves det igjen noen ganger. Kaster med Shopifys melding hvis det ikke går.
+const FILE_UPDATE_MUTATION = `
+  mutation coverFileUpdate($files: [FileUpdateInput!]!) {
+    fileUpdate(files: $files) {
+      files { id alt fileStatus }
+      userErrors { field message code }
+    }
+  }
+`;
+
+async function updateCoverFile(mediaId: string, change: CoverChange): Promise<void> {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const r = await shopifyGraphQL(FILE_UPDATE_MUTATION, { files: [{ id: mediaId, ...change }] });
+    const errs = (r.data?.fileUpdate?.userErrors ?? []) as { message: string; code?: string }[];
+    if (!errs.length) return;
+    const notReady = errs.some((e) => /READY|PROCESSING|not ready|processing/i.test(`${e.code ?? ""} ${e.message}`));
+    if (!notReady || attempt === 5) throw new Error(errs.map((e) => e.message).join(", "));
+    await new Promise((res) => setTimeout(res, 1500));
+  }
+}
 
 const PUBLICATIONS_QUERY = `
   query GetPublications {
@@ -674,15 +698,29 @@ async function pushOneBook(
   }
   if (warning) console.error(`[push ${isbn}] ${warning}`);
 
-  // Step 4: Image — only add if product has no image yet
+  // Step 4: Omslag (_shared/book-cover.ts). Nytt bilde lastes bare opp når
+  // produktet ikke har et. Alt-tekst «Omslag: {Hovedtittel} av {Forfatter}» og
+  // filnavn «{handle}-omslag.jpg» settes på nye og eksisterende bilder.
   const imageUrl = book.imageUrl || book.image_url;
-  if (imageUrl && !alreadyHasImage) {
-    try {
-      await shopifyGraphQL(PRODUCT_IMAGE_MUTATION, {
+  const wantedAlt = coverAlt(book.title, book.authors?.length ? book.authors : fields?.authors ?? []);
+  const handleForFile = product.handle as string;
+  try {
+    if (imageUrl && !alreadyHasImage) {
+      const r = await shopifyGraphQL(PRODUCT_IMAGE_MUTATION, {
         product: { id: product.id },
-        media: [{ originalSource: imageUrl, alt: book.title, mediaContentType: "IMAGE" }],
+        media: [{ originalSource: imageUrl, alt: wantedAlt, mediaContentType: "IMAGE" }],
       });
-    } catch (_) { /* non-critical */ }
+      const mediaId = r.data?.productUpdate?.product?.media?.nodes?.[0]?.id as string | undefined;
+      if (mediaId) await updateCoverFile(mediaId, { filename: coverFilename(handleForFile, imageUrl) });
+    } else if (alreadyHasImage) {
+      const node = (existing?.media as { edges: { node: { id: string; alt?: string | null; image?: { url: string } | null } }[] })?.edges?.[0]?.node;
+      if (node?.image) {
+        const change = coverChanges({ alt: node.alt, url: node.image.url }, { alt: wantedAlt, filename: coverFilename(handleForFile, node.image.url) });
+        if (Object.keys(change).length) await updateCoverFile(node.id, change);
+      }
+    }
+  } catch (e) {
+    warning = [warning, `Omslag: ${e instanceof Error ? e.message : String(e)}`].filter(Boolean).join(". ");
   }
 
   // Step 5: Lagre produkt-ID i books, slik at neste push finner produktet direkte
