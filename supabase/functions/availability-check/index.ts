@@ -4,6 +4,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
+import { getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 
 const PAGE_SIZE = 250;
@@ -46,23 +47,6 @@ interface ShopifyPage {
   endCursor: string | null;
 }
 
-interface UserSettingsRow {
-  bokbasen_client_id?: string | null;
-  bokbasen_client_secret?: string | null;
-}
-
-interface BokbasenCredentials {
-  clientId: string;
-  clientSecret: string;
-}
-
-interface TokenCacheEntry {
-  token: string;
-  expiry: number;
-}
-
-const bokbasenTokenCache = new Map<string, TokenCacheEntry>();
-
 function getUserIdFromJWT(authHeader: string): string | null {
   try {
     const token = authHeader.replace("Bearer ", "");
@@ -71,62 +55,6 @@ function getUserIdFromJWT(authHeader: string): string | null {
   } catch {
     return null;
   }
-}
-
-async function getUserSettings(userId: string | null): Promise<UserSettingsRow | null> {
-  if (!userId) return null;
-  try {
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const res = await fetch(
-      `${supabaseUrl}/rest/v1/user_settings?user_id=eq.${userId}&select=bokbasen_client_id,bokbasen_client_secret`,
-      { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } }
-    );
-    const rows = await res.json();
-    return rows?.[0] ?? null;
-  } catch {
-    return null;
-  }
-}
-
-async function getBokbasenCredentials(userId: string | null): Promise<BokbasenCredentials> {
-  const settings = await getUserSettings(userId);
-  if (settings?.bokbasen_client_id && settings?.bokbasen_client_secret) {
-    return {
-      clientId: settings.bokbasen_client_id,
-      clientSecret: settings.bokbasen_client_secret,
-    };
-  }
-
-  return {
-    clientId: Deno.env.get("BOKBASEN_CLIENT_ID")!,
-    clientSecret: Deno.env.get("BOKBASEN_CLIENT_SECRET")!,
-  };
-}
-
-async function getBokbasenToken(userId: string | null): Promise<string> {
-  const credentials = await getBokbasenCredentials(userId);
-  const cacheKey = `${credentials.clientId}:${credentials.clientSecret}`;
-  const cached = bokbasenTokenCache.get(cacheKey);
-  if (cached && Date.now() < cached.expiry) return cached.token;
-
-  const res = await fetch("https://auth.bokbasen.io/oauth/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      client_id: credentials.clientId,
-      client_secret: credentials.clientSecret,
-      audience: "https://api.bokbasen.io/metadata/",
-      grant_type: "client_credentials",
-    }),
-  });
-
-  if (!res.ok) throw new Error(`Bokbasen auth failed: ${res.status}`);
-  const data = await res.json();
-  const token = data.access_token as string;
-  const expiry = Date.now() + (data.expires_in - 60) * 1000;
-  bokbasenTokenCache.set(cacheKey, { token, expiry });
-  return token;
 }
 
 // userId-parameterne beholdes for jobbenes kallsignatur. Shopify-tilgangen er

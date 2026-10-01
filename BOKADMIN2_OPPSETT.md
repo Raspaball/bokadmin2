@@ -136,6 +136,16 @@ Med vilje ikke endret:
 | sjangre-sync: `collections(…)` ved sletting av tomme samlinger | Samlinger, ikke produkter |
 | `_shared/handle-migration.js`, `scripts/migrate-handles.mjs`, `scripts/isbn-definition.mjs` | Hadde filteret fra før |
 
+## Én Bokbasen-innlogging (2026-10-01)
+
+`_shared/bokbasen-auth.ts` erstatter de fem kopiene i `bokbasen`, `shopify`, `price-update`, `availability-check` og `sjangre-sync`.
+
+- `getBokbasenCredentials(userId)`: `user_settings.bokbasen_client_id` + `bokbasen_client_secret` (begge må være satt), ellers `BOKBASEN_CLIENT_ID` / `BOKBASEN_CLIENT_SECRET`. Abonnement fra `user_settings.bokbasen_subscription` / `BOKBASEN_SUBSCRIPTION`, ellers `extended`. `null` hvis ingenting er satt.
+- `getBokbasenToken(legitimasjon eller userId)`: henter token fra `auth.bokbasen.io`, caches per klient-ID til 60 s før utløp. Feil: `Bokbasen auth failed: <status> …`.
+- `clearBokbasenToken()`: sjangre-sync tømmer cachen ved 401 eller feil, slik den før hentet nytt token.
+- Små forskjeller fra før: `shopify` godtok ett felt fra `user_settings` og resten fra hemmelighetene. Nå gjelder samme regel som i de andre (begge eller ingen). Sjangre-sync hadde ikke cache; nå deler den cachen.
+- Testet: `deno check` på alle fem, og enhetstest av modulen med falsk `fetch` (5 av 5). Testes mot Bokbasen ved deploy.
+
 ## Funksjoner testet i 2.0 for første gang (2026-09-30)
 
 Mot Testbutikk, via de samme endepunktene som sidene bruker. Livebutikken er ikke rørt, og 2.0 skal ikke prøves mot den ennå.

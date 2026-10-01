@@ -39,6 +39,7 @@ Prøv i så stor grad som mulig å bruke felles datakilder for viktige data som 
 | Handle-regel (tittel-forfatter-ISBN-13) | `buildBookHandle()` i `supabase/functions/_shared/handle.js` | pushOneBook, CSV-eksport, handle-migrering, scripts/migrate-handles.mjs |
 | ISBN fra Shopify-produkt | `extractIsbn()` i `supabase/functions/_shared/isbn.js` (bok.isbn → strekkode → SKU → ISBN-handle) | price-update, availability-check, sjangre-sync, shopify (samlinger, migrering), scripts |
 | Plan for handle-migrering | `planHandleMigration()` i `supabase/functions/_shared/handle-migration.js` | /shopify/handles/*, scripts/migrate-handles.mjs |
+| Bokbasen-innlogging (legitimasjon, token-cache, ONIX-URL) | `getBokbasenCredentials()` / `getBokbasenToken()` / `BOKBASEN_ONIX_URL` i `supabase/functions/_shared/bokbasen-auth.ts` | bokbasen, shopify, price-update, availability-check, sjangre-sync |
 | Formatfilter (ONIX ProductForm) | `FORMAT_OPTIONS` i Import.tsx | Kun Import.tsx — kan flyttes til utils/ hvis det trengs andre steder |
 
 ### Regel for nye datatyper
@@ -90,7 +91,7 @@ UI primitives live in `src/app/components/ui/` (shadcn/ui components, do not edi
 
 Deno-based Edge Functions, each in its own subdirectory with `index.ts`.
 
-Shared code lives in `supabase/functions/_shared/`. The `.js` modules there (`handle.js`, `isbn.js`, `handle-migration.js`) are plain ESM with `.d.ts` types so both Deno and Node (`scripts/`) can import them — never copy their rules into a function. **`_shared/shopify.ts` is the only Shopify client:** it holds `SHOPIFY_API_VERSION`, fetches/refreshes the access token (`getShopifyAccessToken()`) and runs `shopifyGraphQL(query, variables)` → `{ data }`. Never define an API version, GraphQL wrapper or Shopify token lookup locally in a function.
+Shared code lives in `supabase/functions/_shared/`. The `.js` modules there (`handle.js`, `isbn.js`, `handle-migration.js`) are plain ESM with `.d.ts` types so both Deno and Node (`scripts/`) can import them — never copy their rules into a function. **`_shared/shopify.ts` is the only Shopify client:** it holds `SHOPIFY_API_VERSION`, fetches/refreshes the access token (`getShopifyAccessToken()`) and runs `shopifyGraphQL(query, variables)` → `{ data }`. Never define an API version, GraphQL wrapper or Shopify token lookup locally in a function. Likewise **`_shared/bokbasen-auth.ts` is the only Bokbasen login** (credentials from `user_settings` or env, token cached until 60 s before expiry).
 
 | Function | Purpose |
 |---|---|

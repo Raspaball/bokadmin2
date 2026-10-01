@@ -4,6 +4,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
+import { BOKBASEN_ONIX_URL, clearBokbasenToken, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 
 // Felt extractIsbn trenger (bok.isbn, strekkode, SKU) — handle er ikke lenger ISBN
@@ -34,53 +35,6 @@ function getUserIdFromJWT(authHeader: string): string | null {
 }
 
 // ── Bokbasen auth ─────────────────────────────────────────────────────────────
-
-interface BokbasenConfig {
-  clientId: string;
-  clientSecret: string;
-  subscription: string;
-}
-
-async function getBokbasenConfig(userId: string | null): Promise<BokbasenConfig | null> {
-  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-  if (userId) {
-    const res = await fetch(
-      `${supabaseUrl}/rest/v1/user_settings?user_id=eq.${userId}&select=bokbasen_client_id,bokbasen_client_secret&limit=1`,
-      { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } }
-    );
-    const rows = await res.json();
-    const s = rows?.[0];
-    if (s?.bokbasen_client_id && s?.bokbasen_client_secret) {
-      return { clientId: s.bokbasen_client_id, clientSecret: s.bokbasen_client_secret, subscription: "extended" };
-    }
-  }
-  const clientId = Deno.env.get("BOKBASEN_CLIENT_ID");
-  const clientSecret = Deno.env.get("BOKBASEN_CLIENT_SECRET");
-  if (!clientId || !clientSecret) return null;
-  return { clientId, clientSecret, subscription: Deno.env.get("BOKBASEN_SUBSCRIPTION") || "extended" };
-}
-
-// Samme innlogging og ONIX-adresse som bokbasen/ og shopify/ (auth.bokbasen.io,
-// metadata-API). Tidligere login.bokbasen.io + api.bokbasen.io/onix/v2 feilet
-// for alle oppslag (testet mot 2.0 2026-09-30).
-const BOKBASEN_ONIX_URL = "https://api.bokbasen.io/metadata/export/onix/v2";
-
-async function getBokbasenToken(config: BokbasenConfig): Promise<string> {
-  const res = await fetch("https://auth.bokbasen.io/oauth/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      client_id: config.clientId,
-      client_secret: config.clientSecret,
-      audience: "https://api.bokbasen.io/metadata/",
-      grant_type: "client_credentials",
-    }),
-  });
-  if (!res.ok) throw new Error(`Bokbasen auth failed: ${res.status}`);
-  const data = await res.json();
-  return data.access_token;
-}
 
 // Bokgruppekode = SubjectSchemeIdentifier 37 (som bokbasen/ og shopify/).
 // Navnerom-prefikser fjernes først, slik fetchBokgruppekode i shopify/ gjør.
@@ -395,7 +349,7 @@ async function processEnrichBatch(jobId: string) {
     found_kode: 0, already_cached: 0, no_data: 0, errors: 0,
   };
 
-  const bokbasenConfig = await getBokbasenConfig(userId);
+  const bokbasenConfig = await getBokbasenCredentials(userId);
 
   if (!bokbasenConfig) {
     await supabase.from("jobs").update({
@@ -474,7 +428,7 @@ async function processEnrichBatch(jobId: string) {
         });
 
         if (!onixRes.ok) {
-          if (onixRes.status === 401) bokbasenToken = null; // Token expired, refresh next iteration
+          if (onixRes.status === 401) { bokbasenToken = null; clearBokbasenToken(bokbasenConfig); } // Token expired, refresh next iteration
           config.no_data++;
         } else {
           const xml = await onixRes.text();
@@ -496,6 +450,7 @@ async function processEnrichBatch(jobId: string) {
       } catch (_e) {
         config.errors++;
         bokbasenToken = null;
+        clearBokbasenToken(bokbasenConfig);
       }
 
       config.processed++;

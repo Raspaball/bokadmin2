@@ -2,28 +2,14 @@
 // Deploy: supabase functions deploy bokbasen
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 
-const BOKBASEN_AUTH_URL = "https://auth.bokbasen.io/oauth/token";
 const BOKBASEN_API_BASE = "https://api.bokbasen.io/metadata";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
-
-// ── Token cache (in-memory, reused across warm invocations) ──────────────────
-interface BokbasenCredentials {
-  clientId: string;
-  clientSecret: string;
-  subscription: string;
-}
-
-interface TokenCacheEntry {
-  token: string;
-  expiry: number;
-}
-
-const tokenCache = new Map<string, TokenCacheEntry>();
 
 function getUserIdFromJWT(authHeader: string): string | null {
   try {
@@ -33,63 +19,6 @@ function getUserIdFromJWT(authHeader: string): string | null {
   } catch {
     return null;
   }
-}
-
-async function getBokbasenCredentials(userId: string | null): Promise<BokbasenCredentials> {
-  const fallback = {
-    clientId: Deno.env.get("BOKBASEN_CLIENT_ID")!,
-    clientSecret: Deno.env.get("BOKBASEN_CLIENT_SECRET")!,
-    subscription: Deno.env.get("BOKBASEN_SUBSCRIPTION") || "extended",
-  };
-
-  if (!userId) return fallback;
-
-  try {
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const res = await fetch(
-      `${supabaseUrl}/rest/v1/user_settings?user_id=eq.${userId}&select=bokbasen_client_id,bokbasen_client_secret,bokbasen_subscription`,
-      { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } }
-    );
-    const rows = await res.json();
-    const settings = rows?.[0];
-    if (settings?.bokbasen_client_id && settings?.bokbasen_client_secret) {
-      return {
-        clientId: settings.bokbasen_client_id,
-        clientSecret: settings.bokbasen_client_secret,
-        subscription: settings.bokbasen_subscription || "extended",
-      };
-    }
-  } catch {
-    // fall through to env vars
-  }
-
-  return fallback;
-}
-
-async function getAccessToken(credentials: BokbasenCredentials): Promise<string> {
-  const cacheKey = `${credentials.clientId}:${credentials.clientSecret}`;
-  const cached = tokenCache.get(cacheKey);
-  if (cached && Date.now() < cached.expiry) return cached.token;
-
-  const res = await fetch(BOKBASEN_AUTH_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      client_id: credentials.clientId,
-      client_secret: credentials.clientSecret,
-      audience: "https://api.bokbasen.io/metadata/",
-      grant_type: "client_credentials",
-    }),
-  });
-
-  if (!res.ok) throw new Error(`Auth failed: ${res.status} ${await res.text()}`);
-
-  const data = await res.json();
-  const token = data.access_token as string;
-  const expiry = Date.now() + (data.expires_in - 60) * 1000; // refresh 1 min early
-  tokenCache.set(cacheKey, { token, expiry });
-  return token;
 }
 
 // ── ONIX XML parser ──────────────────────────────────────────────────────────
@@ -495,8 +424,8 @@ interface BookMetadata {
 
 // GET /bokbasen/isbn/:isbn — fetch full metadata for one ISBN
 // Add ?raw=true to get raw ONIX XML for debugging
-async function handleIsbnFetch(isbn: string, credentials: BokbasenCredentials, raw = false): Promise<Response> {
-  const token = await getAccessToken(credentials);
+async function handleIsbnFetch(isbn: string, credentials: BokbasenCredentials | null, raw = false): Promise<Response> {
+  const token = await getBokbasenToken(credentials);
   const res = await fetch(`${BOKBASEN_API_BASE}/export/onix/v2/${isbn}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -526,7 +455,7 @@ async function handleIsbnFetch(isbn: string, credentials: BokbasenCredentials, r
 // Note: Bokbasen ONIX export API only supports ISBN lookup, not free-text search.
 // For title/author, we return an informative error. For ISBN, we support
 // single ISBN and comma/space-separated multi-ISBN queries.
-async function handleSearch(query: string, field: string, credentials: BokbasenCredentials): Promise<Response> {
+async function handleSearch(query: string, field: string, credentials: BokbasenCredentials | null): Promise<Response> {
   if (field !== "isbn") {
     return new Response(JSON.stringify({
       error: "Bokbasen API støtter kun ISBN-oppslag. Bruk ISBN-feltet for å søke.",
@@ -558,7 +487,7 @@ async function handleSearch(query: string, field: string, credentials: BokbasenC
   const results: BookMetadata[] = [];
   for (const isbn of isbns) {
     try {
-      const token = await getAccessToken(credentials);
+      const token = await getBokbasenToken(credentials);
       const res = await fetch(`${BOKBASEN_API_BASE}/export/onix/v2/${isbn}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -577,7 +506,7 @@ async function handleSearch(query: string, field: string, credentials: BokbasenC
 }
 
 // GET /bokbasen/date-range?from=YYYY-MM-DD&to=YYYY-MM-DD — fetch books published in date range
-async function handleDateRange(from: string, to: string, credentials: BokbasenCredentials): Promise<Response> {
+async function handleDateRange(from: string, to: string, credentials: BokbasenCredentials | null): Promise<Response> {
   // Convert YYYY-MM-DD to comparable YYYYMMDD strings for filtering
   const fromCompare = from.replace(/-/g, "");  // e.g. "20050101"
   const toCompare = to.replace(/-/g, "");      // e.g. "20061231"
@@ -586,8 +515,8 @@ async function handleDateRange(from: string, to: string, credentials: BokbasenCr
   // We use it as a rough lower bound, then filter by actual publication date below.
   const afterTs = fromCompare + "000000";
 
-  const token = await getAccessToken(credentials);
-  const subscription = credentials.subscription || "extended";
+  const token = await getBokbasenToken(credentials);
+  const subscription = credentials?.subscription || "extended";
   const pageSize = 50;
   const maxPages = 100; // 5 000 books max; returns truncated=true if hit
 
@@ -663,7 +592,7 @@ async function handleDateRange(from: string, to: string, credentials: BokbasenCr
 }
 
 // POST /bokbasen/enrich-db — fetch bokgruppekode from Bokbasen for all DB books missing it
-async function handleEnrichDb(credentials: BokbasenCredentials, userId: string | null): Promise<Response> {
+async function handleEnrichDb(credentials: BokbasenCredentials | null, userId: string | null): Promise<Response> {
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
@@ -688,7 +617,7 @@ async function handleEnrichDb(credentials: BokbasenCredentials, userId: string |
 
     const results = await Promise.allSettled(
       batch.map(async ({ isbn }) => {
-        const token = await getAccessToken(credentials);
+        const token = await getBokbasenToken(credentials);
         const res = await fetch(`${BOKBASEN_API_BASE}/export/onix/v2/${isbn}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
@@ -803,7 +732,7 @@ serve(async (req) => {
       };
 
       const formats: Record<string, string> = {};
-      const token = await getAccessToken(credentials);
+      const token = await getBokbasenToken(credentials);
 
       // Process in batches of 10 to avoid overloading Bokbasen
       const batchSize = 10;

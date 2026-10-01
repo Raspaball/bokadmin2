@@ -3,6 +3,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { ALL_PRODUCT_STATUSES, getShopDomain, shopifyGraphQL } from "../_shared/shopify.ts";
+import { BOKBASEN_ONIX_URL, type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { buildBookHandle, normalizeIsbn } from "../_shared/handle.js";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import {
@@ -14,26 +15,8 @@ import {
 const PRODUCT_ISBN_FIELDS = `${BOK_ISBN_FIELD} variants(first: 1) { nodes { barcode sku } }`;
 
 // ── Bokbasen auth (for ISBN → bokgruppekode lookup during catalog sync) ───────
-const BOKBASEN_AUTH_URL = "https://auth.bokbasen.io/oauth/token";
-const BOKBASEN_ONIX_BASE = "https://api.bokbasen.io/metadata";
-
-interface BokbasenCredentials {
-  clientId: string;
-  clientSecret: string;
-}
-
 // Shopify-tilgangen er felles for hele serveren (se _shared/shopify.ts).
-// Kun Bokbasen kan fortsatt settes per bruker i user_settings.
-interface CredentialBundle {
-  bokbasen: BokbasenCredentials;
-}
-
-interface BokbasenTokenCacheEntry {
-  token: string;
-  expiry: number;
-}
-
-const bokbasenTokenCache = new Map<string, BokbasenTokenCacheEntry>();
+// Kun Bokbasen kan fortsatt settes per bruker i user_settings (se _shared/bokbasen-auth.ts).
 
 interface PublicationsCacheEntry {
   ids: string[];
@@ -42,34 +25,11 @@ interface PublicationsCacheEntry {
 
 const publicationsCache = new Map<string, PublicationsCacheEntry>();
 
-async function getBokbasenToken(credentials: BokbasenCredentials): Promise<string> {
-  const cacheKey = `${credentials.clientId}:${credentials.clientSecret}`;
-  const cached = bokbasenTokenCache.get(cacheKey);
-  if (cached && Date.now() < cached.expiry) return cached.token;
-
-  const res = await fetch(BOKBASEN_AUTH_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      client_id: credentials.clientId,
-      client_secret: credentials.clientSecret,
-      audience: "https://api.bokbasen.io/metadata/",
-      grant_type: "client_credentials",
-    }),
-  });
-  if (!res.ok) throw new Error(`Bokbasen auth: ${res.status}`);
-  const data = await res.json();
-  const token = data.access_token as string;
-  const expiry = Date.now() + (data.expires_in - 60) * 1000;
-  bokbasenTokenCache.set(cacheKey, { token, expiry });
-  return token;
-}
-
 // Minimal ONIX parser: only extracts SubjectSchemeIdentifier 37 (bokgruppekode)
-async function fetchBokgruppekode(isbn: string, credentials: BokbasenCredentials): Promise<string | null> {
+async function fetchBokgruppekode(isbn: string, credentials: BokbasenCredentials | null): Promise<string | null> {
   try {
     const token = await getBokbasenToken(credentials);
-    const res = await fetch(`${BOKBASEN_ONIX_BASE}/export/onix/v2/${isbn}`, {
+    const res = await fetch(`${BOKBASEN_ONIX_URL}/${isbn}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) return null;
@@ -562,7 +522,7 @@ const CATALOG_PRODUCTS_QUERY = `
 
 // ── Push one book ────────────────────────────────────────────────────────────
 
-// Supabase REST med service-nøkkelen (samme mønster som getCredentials)
+// Supabase REST med service-nøkkelen
 function supabaseRest(pathAndQuery: string, init: RequestInit = {}): Promise<Response> {
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -990,7 +950,7 @@ async function ensureCollections(
 }
 
 async function fullSyncCollections(
-  bokbasenCredentials: BokbasenCredentials,
+  bokbasenCredentials: BokbasenCredentials | null,
 ): Promise<FullSyncResult> {
   // ── Step 1: Fetch all Shopify products (paginated) ─────────────────────────
   const allProducts: Array<{ id: string; handle: string; tags: string[] }> = [];
@@ -1423,38 +1383,6 @@ function getUserIdFromJWT(authHeader: string): string | null {
   } catch {
     return null;
   }
-}
-
-// Look up per-user Bokbasen credentials from user_settings, fall back to env vars.
-// Shopify is server-wide and handled by _shared/shopify.ts.
-async function getCredentials(userId: string | null): Promise<CredentialBundle> {
-  if (userId) {
-    try {
-      const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-      const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-      const res = await fetch(
-        `${supabaseUrl}/rest/v1/user_settings?user_id=eq.${userId}&select=bokbasen_client_id,bokbasen_client_secret`,
-        { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } }
-      );
-      const rows = await res.json();
-      const settings = rows?.[0];
-      if (settings?.bokbasen_client_id || settings?.bokbasen_client_secret) {
-        return {
-          bokbasen: {
-            clientId: settings.bokbasen_client_id || Deno.env.get("BOKBASEN_CLIENT_ID")!,
-            clientSecret: settings.bokbasen_client_secret || Deno.env.get("BOKBASEN_CLIENT_SECRET")!,
-          },
-        };
-      }
-    } catch { /* fall through to env vars */ }
-  }
-  // Fall back to global env vars (admin user or development)
-  return {
-    bokbasen: {
-      clientId: Deno.env.get("BOKBASEN_CLIENT_ID")!,
-      clientSecret: Deno.env.get("BOKBASEN_CLIENT_SECRET")!,
-    },
-  };
 }
 
 // ── Feed (Manual Collection) management ──────────────────────────────────────
@@ -2012,7 +1940,7 @@ serve(async (req: Request) => {
     const body = req.method !== "GET" ? await req.json().catch(() => ({})) : {};
 
     const userId = getUserIdFromJWT(req.headers.get("Authorization") ?? "");
-    const { bokbasen } = await getCredentials(userId);
+    const bokbasen = await getBokbasenCredentials(userId);
 
     // POST /shopify/test — verify the server's Shopify connection (Dev Dashboard app,
     // credentials from Supabase secrets). Returns shop name, domain and product count.
