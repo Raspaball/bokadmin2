@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import {
   extractAudienceAge, extractLanguage, extractPages, extractProductForm, extractPublicationYear, extractSeries, extractThema,
 } from "../supabase/functions/_shared/onix.js";
-import { bookFormat, CATEGORY_IDS } from "../supabase/functions/_shared/book-format.ts";
+import { bookFormat, CATEGORY_IDS, CATEGORY_NAMES } from "../supabase/functions/_shared/book-format.ts";
 import { bookFieldsFromOnix, bookMetafields, sameMetafieldValue } from "../supabase/functions/_shared/book-standard.ts";
 
 const product = (...parts) => `<ONIXMessage xmlns="http://ns.editeur.org/onix/3.1/reference"><Product><DescriptiveDetail>${parts.join("")}</DescriptiveDetail></Product></ONIXMessage>`;
@@ -39,6 +39,14 @@ test("format: koder fra rådataene og den godkjente listen", () => {
   assert.deepEqual(f(null), ["Annet", "Bok"]);
   assert.equal(bookFormat("AJ").category, CATEGORY_IDS.Lydbok);
   assert.equal(CATEGORY_IDS.Bok, "gid://shopify/TaxonomyCategory/me-1-3");
+});
+
+test("kategori: Print Books, Audiobooks, E-Books ut fra formatet", () => {
+  assert.equal(bookFormat("BB").category, "gid://shopify/TaxonomyCategory/me-1-3");
+  assert.equal(bookFormat("AJ", ["A103"]).category, "gid://shopify/TaxonomyCategory/me-1-1");
+  assert.equal(bookFormat("ED", ["E101"]).category, "gid://shopify/TaxonomyCategory/me-1-2");
+  assert.equal(bookFormat("CB").category, CATEGORY_IDS.Bok);
+  assert.equal(CATEGORY_NAMES.Lydbok, "Media > Books > Audiobooks");
 });
 
 test("ProductForm og ProductFormDetail leses", () => {

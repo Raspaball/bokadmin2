@@ -31,6 +31,13 @@ export const CATEGORY_IDS: Record<BookProductType, string> = {
   "E-bok": "gid://shopify/TaxonomyCategory/me-1-2", // Media > Books > E-Books
 };
 
+/** Fullt navn på kategorien, som i kolonnen «Product category» i Shopifys CSV */
+export const CATEGORY_NAMES: Record<BookProductType, string> = {
+  Bok: "Media > Books > Print Books",
+  Lydbok: "Media > Books > Audiobooks",
+  "E-bok": "Media > Books > E-Books",
+};
+
 export interface FormatInfo {
   format: BookFormat;
   productType: BookProductType;

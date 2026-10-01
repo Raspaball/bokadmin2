@@ -18,6 +18,7 @@ import { EGEN_PRIS_FIELD, priceLock, priceLockMessage } from "../_shared/price-l
 import { COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, tagSources } from "../_shared/collections.ts";
 import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
 import { bookFieldsFromOnix, bookMetafields, type BookFields } from "../_shared/book-standard.ts";
+import { CATEGORY_IDS, CATEGORY_NAMES } from "../_shared/book-format.ts";
 import {
   SAFE_STORES, MIGRATION_PRODUCTS_QUERY, HANDLE_UPDATE_MUTATION,
   planHandleMigration, isBlockedRow, handleUpdateInput, type HandlePlanRow,
@@ -514,6 +515,8 @@ async function pushOneBook(
     // Bok / Lydbok / E-bok ut fra formatet (ikke lenger forfatter). Uten ONIX:
     // ny bok blir «Bok», eksisterende beholder sin
     ...(fields ? { productType: fields.productType } : isUpdate ? {} : { productType: "Bok" }),
+    // Produktkategori (Print Books / Audiobooks / E-Books) ut fra formatet
+    ...(fields ? { category: fields.category } : isUpdate ? {} : { category: CATEGORY_IDS.Bok }),
     tags,
     ...(status ? { status } : {}),
   };
@@ -983,7 +986,8 @@ function booksToShopifyCSV(books: BookMetadata[]): string {
     return [
       isbn ? newBookHandle(book, isbn) : book.isbn, book.title, book.description || "", book.publisher || "",
       book.productType || "Bok", tags, "TRUE", status, "Title", "Default Title",
-      book.isbn, book.isbn, price, "FALSE", "Media > Books > Print Books",
+      book.isbn, book.isbn, price, "FALSE",
+      CATEGORY_NAMES[(book.productType as keyof typeof CATEGORY_NAMES) ?? "Bok"] ?? CATEGORY_NAMES.Bok,
       "continue", "", book.vekt ?? "", "g", "manual", "TRUE", "FALSE",
       imageUrl, book.title, (book.description || "").slice(0, 320),
       "Media > Books", "New",
