@@ -143,8 +143,8 @@ function ImportResultLog({
 
 // Loggmelding for push: handle, prisnotat (pakke A2) og tilgjengelighet (pakke C),
 // f.eks. «Pushet til Shopify som avkledd-…. Kommer 15.11.2026: ACTIVE, kan forhåndsbestilles»
-function pushLogMessage(r: { handle?: string; priceNote?: string; availabilityNote?: string; seoNote?: string }): string {
-  return [`Pushet til Shopify som ${r.handle}`, r.priceNote, r.availabilityNote, r.seoNote].filter(Boolean).join('. ');
+function pushLogMessage(r: { handle?: string; priceNote?: string; availabilityNote?: string; seoNote?: string; descriptionNote?: string }): string {
+  return [`Pushet til Shopify som ${r.handle}`, r.priceNote, r.availabilityNote, r.seoNote, r.descriptionNote].filter(Boolean).join('. ');
 }
 
 export function Import() {
@@ -157,6 +157,14 @@ export function Import() {
       .catch(() => {});
   };
   useEffect(() => { loadMissingPriceLog(); }, []);
+  // Bøker som ble pushet med reservebeskrivelse (pakke B del 6)
+  const [missingDescriptionLog, setMissingDescriptionLog] = useState<SyncLogEntry[]>([]);
+  const loadMissingDescriptionLog = () => {
+    syncLog.getByActions(['push'], 200)
+      .then(entries => setMissingDescriptionLog(entries.filter(e => /Mangler forlagstekst/.test(e.message ?? ''))))
+      .catch(() => {});
+  };
+  useEffect(() => { loadMissingDescriptionLog(); }, []);
   const [isLoadingBooks, setIsLoadingBooks] = useState(false);
   const [selectedFormats, setSelectedFormats] = useState<Set<string>>(
     new Set(FORMAT_OPTIONS.filter(f => f.defaultOn).map(f => f.label))
@@ -348,7 +356,7 @@ export function Import() {
         chunk.find(c => c.id === b.id) ? { ...b, pushing: true } : b
       ));
 
-      let results: Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string; availabilityNote?: string; seoNote?: string }>;
+      let results: Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string; availabilityNote?: string; seoNote?: string; descriptionNote?: string }>;
       try {
         results = await shopify.pushBooks(chunk);
       } catch (e) {
@@ -406,6 +414,7 @@ export function Import() {
     if (wasCancelled) toast.info('Eksport avbrutt');
     setIsBatchPushing(false);
     loadMissingPriceLog();
+    loadMissingDescriptionLog();
   };
 
   const handleCancelBatchPush = () => {
@@ -444,6 +453,7 @@ export function Import() {
       toast.success(`"${book.title}" pushet til Shopify`);
       if (result.warning) toast.warning(result.warning);
       if (result.priceNote) { toast.warning(result.priceNote); loadMissingPriceLog(); }
+      if (result.descriptionNote) loadMissingDescriptionLog();
     } catch (error) {
       await syncLog.add({
         isbn: book.isbn,
@@ -597,6 +607,7 @@ export function Import() {
   const unpushedBooks = addedBooks.filter(b => !b.shopify_id && !b.pushed);
   // Bøker uten godkjent pris (0 eller lavere regnes som manglende). Push setter aldri pris 0.
   const booksMissingPrice = addedBooks.filter(b => !(Number(b.price) > 0));
+  const booksMissingDescription = addedBooks.filter(b => !(b.description ?? '').trim());
 
   return (
     <div className="space-y-6">
@@ -765,6 +776,49 @@ export function Import() {
                       </div>
                       <p className="text-xs text-amber-800">{(e.message ?? '').replace(/^Pushet til Shopify som \S+\. /, '')}</p>
                       <p className="text-xs text-gray-400 font-mono">{e.isbn}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Mangler forlagstekst (pakke B del 6) */}
+      {(booksMissingDescription.length > 0 || missingDescriptionLog.length > 0) && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <AlertCircle className="size-5 text-amber-600" />
+              Mangler forlagstekst
+            </CardTitle>
+            <CardDescription>
+              Bokbasen har ingen forlagstekst for disse bøkene. Shopify får en kort reservebeskrivelse (tittel, forfatter, format, sider, år og forlag) til boka får en egen tekst.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {booksMissingDescription.length > 0 && (
+              <div>
+                <p className="text-sm font-medium mb-2">I arbeidslisten ({booksMissingDescription.length})</p>
+                <div className="border rounded-lg divide-y max-h-[240px] overflow-y-auto">
+                  {booksMissingDescription.map(b => (
+                    <div key={b.id} className="p-2 text-sm flex justify-between gap-2">
+                      <span className="truncate">{b.title}</span>
+                      <span className="text-xs text-gray-400 font-mono">{b.isbn}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {missingDescriptionLog.length > 0 && (
+              <div>
+                <p className="text-sm font-medium mb-2">Fra push-loggen ({missingDescriptionLog.length})</p>
+                <div className="border rounded-lg divide-y max-h-[240px] overflow-y-auto">
+                  {missingDescriptionLog.map(e => (
+                    <div key={e.id} className="p-2 text-sm flex justify-between gap-2">
+                      <span className="truncate">{e.title ?? e.isbn}</span>
+                      <span className="text-xs text-gray-400">{new Date(e.created_at).toLocaleString('nb-NO')}</span>
                     </div>
                   ))}
                 </div>

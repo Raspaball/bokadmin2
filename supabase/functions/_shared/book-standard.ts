@@ -75,6 +75,76 @@ export function bookMetafields(f: BookFields): BookMetafield[] {
   return out;
 }
 
+// ── Beskrivelse (pakke B del 6) ──────────────────────────────────────────────
+
+const escapeHtml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/**
+ * Forlagsteksten (ren tekst fra onixText, med \n og \n\n) som HTML: ett <p> per
+ * avsnitt, <br> for linjeskift i avsnittet. Teksten HTML-kodes, så & og < vises riktig.
+ */
+export function descriptionHtml(text: string | null | undefined): string {
+  const t = String(text ?? "").replace(/\r/g, "").trim();
+  if (!t) return "";
+  return t.split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => `<p>${p.split("\n").map((l) => escapeHtml(l.trim())).join("<br>")}</p>`)
+    .join("\n");
+}
+
+/**
+ * Reservebeskrivelse når forlagstekst mangler:
+ * «{Hovedtittel} av {Forfatter}. {Format}, {sider} sider, utgitt {år} på {forlag}.»
+ * Det som mangler utelates.
+ */
+export function fallbackDescription(title: string, f: Pick<BookFields, "authors" | "format" | "pages" | "year">, publisher?: string | null): string {
+  const main = String(title.split(":")[0] ?? title).trim();
+  const first = f.authors[0] ? `${main} av ${f.authors[0]}.` : `${main}.`;
+  const parts: string[] = [];
+  if (f.format && f.format !== "Annet") parts.push(f.format);
+  if (f.pages) parts.push(`${f.pages} sider`);
+  const published = [f.year ? `utgitt ${f.year}` : "", publisher?.trim() ? `på ${publisher.trim()}` : ""].filter(Boolean).join(" ");
+  if (published) parts.push(published);
+  if (!parts.length) return first;
+  const second = parts.join(", ");
+  return `${first} ${second.charAt(0).toUpperCase()}${second.slice(1)}.`;
+}
+
+export interface BookDescription {
+  html: string;
+  /** true = forlagstekst manglet, reservebeskrivelsen er brukt */
+  fallback: boolean;
+}
+
+export function bookDescription(text: string | null | undefined, title: string, f: Pick<BookFields, "authors" | "format" | "pages" | "year">, publisher?: string | null): BookDescription {
+  const html = descriptionHtml(text);
+  if (html) return { html, fallback: false };
+  return { html: descriptionHtml(fallbackDescription(title, f, publisher)), fallback: true };
+}
+
+/** Teksten uten tagger, entiteter og mellomrom: for å se om to beskrivelser bare skiller seg i formatering. */
+export function descriptionFingerprint(html: string | null | undefined): string {
+  return String(html ?? "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/\s+/g, "");
+}
+
+/**
+ * Kan jobben erstatte beskrivelsen i Shopify? Ja når den er tom, eller når
+ * teksten er den samme og bare formateringen er annerledes (avsnitt, linjeskift,
+ * sammenlimte setninger), eller når den er Bokadmins reservebeskrivelse.
+ * Ellers er den skrevet eller endret av noen andre og får stå.
+ */
+export function canReplaceDescription(currentHtml: string | null | undefined, wanted: BookDescription, previousFallbackHtml?: string | null): boolean {
+  const cur = descriptionFingerprint(currentHtml);
+  if (!cur) return true;
+  if (cur === descriptionFingerprint(wanted.html)) return true;
+  if (previousFallbackHtml && cur === descriptionFingerprint(previousFallbackHtml)) return true;
+  return false;
+}
+
 /** Sammenligner en metafeltverdi fra Shopify med ønsket verdi (lister som JSON). */
 export function sameMetafieldValue(current: string | null | undefined, wanted: string, type: string): boolean {
   if (current === null || current === undefined) return false;

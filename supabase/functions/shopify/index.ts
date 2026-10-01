@@ -17,7 +17,7 @@ import { getMaxPriceChangePct, recordPendingApproval } from "../_shared/price-ap
 import { EGEN_PRIS_FIELD, priceLock, priceLockMessage } from "../_shared/price-lock.ts";
 import { COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, tagSources } from "../_shared/collections.ts";
 import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
-import { bookFieldsFromOnix, bookMetafields, type BookFields } from "../_shared/book-standard.ts";
+import { bookDescription, bookFieldsFromOnix, bookMetafields, type BookFields } from "../_shared/book-standard.ts";
 import { CATEGORY_IDS, CATEGORY_NAMES } from "../_shared/book-format.ts";
 import { bookSeo, decideSeo, legacySeo, parseSeoAuto, seoMetafields } from "../_shared/book-seo.ts";
 import { coverAlt, coverChanges, coverFilename, type CoverChange } from "../_shared/book-cover.ts";
@@ -60,14 +60,6 @@ const corsHeaders = {
 };
 
 // Convert plain text (newline-separated paragraphs) to HTML for Shopify body_html
-function toHtml(text: string): string {
-  if (!text.trim()) return "";
-  return text.trim()
-    .split(/\n\n+/)
-    .map(p => `<p>${p.replace(/\n/g, "<br>")}</p>`)
-    .join("\n");
-}
-
 interface BookMetadata {
   isbn: string;
   title: string;
@@ -452,7 +444,7 @@ async function pushOneBook(
   book: BookMetadata,
   bokbasenCredentials: BokbasenCredentials | null = null,
   userId: string | null = null,
-): Promise<{ shopifyId: string; handle: string; variantId?: string; created: boolean; warning?: string; priceNote?: string; approvalRequired?: boolean; availabilityNote?: string; status?: string; seoNote?: string }> {
+): Promise<{ shopifyId: string; handle: string; variantId?: string; created: boolean; warning?: string; priceNote?: string; approvalRequired?: boolean; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string }> {
   // Build tag list: author, title + bokgruppekode hierarchy
   const tagList = [book.author, book.title].filter(Boolean);
   if (book.bokgruppekode) {
@@ -539,9 +531,20 @@ async function pushOneBook(
   // regelen. Ukjent tilgjengelighet: eksisterende bok beholder statusen, ny blir utkast.
   const status = priceDecision.draft ? "DRAFT" : availRule ? availRule.status : (isUpdate ? null : "DRAFT");
 
+  // Beskrivelse: forlagsteksten med avsnitt (<p>), ellers reservebeskrivelse fra
+  // feltene (_shared/book-standard.ts). Forlagsteksten fra ONIX går foran boka vi fikk.
+  const descText = (onixXml ? extractDescription(onixXml) : "") || book.description || "";
+  const desc = bookDescription(descText, book.title, {
+    authors: book.authors?.length ? book.authors : fields?.authors ?? [],
+    format: fields?.format ?? null,
+    pages: fields?.pages ?? null,
+    year: fields?.year ?? (parseInt(book.year, 10) || null),
+  }, book.publisher);
+  const descriptionNote = desc.fallback ? "Mangler forlagstekst: reservebeskrivelse brukt" : undefined;
+
   const productInput: Record<string, unknown> = {
     title: book.title,
-    descriptionHtml: toHtml(book.description || ""),
+    descriptionHtml: desc.html,
     vendor: book.publisher || "",
     // Bok / Lydbok / E-bok ut fra formatet (ikke lenger forfatter). Uten ONIX:
     // ny bok blir «Bok», eksisterende beholder sin
@@ -732,6 +735,7 @@ async function pushOneBook(
     shopifyId: product.id as string, handle: product.handle as string, variantId, created: !isUpdate,
     warning, priceNote, approvalRequired, availabilityNote, status: status ?? undefined,
     seoNote: seoNotes.length ? seoNotes.join(". ") : undefined,
+    descriptionNote,
   };
 }
 
@@ -1987,7 +1991,7 @@ serve(async (req: Request) => {
       for (const book of books) {
         try {
           const result = await pushOneBook(book, bokbasen, userId);
-          results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle, created: result.created, warning: result.warning, priceNote: result.priceNote, approvalRequired: result.approvalRequired, availabilityNote: result.availabilityNote, status: result.status, seoNote: result.seoNote });
+          results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle, created: result.created, warning: result.warning, priceNote: result.priceNote, approvalRequired: result.approvalRequired, availabilityNote: result.availabilityNote, status: result.status, seoNote: result.seoNote, descriptionNote: result.descriptionNote });
         } catch (e) {
           results.push({ isbn: book.isbn, success: false, error: String(e) });
         }
