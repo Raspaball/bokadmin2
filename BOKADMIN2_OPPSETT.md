@@ -275,7 +275,7 @@ Testet i Testbutikk (shopify og bokbasen deployet):
 | Avkledd med pris | Som før: 449, ACTIVE, ingen notat |
 | Antall produkter etter testene | 65 |
 
-## Pakke B: standarden i eksporten (SEO og bokfelt, påbegynt 2026-10-02)
+## Pakke B: standarden i eksporten (SEO og bokfelt, 2026-10-02)
 
 Oppgaven: `oppgaver/pakke-b-seo-eksport.md`. Reglene står samlet i `_shared/book-standard.ts` (én ren funksjon som regner ut ønsket tilstand fra ONIX), og lesingen av ONIX i `_shared/onix.js`.
 
@@ -320,6 +320,64 @@ Felt uten verdi i ONIX settes ikke, og Bokadmin tømmer dem aldri.
 `productType` er nå «Bok», «Lydbok» eller «E-bok» (før: forfatteren). CSV-eksporten bruker `productType` fra importen.
 
 NB: `FORMAT_OPTIONS` i Import.tsx (importfilteret) har feil koder (BD er løsblad, ikke spiral; AB er kassett, AI er DVD-lyd, DA er digitalt fysisk). Filteret matcher på etikett, ikke kode, så det virker, men kodene bør ryddes når filteret flyttes til `src/app/utils/formatCodes.ts`.
+
+### Del 3: produktkategori
+
+Push setter `category` ut fra formatet: Print Books `me-1-3`, Audiobooks `me-1-1`, E-Books `me-1-2` (`CATEGORY_IDS` i `_shared/book-format.ts`, kontrollert mot taksonomien i 2026-07: løvnoder, ikke arkivert). CSV-kolonnen «Product category» følger productType.
+
+### Del 4: SEO-tittel og metabeskrivelse (`_shared/book-seo.ts`)
+
+- **SEO-tittel** (`global.title_tag`): «{Hovedtittel} – {Forfatter} ({format})», maks 60 tegn. For lang: uten format; fortsatt for lang: hovedtittelen kuttes ved helt ord. Uten forfatter: «{Hovedtittel} ({format})».
+- **Metabeskrivelse** (`global.description_tag`): høyst 155 tegn. «{Hovedtittel} av {Forfatter} ({format}, {år}).» + starten av forlagsteksten, kuttet ved setningsslutt (hvis etter halvparten), ellers ved helt ord med «…». Avsnitt og linjeskift blir mellomrom (ingen «søtsuget?Glukoserevolusjonens»).
+- **Manuelle endringer:** det Bokadmin genererte lagres i `bokadmin.seo_auto` (JSON, skjult metafelt uten definisjon). Et felt skrives bare når det er tomt, lik forrige genererte verdi eller lik den gamle automatikken (tittelen / forlagsteksten kuttet på 320 tegn). Ellers: «SEO-tittel endret manuelt, ikke overskrevet» (push: `seoNote`).
+- Tittel og forlagstekst fra ONIX er flyttet uendret fra importen til `_shared/onix.js` (`onixText`, `extractTitle`, `extractDescription`); 20 av 20 bøker ga samme resultat som den deployede importen.
+
+### Del 5: omslag (`_shared/book-cover.ts`)
+
+Alt-tekst «Omslag: {Hovedtittel} av {Forfatter}», filnavn «{handle}-omslag.jpg» (endelsen fra dagens fil). I 2026-07 kan `productUpdate(media:)` ikke sette filnavn, men `fileUpdate` endrer filnavn og alt-tekst på eksisterende bilder uten ny opplasting (testet: samme media-ID, fortsatt koblet til produktet, ny URL; like filnavn er tillatt). Push setter alt-tekst ved opplasting og filnavn med `fileUpdate` etterpå (prøver igjen mens filen behandles). `productUpdateMedia` er utfaset til fordel for `fileUpdate`. **NB før live:** validatoren nevner `write_files` som tilgang for `fileUpdate`; det virket med appens nøkkel i Testbutikk, men sjekk tilgangene i livebutikken.
+
+### Del 6: forlagstekst og reservebeskrivelse
+
+`descriptionHtml()`: ett `<p>` per avsnitt, `<br>` for linjeskift, HTML-koding. Uten forlagstekst: reservebeskrivelse «{Hovedtittel} av {Forfatter}. {Format}, {sider} sider, utgitt {år} på {forlag}.» (det som mangler utelates), og push-notatet «Mangler forlagstekst: reservebeskrivelse brukt». Import-siden har kortet «Mangler forlagstekst» (arbeidslisten og push-loggen). Jobben i del 8 erstatter bare en beskrivelse som er tom, samme tekst med annen formatering, eller Bokadmins egen reserve; en annen tekst får stå («Beskrivelsen er en annen tekst enn forlagsteksten, ikke overskrevet»).
+
+### Del 7: tagger (`_shared/book-tags.ts`)
+
+Push legger ikke lenger forfatter og tittel inn som tagger, og beholder alle andre tagger på eksisterende produkter (før erstattet push hele taggsettet, så f.eks. `folio-test` ville forsvunnet). Den gamle push sendte «Etternavn, Fornavn, Tittel» som én tekst, og Shopify delte den på komma (Avkledd: «Brochmann», «Nina», hele tittelen). Fjernes: tagger lik en forfatter (begge skrivemåter) eller tittelen/hovedtittelen, og delene av et navn/en tittel som ble delt på komma, men bare når alle delene finnes. `bkg-*` og andre tagger røres ikke. Push: `tagNote` «Fjernet tagger: …».
+
+### Del 8: jobben «Oppdater eksisterende bøker»
+
+- Edge Function `book-update` (fanen «Bokdata» på Oppdatering-siden). Samme rammeverk som prisjobben: pulser på 45 s, pause/gjenopptak (pg_cron `resume-paused-book-update-jobs` og siden), avbryt, sjekkmodus som standard. `POST /start { mode, isbns? }`.
+- Én ren funksjon `planBookUpdate(produkt, onix)` i `_shared/book-update.ts` gir endringene felt for felt (productType, kategori, `bok.*`, SEO, omslag, beskrivelse, tagger). Endrer aldri pris, status, tilgjengelighet, handle eller tittel. Bulk-eksport i pakke D kan bruke samme funksjon.
+- Sammendrag per felt med opptil tre eksempler, og endret / uendret / hoppet over (uten ISBN, uten ONIX) / feil.
+- **ONIX-cache:** tabellen `onix_cache` (`isbn`, `xml`, `fetched_at`), cache yngre enn 7 dager brukes (`_shared/onix-cache.ts`). Push bruker også cachen. Migrasjon `20261002130000_onix_cache_book_update.sql` (tabell + pg_cron), kjørt i 2.0.
+- Shopify-grenser: `waitForShopifyBudget()` i `_shared/shopify.ts` venter når `extensions.cost.throttleStatus` er lav; 50 produkter per side.
+
+### Del 9: samlingsnavn
+
+`sjangre-sync` og `shopify/sync-collections` retter tittelen på eksisterende bkg-samlinger etter `COLLECTION_NAMES` (`collectionTitleFix` i `_shared/collections.ts`). Handle endres ikke; koder uten navn i lista røres ikke.
+
+**Kjørt i Testbutikk 2026-10-02: 21 samlinger fikk nytt navn**, ikke bare de med «Bokgruppe NNN». Samlingene var laget av sjangre-sync med dens egen, avkortede navneliste, som hadde andre navn enn den felles lista. Noen er bare ny ordlyd (bkg-4 «Norsk skjønnlitteratur» → «Skjønnlitteratur», bkg-31 «Sakprosa» → «Sakprosa norsk, voksne»), andre endrer betydning (bkg-314 «Barn og oppdragelse» → «Natur, friluftsliv, sport», bkg-316 «Friluftsliv og hobby» → «Mat og drikke», bkg-318 «Teknikk og vitenskap» → «Teknikk og populærvitenskap»). Den felles lista (kilde: forleggerforeningen.no) er den autoritative. **Eirik bør se over** at den stemmer med Forleggerforeningens bokgrupper. De gamle titlene står i `scripts/out/a2/samlinger-gamle-titler-2026-10-02.json` (git-ignorert) og kan settes tilbake.
+
+### Test i Testbutikk (2026-10-02)
+
+Deployet: `shopify`, `bokbasen`, `sjangre-sync`, `book-update` (ny). Migrasjoner kjørt: `20261002120000_books_authors.sql`, `20261002130000_onix_cache_book_update.sql`.
+
+| Test | Resultat |
+|---|---|
+| Sjekkmodus, hele katalogen | 43 ville blitt endret, 0 uendret, hoppet over 22 (22 uten ISBN, 0 uten ONIX), 0 feil. Felt: productType, kategori, format, år, språk, thema, SEO-tittel, metabeskrivelse 43 hver; filnavn på omslag 42; forfatter 36; tagger 36; alt-tekst 35; sider 16; serie 8; alder 4; beskrivelse 1. 7 beskrivelser er en annen tekst enn forlagsteksten og ble ikke overskrevet |
+| Oppdateringsmodus på 10 bøker (to/tre forfattere, redaktør, lang tittel, serie, barnebøker, kommende, midlertidig utsolgt) | 10 endret, 0 feil. Kontrollert i Shopify: `bok.*`, kategori Print Books, productType Bok, SEO-tittel (36–58 tegn) og metabeskrivelse (136–155), alt-tekst og filnavn på omslaget, beskrivelse med `<p>`, tagger bare `bkg-*` + `folio-test` |
+| Pris, status og handle | 65 av 65 uendret |
+| Manuell SEO-tittel på Avkledd, jobben kjørt på nytt | Stod urørt; «SEO-tittel endret manuelt, ikke overskrevet». Satt tilbake etterpå |
+| Push av ny bok med to forfattere (9788273842510) | Handle `ta-meg-pa-alt-bare-ikke-pa-ordet-bertil-hokby-9788273842510`, `bok.forfatter` med begge, alle feltene satt, utkast (kode 40). Slettet etterpå |
+| Push av ny bok uten forlagstekst og uten bidragsytere (Katalog 2004) | Reservebeskrivelse «Katalog 2004. Heftet, 119 sider, utgitt 2004 på Cappelen Damm AS.», nytt omslag med alt-tekst og filnavn `katalog-2004-9788202237868-omslag.jpg`. Slettet etterpå |
+| Samlingssynk | 21 samlinger fikk nytt navn (se del 9), 0 feil |
+
+Gjenstår etter pakke B:
+- Se over navnelisten for bokgruppene (del 9).
+- Sjekk `write_files` for appen i livebutikken (del 5).
+- Bulk-operasjoner for hele katalogen (pakke D) med `planBookUpdate`.
+- `FORMAT_OPTIONS` i Import.tsx har feil koder (se del 2) og bør flyttes til `src/app/utils/formatCodes.ts`.
+- Strømmer bruker fortsatt utfasede `collectionAddProducts`/`collectionRemoveProducts`.
 
 ## Pakke C: kommende og midlertidig utsolgte bøker (2026-10-02)
 

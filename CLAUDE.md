@@ -43,7 +43,15 @@ Prøv i så stor grad som mulig å bruke felles datakilder for viktige data som 
 | Prisjobbens sammendrag | `summarizeCounts()` i `_shared/price-summary.ts` → `jobs.result.summary` | price-update, Oppdatering.tsx (viser teksten) |
 | ISBN → bokgruppekode (cache) | Tabellen `bokgruppe_cache` + `books.bokgruppekode` via `loadKodeMap()` i sjangre-sync | sjangre-sync (enrich skriver, tagging leser). **Skriv aldri minimale rader i `books`** — books er arbeidslista på Import-siden, og «Tøm liste» sletter hele tabellen |
 | Bokgruppekode → bkg-tagg-hierarki | `bokgruppeTagsForKode()` i shopify/index.ts | pushOneBook (tagging ved eksport til Shopify) |
-| Handle-regel (tittel-forfatter-ISBN-13) | `buildBookHandle()` i `supabase/functions/_shared/handle.js` | pushOneBook, CSV-eksport, handle-migrering, scripts/migrate-handles.mjs |
+| Handle-regel (tittel-forfatter-ISBN-13) | `buildBookHandle()` i `supabase/functions/_shared/handle.js`, med forfatterlisten (`authors`) — `firstAuthor()` bare som reserve for gamle data | pushOneBook, CSV-eksport, handle-migrering, scripts/migrate-handles.mjs |
+| Standarden for en bok i Shopify (pakke B) | `bookFieldsFromOnix()` / `bookMetafields()` / `bookDescription()` i `_shared/book-standard.ts`; `planBookUpdate()` i `_shared/book-update.ts` (én ren funksjon: ONIX + produkt → endringer) | pushOneBook, book-update (jobben), senere bulk |
+| Forfatterne som liste | `extractContributors()` i `_shared/onix.js` → `books.authors text[]` | bokbasen (import), push, book-update |
+| Format, productType og kategori | `bookFormat()` / `CATEGORY_IDS` i `_shared/book-format.ts` (godkjent formatliste) | bokbasen, push, CSV, book-update |
+| SEO-tittel og metabeskrivelse | `bookSeo()` / `decideSeo()` i `_shared/book-seo.ts` (+ `bokadmin.seo_auto`) | push, book-update |
+| Omslag (alt-tekst, filnavn) | `coverAlt()` / `coverFilename()` i `_shared/book-cover.ts` | push, book-update |
+| Tagger | `cleanBookTags()` i `_shared/book-tags.ts` (bare bkg-*, forfatter/tittel fjernes) | push, book-update |
+| Tittel og forlagstekst fra ONIX | `onixText()` / `extractTitle()` / `extractDescription()` i `_shared/onix.js` | bokbasen, push, book-update |
+| ONIX-cache | tabellen `onix_cache` via `getOnixCached()` i `_shared/onix-cache.ts` (7 dager) | book-update, push |
 | ISBN fra Shopify-produkt | `extractIsbn()` i `supabase/functions/_shared/isbn.js` (bok.isbn → strekkode → SKU → ISBN-handle) | price-update, availability-check, sjangre-sync, shopify (samlinger, migrering), scripts |
 | Plan for handle-migrering | `planHandleMigration()` i `supabase/functions/_shared/handle-migration.js` | /shopify/handles/*, scripts/migrate-handles.mjs |
 | Bokgruppekode fra ONIX (skjema 37) | `extractBokgruppekode()` i `supabase/functions/_shared/onix.js` | bokbasen, shopify, sjangre-sync |
@@ -107,13 +115,14 @@ Shared code lives in `supabase/functions/_shared/`. The `.js` modules there (`ha
 | `shopify/` | Shopify product push (single + bulk), catalog sync, CSV export, Smart Collections, feeds (manual collections), handle migration (`/handles/*`) |
 | `price-update/` | Long-running job: fetch current prices from Bokbasen and update Shopify variants. Endpoints: `/start` (`mode: analyze|update`, uten mode = `analyze`), `/status/:jobId`, `/cancel/:jobId`, `/resume/:jobId`, `/resume-paused`, `/active`, `/recent`, `/approvals/decide` (`{ ids, decision: approve|reject }`, krever innlogget bruker) |
 | `availability-check/` | Long-running job: check ONIX availability codes and optionally update Shopify. Same endpoints as price-update, plus `start` accepts `mode: analyze|update` |
-| `sjangre-sync/` | Long-running job: enrich bokgruppekode → tag products → create Smart Collections. Endpoints: `/start`, `/resume/:jobId`, `/resume-paused`, `/status/:jobId`, `/analyze`, `/active`, `/recent`, `/catalog-bkg-stats`, `/delete-empty-collections` |
+| `book-update/` | Long-running job «Oppdater eksisterende bøker» (pakke B): applies the book standard (bok.* metafields, productType, category, SEO, cover alt/filename, description, tags) to products that already exist. Never price, status, availability, handle or title. Endpoints: `/start` (`mode: analyze|update`, default analyze; optional `isbns`), `/status/:jobId`, `/cancel/:jobId`, `/resume/:jobId`, `/resume-paused`, `/active`, `/recent` |
+| `sjangre-sync/` | Long-running job: enrich bokgruppekode → tag products → create Smart Collections (and fix titles of existing ones from COLLECTION_NAMES). Endpoints: `/start`, `/resume/:jobId`, `/resume-paused`, `/status/:jobId`, `/analyze`, `/active`, `/recent`, `/catalog-bkg-stats`, `/delete-empty-collections` |
 
 All functions are called via `callEdgeFunction()` in `api.ts`. Passes the user's JWT (not anon key) so Edge Functions can identify the user and look up their Bokbasen credentials from `user_settings`. Falls back to anon key if no session. Shopify is server-wide (see the Shopify access section below).
 
 ### Database tables (Supabase PostgreSQL)
 
-`books`, `banners`, `featured_books`, `sync_log`, `shopify_catalog_snapshots`, `scheduled_tasks`, `jobs`, `bokgruppe_cache` tables. Schema in `supabase/migrations/`.
+`books`, `banners`, `featured_books`, `sync_log`, `shopify_catalog_snapshots`, `scheduled_tasks`, `jobs`, `bokgruppe_cache`, `price_approvals`, `onix_cache` tables. `books.authors text[]` holds the author list (pakke B). Schema in `supabase/migrations/`.
 
 All tables have a `user_id uuid` column (nullable) for multi-tenant isolation. Table `user_settings` stores per-user Shopify + Bokbasen credentials + `setup_completed` flag. A trigger `set_user_id_on_insert()` auto-fills `user_id = auth.uid()` on every insert from an authenticated session.
 
@@ -138,9 +147,10 @@ All tables have a `user_id uuid` column (nullable) for multi-tenant isolation. T
 - Lookup before create (pushOneBook): `books.shopify_id` → customId `bok.isbn` (definition of type `id` in Testbutikk since 2026-10-01) → barcode/SKU search (also used when the customId lookup returns a GraphQL error) → handle = ISBN (legacy) → handle = new handle → create. `shopify_id` is saved to `books` after every push
 - Price/status → `decidePushPrice()` i `_shared/push-price.ts`: never price 0. New book without approved price → DRAFT without price; existing book without price → price not sent. CSV: `draft` + empty price
 - Existing book: price not sent when `bok.egen_pris` = true or the variant has `compareAtPrice` («Hoppet over: egen pris/tilbud»), or when the change exceeds `max_price_change_pct` (standard 30 %) → row in `price_approvals`, `approvalRequired: true`. Same rules in the price job (update mode); old price 0/missing is always set
-- Author → productType
+- productType → «Bok» / «Lydbok» / «E-bok» from the format (`_shared/book-format.ts`); category → Print Books / Audiobooks / E-Books
 - Publisher → vendor
-- Tags = `"author, title"` + bokgruppekode hierarchy tags (`bkg-N`, `bkg-NN`, `bkg-NNN`)
+- Tags = bokgruppekode hierarchy tags only (`bkg-N`, `bkg-NN`, `bkg-NNN`). Author and title are no longer tags; on existing products other tags are kept
+- Metafields `bok.forfatter` (list), `format`, `sider`, `utgivelsesaar`, `spraak`, `serie`, `alder`, `thema` from ONIX; SEO in `global.title_tag`/`description_tag` with manual edits protected via `bokadmin.seo_auto`; cover alt «Omslag: {Tittel} av {Forfatter}» and filename `{handle}-omslag.jpg` via `fileUpdate`; description with `<p>` per paragraph or a fallback description
 
 **Bokgruppekode:** A 1–3 digit Norwegian publisher category code (SubjectSchemeIdentifier 37 in ONIX). Smart Collections in Shopify are keyed by `bkg-{code}` tags at all three hierarchy levels.
 
@@ -207,6 +217,7 @@ Jobber kjører i 45s-pulser (Supabase Edge Function timeout). Hvert kall til `pr
 |---|---|---|---|
 | `resume-paused-jobs` | hvert minutt | `/price-update/resume-paused` | Gjenopptar pauset prisjobb |
 | `resume-paused-availability-jobs` | hvert minutt | `/availability-check/resume-paused` | Gjenopptar pauset tilgjengelighetsjobb |
+| `resume-paused-book-update-jobs` | hvert minutt | `/book-update/resume-paused` | Gjenopptar pauset «Oppdater eksisterende bøker» |
 | `run-scheduled-tasks` | hvert minutt | `/price-update/start` eller `/availability-check/start` | Trigger planlagte oppgaver fra `scheduled_tasks`-tabellen |
 
 `run-scheduled-tasks` sender `user_id` i POST-body (siden migrasjon `20260226000002`) slik at per-bruker credentials fungerer. Siden `20261001130000` sender den også `mode` for prisjobber (`scheduled_tasks.config.mode`, uten mode: `analyze`), regner tidene i Europe/Oslo, og venter (flytter ikke `next_run_at`) mens en prisjobb for samme bruker kjører. Høyst én prisjobb startes per minutt; oppdatering går foran sjekk. URL og nøkkel hentes fra Vault (`project_url`, `anon_key`).
