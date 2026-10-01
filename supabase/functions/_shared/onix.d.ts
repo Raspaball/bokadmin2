@@ -2,5 +2,8 @@
 export declare const BOKGRUPPE_SCHEME: string;
 export declare function stripNamespaces(xml: string): string;
 export declare function extractBokgruppekode(xml: string): string | null;
+export declare function decodeXmlText(text: string): string;
+export declare function uninvertName(inverted: string): string;
+export declare function extractContributors(xml: string): { authors: string[]; role: string | null };
 export declare function extractAvailabilityCode(xml: string): string | null;
 export declare function extractPublishingDate(xml: string): string | null;

@@ -3,7 +3,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
-import { extractAvailabilityCode, extractBokgruppekode, extractPublishingDate } from "../_shared/onix.js";
+import { extractAvailabilityCode, extractBokgruppekode, extractContributors, extractPublishingDate } from "../_shared/onix.js";
 import { chooseValidPrice } from "../_shared/price.ts";
 
 const BOKBASEN_API_BASE = "https://api.bokbasen.io/metadata";
@@ -278,21 +278,9 @@ function parseOnix(xmlText: string, isbn: string): BookMetadata | null {
   };
   const format = formatMap[formCode] || formCode;
 
-  // Authors (ContributorRole A01)
-  const contributors = [...xml.matchAll(/<Contributor[\s\S]*?<\/Contributor>/gi)];
-  const authors: string[] = [];
-  for (const c of contributors) {
-    const role = c[0].match(/<ContributorRole[^>]*>(.*?)<\/ContributorRole>/i);
-    if (role?.[1]?.trim() !== "A01") continue;
-    let name = c[0].match(/<PersonName[^>]*>(.*?)<\/PersonName>/i)?.[1];
-    if (!name) name = c[0].match(/<PersonNameInverted[^>]*>(.*?)<\/PersonNameInverted>/i)?.[1];
-    if (!name) {
-      const first = c[0].match(/<NamesBeforeKey[^>]*>(.*?)<\/NamesBeforeKey>/i)?.[1] || "";
-      const last = c[0].match(/<KeyNames[^>]*>(.*?)<\/KeyNames>/i)?.[1] || "";
-      name = [first, last].filter(Boolean).join(" ");
-    }
-    if (name) authors.push(name.trim());
-  }
+  // Forfatterne som liste «Fornavn Etternavn» i rekkefølge (A01, ellers første
+  // bidragsyter med rollen i authorRole). Felles lesing i _shared/onix.js.
+  const { authors, role: authorRole } = extractContributors(xml);
 
   // Pris: samme regel som prisjobben (NOK, Norge, gyldig i dag), 0 eller lavere gir null (se _shared/price.ts)
   const { price, reason: priceReason } = chooseValidPrice(xml);
@@ -376,7 +364,10 @@ function parseOnix(xmlText: string, isbn: string): BookMetadata | null {
   return {
     isbn,
     title,
+    // Visningstekst. Handle og bok.forfatter bruker listen (authors).
     author: authors.join(", "),
+    authors,
+    authorRole,
     publisher,
     year,
     publicationDate: publicationDate || null,
@@ -399,6 +390,8 @@ interface BookMetadata {
   isbn: string;
   title: string;
   author: string;
+  authors: string[]; // «Fornavn Etternavn» i rekkefølge (extractContributors)
+  authorRole: string | null; // A01, eller rollen til første bidragsyter når A01 mangler
   publisher: string;
   year: string;
   publicationDate: string | null;

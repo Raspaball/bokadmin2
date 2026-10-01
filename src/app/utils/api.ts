@@ -21,6 +21,7 @@ export interface Book {
   isbn: string;
   title: string;
   author: string;
+  authors: string[] | null; // «Fornavn Etternavn» i rekkefølge (null i rader fra før pakke B)
   publisher: string;
   year: string;
   format: string;
@@ -100,6 +101,8 @@ export interface BokbasenSearchResult {
   isbn: string;
   title: string;
   author: string;
+  authors?: string[]; // «Fornavn Etternavn» i rekkefølge (extractContributors i _shared/onix.js)
+  authorRole?: string | null; // A01, ellers rollen til første bidragsyter
   publisher: string;
   year: string;
   format: string;

@@ -43,6 +43,7 @@ export function BokbasenOppslag({ onBookAdded, allowedFormats, isAvailabilityAll
         isbn: result.isbn,
         title: result.title,
         author: result.author,
+        authors: result.authors ?? null,
         publisher: result.publisher,
         year: result.year,
         format: result.format,

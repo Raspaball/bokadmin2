@@ -68,6 +68,7 @@ interface BookMetadata {
   isbn: string;
   title: string;
   author: string;
+  authors?: string[] | null; // «Fornavn Etternavn» i rekkefølge (importen og books.authors)
   publisher: string;
   year: string;
   format: string;
@@ -327,8 +328,11 @@ async function saveShopifyIdToBooks(isbn: string, shopifyId: string, handle: str
   }
 }
 
+// Handle bygges fra forfatterlisten. Teksten i `author` (gamle books-rader uten
+// authors) brukes bare som reserve, via firstAuthor() i _shared/handle.js.
 function newBookHandle(book: BookMetadata, isbn: string): string {
-  return buildBookHandle({ title: book.title, authors: book.author, isbn }) ?? isbn;
+  const authors = book.authors?.length ? book.authors : book.author;
+  return buildBookHandle({ title: book.title, authors, isbn }) ?? isbn;
 }
 
 // Oppslag på ISBN via customId på bok.isbn (krever at definisjonen har typen «id»).

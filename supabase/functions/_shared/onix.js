@@ -36,6 +36,67 @@ export function extractBokgruppekode(xml) {
   return null;
 }
 
+/** Vanlige XML-entiteter i tekstfelt (&amp; &lt; &gt; &quot; &apos; og tallreferanser). */
+export function decodeXmlText(text) {
+  return String(text ?? "")
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+}
+
+/** «Brochmann, Nina» → «Nina Brochmann». Uten komma kommer teksten uendret tilbake. */
+export function uninvertName(inverted) {
+  const text = String(inverted ?? "").trim();
+  const i = text.indexOf(",");
+  if (i < 0) return text;
+  const last = text.slice(0, i).trim();
+  const first = text.slice(i + 1).trim();
+  return [first, last].filter(Boolean).join(" ");
+}
+
+/** Navnet på én <Contributor>-blokk som «Fornavn Etternavn», eller "". */
+function contributorName(block) {
+  const tag = (t) => decodeXmlText(block.match(new RegExp("<" + t + "(?:\\s[^>]*)?>([\\s\\S]*?)</" + t + ">", "i"))?.[1] ?? "").trim();
+  const person = tag("PersonName");
+  if (person) return person;
+  const inverted = tag("PersonNameInverted");
+  if (inverted) return uninvertName(inverted);
+  const before = tag("NamesBeforeKey");
+  const key = tag("KeyNames");
+  if (before || key) return [before, key].filter(Boolean).join(" ");
+  return tag("CorporateName");
+}
+
+/**
+ * Forfatterne i rekkefølge (SequenceNumber, ellers rekkefølgen i ONIX), som
+ * «Fornavn Etternavn»: PersonName, ellers snudd PersonNameInverted, ellers
+ * NamesBeforeKey + KeyNames, ellers CorporateName.
+ * Bare rolle A01 (forfatter). Finnes ingen A01, brukes første bidragsyter
+ * uansett rolle (f.eks. B01 redaktør), og rollen står i `role`.
+ * Hos Bokbasen (103 poster, 2026-10-02) står navnene nesten alltid som
+ * PersonNameInverted («Brochmann, Nina»).
+ * @param {string} xml
+ * @returns {{ authors: string[], role: string | null }}
+ */
+export function extractContributors(xml) {
+  const list = [];
+  let index = 0;
+  for (const m of stripNamespaces(xml).matchAll(/<Contributor(?:\s[^>]*)?>[\s\S]*?<\/Contributor>/gi)) {
+    const block = m[0];
+    const role = block.match(/<ContributorRole[^>]*>\s*([^<]+?)\s*<\/ContributorRole>/i)?.[1] ?? null;
+    const seq = parseInt(block.match(/<SequenceNumber[^>]*>\s*(\d+)\s*<\/SequenceNumber>/i)?.[1] ?? "", 10);
+    const name = contributorName(block);
+    if (name) list.push({ role, name, order: Number.isFinite(seq) ? seq : 100000 + index });
+    index++;
+  }
+  list.sort((a, b) => a.order - b.order);
+  const authors = list.filter((c) => c.role === "A01").map((c) => c.name);
+  if (authors.length) return { authors, role: "A01" };
+  if (list.length) return { authors: [list[0].name], role: list[0].role };
+  return { authors: [], role: null };
+}
+
 /**
  * Tilgjengelighetskoden (ONIX List 65): første <ProductAvailability> i en
  * <SupplyDetail>, eller null. Samme lesing som importen og tilgjengelighets-
