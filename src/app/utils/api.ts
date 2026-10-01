@@ -59,7 +59,7 @@ export interface SyncLogEntry {
   id: string;
   isbn: string | null;
   title: string | null;
-  action: "push" | "update" | "csv_export" | "sjangre_enrich" | "sjangre_sync" | "bygg_meny" | "availability_check" | "availability_update" | "import_skipped" | "import_failed" | "handle_migrate" | "handle_rollback";
+  action: "push" | "update" | "csv_export" | "sjangre_enrich" | "sjangre_sync" | "bygg_meny" | "availability_check" | "availability_update" | "import_skipped" | "import_failed" | "handle_migrate" | "handle_rollback" | "book_update";
   status: "success" | "error" | "info";
   message: string;
   shopify_id: string | null;
@@ -785,6 +785,44 @@ export const availabilityJobs = {
 
   async cancel(jobId: string): Promise<void> {
     await callEdgeFunction(`availability-check/cancel/${jobId}`, { method: "POST" });
+  },
+};
+
+// ── Oppdater eksisterende bøker (pakke B del 8, Edge Function book-update) ───
+
+export interface BookUpdateCounts {
+  changed: number;
+  unchanged: number;
+  skippedNoIsbn: number;
+  skippedNoOnix: number;
+  errors: number;
+  fields: Record<string, { count: number; examples: string[] }>;
+  notes: Record<string, number>;
+}
+
+export const bookUpdateJobs = {
+  // mode sendes alltid eksplisitt; uten mode gjør serveren bare en sjekk
+  async start(mode: "analyze" | "update", isbns?: string[]): Promise<{ jobId: string; error?: string }> {
+    const res = await callEdgeFunction("book-update/start", {
+      method: "POST",
+      body: JSON.stringify({ mode, ...(isbns?.length ? { isbns } : {}) }),
+    });
+    return res.json();
+  },
+  async getStatus(jobId: string): Promise<Job> {
+    return (await callEdgeFunction(`book-update/status/${jobId}`)).json();
+  },
+  async getActive(): Promise<Job | null> {
+    return (await callEdgeFunction("book-update/active")).json();
+  },
+  async getRecent(limit = 5): Promise<Job[]> {
+    return (await callEdgeFunction(`book-update/recent?limit=${limit}`)).json();
+  },
+  async resume(jobId: string): Promise<void> {
+    await callEdgeFunction(`book-update/resume/${jobId}`, { method: "POST" });
+  },
+  async cancel(jobId: string): Promise<void> {
+    await callEdgeFunction(`book-update/cancel/${jobId}`, { method: "POST" });
   },
 };
 

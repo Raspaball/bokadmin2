@@ -22,6 +22,7 @@ import { CATEGORY_IDS, CATEGORY_NAMES } from "../_shared/book-format.ts";
 import { bookSeo, decideSeo, legacySeo, parseSeoAuto, seoMetafields } from "../_shared/book-seo.ts";
 import { coverAlt, coverChanges, coverFilename, type CoverChange } from "../_shared/book-cover.ts";
 import { cleanBookTags } from "../_shared/book-tags.ts";
+import { getOnixCached } from "../_shared/onix-cache.ts";
 import {
   SAFE_STORES, MIGRATION_PRODUCTS_QUERY, HANDLE_UPDATE_MUTATION,
   planHandleMigration, isBlockedRow, handleUpdateInput, type HandlePlanRow,
@@ -422,15 +423,10 @@ async function findExistingProduct(book: BookMetadata, isbn: string): Promise<Re
 // Årsak til at en bok mangler pris, slått opp i Bokbasen med samme regel som
 // importen (choosePrice). Brukes når push får en bok uten pris og uten årsak
 // (f.eks. «Push alle» fra books). null hvis oppslaget feiler.
-// Rå ONIX for én bok fra Bokbasen, eller null når oppslaget feiler
+// Rå ONIX for én bok (ONIX-cachen, ellers Bokbasen), eller null når den ikke finnes.
+// Push bruker samme cache som jobben «Oppdater eksisterende bøker» (_shared/onix-cache.ts).
 async function fetchOnixXml(isbn: string, credentials: BokbasenCredentials | null): Promise<string | null> {
-  try {
-    const token = await getBokbasenToken(credentials);
-    const res = await fetch(`${BOKBASEN_ONIX_URL}/${isbn}`, { headers: { Authorization: `Bearer ${token}` } });
-    return res.ok ? await res.text() : null;
-  } catch {
-    return null;
-  }
+  return (await getOnixCached(isbn, credentials)).xml;
 }
 
 function missingPriceReasonFromOnix(xml: string | null): string | null {

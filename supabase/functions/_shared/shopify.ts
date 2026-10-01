@@ -147,3 +147,16 @@ export async function shopifyGraphQL<T = any>(
     return { data: json.data as T, extensions: json.extensions };
   }
 }
+
+/**
+ * Venter til Shopifys kostnadsbudsjett (extensions.cost.throttleStatus) har
+ * plass til `needed` poeng, slik at lange jobber holder seg innenfor grensen i
+ * stedet for å bli THROTTLED. Gjør ingenting når svaret mangler kostnadsdata.
+ */
+export async function waitForShopifyBudget(extensions: Record<string, unknown> | undefined, needed: number): Promise<void> {
+  const status = (extensions?.cost as { throttleStatus?: { currentlyAvailable?: number; restoreRate?: number } } | undefined)?.throttleStatus;
+  if (!status || typeof status.currentlyAvailable !== "number" || !status.restoreRate) return;
+  if (status.currentlyAvailable >= needed) return;
+  const seconds = Math.min(20, (needed - status.currentlyAvailable) / status.restoreRate);
+  await new Promise((r) => setTimeout(r, Math.ceil(seconds * 1000)));
+}

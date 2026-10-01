@@ -6,6 +6,7 @@ import { priceJobs, scheduledTasks, syncLog, type Job, type ScheduledTask, type 
 import { toast } from 'sonner';
 import { TilgjengelighetTab } from './TilgjengelighetTab';
 import { PrisGodkjenning } from './PrisGodkjenning';
+import { BokOppdatering } from './BokOppdatering';
 
 // Tidene er norsk tid (Europe/Oslo), se run-scheduled-tasks i pg_cron.
 const CRON_PRESETS = [
@@ -26,7 +27,7 @@ function formatDuration(start: string, end: string): string {
 }
 
 export function Oppdatering() {
-  const [activeTab, setActiveTab] = useState<'price' | 'availability'>('price');
+  const [activeTab, setActiveTab] = useState<'price' | 'availability' | 'books'>('price');
 
   // Active job tracking
   const [activeJob, setActiveJob] = useState<Job | null>(null);
@@ -297,10 +298,21 @@ export function Oppdatering() {
           >
             Tilgjengelighet
           </button>
+          <button
+            className={`pb-2 px-1 text-sm font-medium border-b-2 transition-colors ${
+              activeTab === 'books'
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
+            }`}
+            onClick={() => setActiveTab('books')}
+          >
+            Bokdata
+          </button>
         </div>
       </div>
 
       {activeTab === 'availability' && <TilgjengelighetTab />}
+      {activeTab === 'books' && <BokOppdatering />}
 
       {activeTab === 'price' && <>
       {/* Manual Price Update */}
