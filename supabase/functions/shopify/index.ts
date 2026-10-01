@@ -15,7 +15,7 @@ import { csvPriceAndStatus, decidePushPrice, validPrice, type PushPriceDecision 
 import { approvalMessage, checkPriceChange } from "../_shared/price-guard.ts";
 import { getMaxPriceChangePct, recordPendingApproval } from "../_shared/price-approvals.ts";
 import { EGEN_PRIS_FIELD, priceLock, priceLockMessage } from "../_shared/price-lock.ts";
-import { COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, tagSources } from "../_shared/collections.ts";
+import { COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, collectionTitleFix, tagSources } from "../_shared/collections.ts";
 import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
 import { bookDescription, bookFieldsFromOnix, bookMetafields, type BookFields } from "../_shared/book-standard.ts";
 import { CATEGORY_IDS, CATEGORY_NAMES } from "../_shared/book-format.ts";
@@ -903,7 +903,16 @@ async function ensureCollections(
 
       if (existingCol?.id) {
         existing++;
-        details.push({ code, level, title, status: "existing", id: existingCol.id });
+        // Feil navn på en eksisterende samling: rett tittelen (handle endres ikke)
+        const fixed = collectionTitleFix(existingCol.title, COLLECTION_NAMES[code]);
+        if (fixed) {
+          const ur = await shopifyGraphQL(COLLECTION_UPDATE_MUTATION, { collection: { id: existingCol.id, title: fixed } });
+          const ue = ur.data?.collectionUpdate?.userErrors as { message: string }[] | undefined;
+          if (ue?.length) throw new Error(ue.map((e) => e.message).join(", "));
+          details.push({ code, level, title, status: "renamed", id: existingCol.id });
+        } else {
+          details.push({ code, level, title, status: "existing", id: existingCol.id });
+        }
       } else {
         const createResult = await shopifyGraphQL(COLLECTION_CREATE_MUTATION, {
           collection: { title, handle, sources: tagSources(tag) },

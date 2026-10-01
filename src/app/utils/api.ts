@@ -838,7 +838,7 @@ export interface SjangreSyncAnalyzeResult {
 
 export interface SjangreSyncJobResult {
   products: { total: number; tagged: number; already_tagged: number; no_product: number; errors: number };
-  collections: { created: number; existing: number; errors: number; total: number; details: Array<{ code: string; status: string; error?: string }> };
+  collections: { created: number; existing: number; renamed?: number; errors: number; total: number; details: Array<{ code: string; status: string; error?: string; from?: string; to?: string }> };
 }
 
 export const sjangreSync = {

@@ -709,6 +709,11 @@ export function Sjangre() {
                           <CheckCircle2 className="size-3.5" />{pipelineResult.sync.collections.created} samlinger opprettet
                         </span>
                       )}
+                      {(pipelineResult.sync.collections.renamed ?? 0) > 0 && (
+                        <span className="flex items-center gap-1 text-green-600">
+                          <CheckCircle2 className="size-3.5" />{pipelineResult.sync.collections.renamed} samlinger fikk riktig navn
+                        </span>
+                      )}
                       {(pipelineResult.deletedCollections ?? 0) > 0 && (
                         <span className="text-amber-600">{pipelineResult.deletedCollections} tomme samlinger slettet</span>
                       )}

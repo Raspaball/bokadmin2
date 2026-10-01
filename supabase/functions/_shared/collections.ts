@@ -25,6 +25,16 @@ export const COLLECTION_UPDATE_MUTATION = `
   }
 `;
 
+/**
+ * Riktig tittel for en eksisterende bkg-samling, eller null når den allerede er
+ * riktig eller koden ikke har et navn i COLLECTION_NAMES (da røres den ikke).
+ * Retter f.eks. «Bokgruppe 334» → «Ungdom» (pakke B del 9). Handle endres ikke.
+ */
+export function collectionTitleFix(currentTitle: string | null | undefined, wantedTitle: string | undefined): string | null {
+  if (!wantedTitle) return null;
+  return (currentTitle ?? "").trim() === wantedTitle ? null : wantedTitle;
+}
+
 /** Smart samling: produkter med taggen (tilsvarer ruleSet TAG EQUALS <tag>). */
 export function tagSources(tag: string) {
   return [{

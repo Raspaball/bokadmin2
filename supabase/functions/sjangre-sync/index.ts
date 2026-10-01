@@ -7,7 +7,7 @@ import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
 import { BOKBASEN_ONIX_URL, clearBokbasenToken, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { extractBokgruppekode } from "../_shared/onix.js";
-import { COLLECTION_CREATE_MUTATION, tagSources } from "../_shared/collections.ts";
+import { COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, collectionTitleFix, tagSources } from "../_shared/collections.ts";
 import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
 
 // Felt extractIsbn trenger (bok.isbn, strekkode, SKU) — handle er ikke lenger ISBN
@@ -65,8 +65,8 @@ async function loadKodeMap(supabase: SupabaseClient, isbns: string[]): Promise<M
 // ── Collections helper ────────────────────────────────────────────────────────
 
 interface CollectionSyncResult {
-  created: number; existing: number; errors: number; total: number;
-  details: Array<{ code: string; status: string; error?: string }>;
+  created: number; existing: number; renamed: number; errors: number; total: number;
+  details: Array<{ code: string; status: string; error?: string; from?: string; to?: string }>;
 }
 
 async function ensureCollections(koder: Set<string>): Promise<CollectionSyncResult> {
@@ -80,19 +80,29 @@ async function ensureCollections(koder: Set<string>): Promise<CollectionSyncResu
   }
   const sortedCodes = [...allCodes].sort((a, b) => a.length - b.length || a.localeCompare(b));
 
-  let created = 0, existing = 0, errors = 0;
-  const details: Array<{ code: string; status: string; error?: string }> = [];
+  let created = 0, existing = 0, errors = 0, renamed = 0;
+  const details: Array<{ code: string; status: string; error?: string; from?: string; to?: string }> = [];
 
   for (const code of sortedCodes) {
     const handle = `bkg-${code}`;
     const title = COLLECTION_NAMES[code] ?? `Bokgruppe ${code}`;
     try {
       const r = await shopifyGraphQL(
-        `query($h: String!) { collectionByIdentifier(identifier: { handle: $h }) { id } }`, { h: handle });
-      const col = (r.data as Record<string, unknown>)?.collectionByIdentifier as { id: string } | null;
+        `query($h: String!) { collectionByIdentifier(identifier: { handle: $h }) { id title } }`, { h: handle });
+      const col = (r.data as Record<string, unknown>)?.collectionByIdentifier as { id: string; title: string } | null;
       if (col?.id) {
         existing++;
-        details.push({ code, status: "existing" });
+        // Feil navn (f.eks. «Bokgruppe 334» fra før COLLECTION_NAMES var felles): rett tittelen
+        const fixed = collectionTitleFix(col.title, COLLECTION_NAMES[code]);
+        if (fixed) {
+          const ur = await shopifyGraphQL(COLLECTION_UPDATE_MUTATION, { collection: { id: col.id, title: fixed } });
+          const ue = (ur.data as Record<string, unknown>)?.collectionUpdate as { userErrors: { message: string }[] } | undefined;
+          if (ue?.userErrors?.length) throw new Error(ue.userErrors.map((e) => e.message).join(", "));
+          renamed++;
+          details.push({ code, status: "renamed", from: col.title, to: fixed });
+        } else {
+          details.push({ code, status: "existing" });
+        }
       } else {
         const cr = await shopifyGraphQL(COLLECTION_CREATE_MUTATION, {
           collection: { title, handle, sources: tagSources(`bkg-${code}`) },
@@ -108,7 +118,7 @@ async function ensureCollections(koder: Set<string>): Promise<CollectionSyncResu
     }
     await new Promise(r => setTimeout(r, 100));
   }
-  return { created, existing, errors, total: sortedCodes.length, details };
+  return { created, existing, renamed, errors, total: sortedCodes.length, details };
 }
 
 // ══ SJANGRE SYNC JOB ═════════════════════════════════════════════════════════
