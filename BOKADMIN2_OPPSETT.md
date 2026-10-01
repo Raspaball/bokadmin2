@@ -74,7 +74,7 @@ Handle bygges av **tittel + forfatter + ISBN-13**, og bøker slås opp på ISBN 
 Beslutningen over er innført i 2.0 og testet mot Testbutikk.
 
 - **Eksport:** nye produkter får handle fra `buildBookHandle()` i `_shared/handle.js`. Oppslag før opprettelse: `books.shopify_id` → ISBN → handle = ISBN (eldre produkter) → ny handle (migrerte produkter). Eksisterende produkter beholder sin handle. `bok.isbn` settes og `shopify_id` lagres i `books` ved hver push.
-- **Avvik fra planen:** `productByIdentifier(customId: bok.isbn)` avvises i Testbutikk med «Metafield definition of type 'id' is required when using custom ids». Definisjonen `bok.isbn` har altså ikke typen `id`. Koden faller tilbake til søk på strekkode/SKU med eksakt ISBN-kontroll. Skal customId brukes, må definisjonen lages på nytt med typen `id` (egen beslutning, rører data i butikken).
+- ~~**Avvik fra planen:** `bok.isbn` hadde ikke typen `id`, så customId-oppslag ble avvist.~~ Definisjonen er laget på nytt med typen `id` 2026-10-01, se «bok.isbn som typen id» under.
 - **ISBN leses aldri fra handle** lenger (unntatt eldre produkter der handle er et rent ISBN): `extractIsbn()` i `_shared/isbn.js` brukes av pris-, tilgjengelighets- og sjangerjobbene og samlingsanalysen.
 - **Migrering fra nettsiden:** siden «Handles» (analyse, endre, kontroller, angre). `migrate`/`rollback` svarer 403 mot andre butikker enn Testbutikk med mindre `ALLOW_HANDLE_MIGRATION=true` er satt i 2.0-prosjektet. Hemmeligheten er **ikke** satt.
 
@@ -98,8 +98,19 @@ Gjenstår:
 - Sjekke 301 i nettleseren med storefront-passordet (f.eks. `/products/9788203461392`).
 - ~~ShopifyKatalog bruker handle som ISBN~~ — rettet 2026-09-30, se under.
 - `analyzeCollections`, `fullSyncCollections` og sjangre-sync henter produkter uten statusfilter (se CLAUDE.md om `status:active OR …`). Uendret her.
-- `bok.isbn` som typen `id` (se avvik over), og om `bok.forfatter` skal settes ved push.
+- ~~`bok.isbn` som typen `id`~~ (gjort 2026-10-01). Om `bok.forfatter` skal settes ved push.
 - Livebutikken: migreringen er klar, men krever `ALLOW_HANDLE_MIGRATION=true` og at 2.0 har erstattet dagens Bokadmin (live tåler ikke nye handles).
+
+## bok.isbn som typen id (2026-10-01)
+
+Definisjonen `bok.isbn` i Testbutikk er slettet og laget på nytt med typen `id`, slik at `productByIdentifier(identifier: { customId: { namespace: "bok", key: "isbn", value } })` kan brukes. Livebutikken er ikke rørt.
+
+- Verktøy: `scripts/isbn-definition.mjs` (`--status`, `--recreate`, `--restore [--execute]`, `--verify`). Nøkler i `scripts/.env.local`. Kjører bare mot Testbutikk.
+- Før: 65 produkter, 43 med `bok.isbn` (type `single_line_text_field`). Alle 43 verdiene var lik strekkoden. Sikkerhetskopi: `scripts/out/bok-isbn-backup-testbutikk-9434-for-sletting.json` (git-ignorert).
+- Ny definisjon: samme navn («ISBN»), nøkkel, beskrivelse, storefront `PUBLIC_READ`, festet, admin-filtrerbar, unik (typen `id` krever unik). 43 verdier satt inn igjen fra strekkoden (eksakt ISBN-13), alle av typen `id`.
+- **Avvik:** Shopify står med `validationStatus: SOME_INVALID` (43 gyldige, 0 ugyldige), og customId-oppslag svarer «Metafields have not completed migrating to to be valid for unique capability». Trolig fordi verdiene ble satt mens Shopify fortsatt slettet de gamle verdiene og bygde unik-indeksen. Unik kan ikke slås av for typen `id`, og ny lagring av én verdi hjalp ikke. Lærdom for livebutikken: vent til definisjonen er `ALL_VALID` og `metafieldsCount` er 0 før verdiene settes inn igjen.
+- **Eksport (pushOneBook):** oppslaget er nå `books.shopify_id` → customId `bok.isbn` → strekkode/SKU → handle = ISBN → ny handle. Feiler customId-oppslaget med en GraphQL-feil (feil type, eller migreringen over), brukes strekkode/SKU for det kallet. Før stoppet en slik feil hele push. Bare «type 'id' is required» huskes for resten av instansen.
+- **Handle-migreringen** slår ikke opp enkeltbøker. Den henter hele katalogen og bruker `extractIsbn` (bok.isbn → strekkode → SKU → ISBN-handle), som allerede har riktig rekkefølge. Ingen endring.
 
 ## Funksjoner testet i 2.0 for første gang (2026-09-30)
 

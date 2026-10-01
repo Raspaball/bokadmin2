@@ -609,19 +609,26 @@ function newBookHandle(book: BookMetadata, isbn: string): string {
   return buildBookHandle({ title: book.title, authors: book.author, isbn }) ?? isbn;
 }
 
-// Oppslag på ISBN: customId på bok.isbn, eller — hvis butikkens definisjon ikke
-// har typen «id» — søk på strekkode/SKU med eksakt ISBN-kontroll.
-async function findProductByIsbn(isbn: string): Promise<Record<string, unknown> | null> {
-  if (!customIdUnsupported) {
-    try {
-      const r = await shopifyGraphQL(PRODUCT_BY_ISBN_QUERY, { isbn });
-      return r.data?.productByIdentifier?.id ? r.data.productByIdentifier : null;
-    } catch (e) {
-      if (!String(e).includes("type 'id' is required")) throw e;
-      customIdUnsupported = true;
-      console.warn("bok.isbn har ikke typen «id» — slår opp på strekkode/SKU i stedet for customId");
-    }
+// Oppslag på ISBN via customId på bok.isbn (krever at definisjonen har typen «id»).
+// null hvis ingen treff, eller hvis Shopify avviser customId-oppslaget.
+async function findProductByCustomId(isbn: string): Promise<Record<string, unknown> | null> {
+  if (customIdUnsupported) return null;
+  try {
+    const r = await shopifyGraphQL(PRODUCT_BY_ISBN_QUERY, { isbn });
+    return r.data?.productByIdentifier?.id ? r.data.productByIdentifier : null;
+  } catch (e) {
+    const msg = String(e);
+    if (!msg.includes("Shopify GraphQL errors")) throw e; // nettverk, HTTP 401/403 osv.
+    // Feil type huskes; andre GraphQL-feil (f.eks. «Metafields have not completed
+    // migrating» rett etter at definisjonen er laget på nytt) gjelder bare dette kallet.
+    if (msg.includes("type 'id' is required")) customIdUnsupported = true;
+    console.warn(`customId-oppslag på bok.isbn feilet, prøver strekkode/SKU: ${msg.slice(0, 200)}`);
+    return null;
   }
+}
+
+// Reserve: søk på strekkode/SKU med eksakt ISBN-kontroll.
+async function findProductByBarcodeOrSku(isbn: string): Promise<Record<string, unknown> | null> {
   const r = await shopifyGraphQL(PRODUCTS_BY_ISBN_SEARCH_QUERY, {
     q: `(barcode:${isbn} OR sku:${isbn}) AND (status:active OR status:draft OR status:archived)`,
   });
@@ -631,9 +638,10 @@ async function findProductByIsbn(isbn: string): Promise<Record<string, unknown> 
 
 // Finner et eksisterende produkt for boka, i denne rekkefølgen:
 //   a. shopify_id lagret i books
-//   b. ISBN: metafeltet bok.isbn (customId), ellers strekkode/SKU
-//   c. handle = ISBN (eldre produkter)
-//   d. handle = ny handle (migrerte produkter som ennå ikke har bok.isbn)
+//   b. customId: metafeltet bok.isbn (typen «id»)
+//   c. strekkode/SKU (produkter uten bok.isbn, eller hvis customId avvises)
+//   d. handle = ISBN (eldre produkter)
+//   e. handle = ny handle (migrerte produkter som ennå ikke har bok.isbn)
 // Returnerer null hvis boka ikke finnes, og da opprettes et nytt produkt.
 async function findExistingProduct(book: BookMetadata, isbn: string): Promise<Record<string, unknown> | null> {
   const storedId = await getStoredShopifyId(isbn);
@@ -644,7 +652,7 @@ async function findExistingProduct(book: BookMetadata, isbn: string): Promise<Re
     } catch (_) { /* slettet eller ugyldig ID — prøv neste */ }
   }
 
-  const byIsbn = await findProductByIsbn(isbn);
+  const byIsbn = await findProductByCustomId(isbn) ?? await findProductByBarcodeOrSku(isbn);
   if (byIsbn) return byIsbn;
 
   const lookups: Array<[string, Record<string, unknown>]> = [
