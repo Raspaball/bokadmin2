@@ -7,6 +7,9 @@
 //   - Eksisterende bok uten godkjent pris: prisen sendes ikke, og blir stående.
 //     Statusen endres ikke av denne grunnen.
 //   - Bok med pris: som før.
+// Statusen ellers kommer fra tilgjengelighetsregelen (_shared/availability.ts).
+
+import { availabilityRule } from "./availability.ts";
 
 /** Pris over 0, ellers null. Godtar tall og tekst ("449", "449.00"). */
 export function validPrice(value: unknown): number | null {
@@ -45,8 +48,19 @@ export function decidePushPrice(value: unknown, isNew: boolean, reason?: string 
     : { price: null, draft: false, note: `Pris ikke endret: ${why}` };
 }
 
-/** CSV-eksport: rad uten pris får Status = draft og tom pris, aldri 0. */
-export function csvPriceAndStatus(value: unknown): { price: string; status: "active" | "draft" } {
+/**
+ * CSV-eksport: rad uten pris får Status = draft og tom pris, aldri 0.
+ * Med pris følger statusen tilgjengelighetsregelen (_shared/availability.ts),
+ * slik som push. Uten availabilityCode-argument (undefined): active som før.
+ */
+export function csvPriceAndStatus(
+  value: unknown,
+  availabilityCode?: string | null,
+): { price: string; status: "active" | "draft" | "archived" } {
   const price = validPrice(value);
-  return price !== null ? { price: String(price), status: "active" } : { price: "", status: "draft" };
+  if (price === null) return { price: "", status: "draft" };
+  const status = availabilityCode === undefined
+    ? "active"
+    : availabilityRule(availabilityCode).status.toLowerCase() as "active" | "draft" | "archived";
+  return { price: String(price), status };
 }

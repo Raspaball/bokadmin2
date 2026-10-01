@@ -42,3 +42,13 @@ test("CSV: uten pris gir draft og tom pris, aldri 0", () => {
   assert.deepEqual(csvPriceAndStatus(0), { price: "", status: "draft" });
   assert.deepEqual(csvPriceAndStatus(449), { price: "449", status: "active" });
 });
+
+test("CSV: status etter tilgjengelighetsregelen, uten pris alltid draft", () => {
+  assert.deepEqual(csvPriceAndStatus(449, "21"), { price: "449", status: "active" });
+  assert.deepEqual(csvPriceAndStatus(449, "10"), { price: "449", status: "active" });
+  assert.deepEqual(csvPriceAndStatus(449, "31"), { price: "449", status: "active" });
+  assert.deepEqual(csvPriceAndStatus(449, "43"), { price: "449", status: "archived" });
+  assert.deepEqual(csvPriceAndStatus(449, "40"), { price: "449", status: "draft" });
+  assert.deepEqual(csvPriceAndStatus(449, null), { price: "449", status: "draft" });
+  assert.deepEqual(csvPriceAndStatus(null, "10"), { price: "", status: "draft" });
+});

@@ -113,6 +113,7 @@ export interface BokbasenSearchResult {
   varegruppe: string;
   vekt: number | null;
   availability: string | null;
+  publishingDate?: string | null; // utgivelsesdato YYYY-MM-DD (extractPublishingDate i _shared/onix.js)
 }
 
 export interface ShopifyCatalogProduct {
@@ -498,7 +499,7 @@ export const bokbasen = {
 
 export const shopify = {
   // Push one book to Shopify
-  async pushBook(book: BokbasenSearchResult | Book): Promise<{ shopifyId: string; handle: string; variantId?: string; created?: boolean; warning?: string; priceNote?: string }> {
+  async pushBook(book: BokbasenSearchResult | Book): Promise<{ shopifyId: string; handle: string; variantId?: string; created?: boolean; warning?: string; priceNote?: string; availabilityNote?: string; status?: string }> {
     const res = await callEdgeFunction("shopify/push", {
       method: "POST",
       body: JSON.stringify({ book }),
@@ -507,7 +508,7 @@ export const shopify = {
   },
 
   // Push multiple books to Shopify
-  async pushBooks(bookList: (BokbasenSearchResult | Book)[]): Promise<Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string }>> {
+  async pushBooks(bookList: (BokbasenSearchResult | Book)[]): Promise<Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string; availabilityNote?: string; status?: string }>> {
     const res = await callEdgeFunction("shopify/push-bulk", {
       method: "POST",
       body: JSON.stringify({ books: bookList }),

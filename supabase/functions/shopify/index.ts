@@ -6,7 +6,10 @@ import { ALL_PRODUCT_STATUSES, getShopDomain, shopifyGraphQL } from "../_shared/
 import { BOKBASEN_ONIX_URL, type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { buildBookHandle, normalizeIsbn } from "../_shared/handle.js";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
-import { extractBokgruppekode } from "../_shared/onix.js";
+import { extractAvailabilityCode, extractBokgruppekode, extractPublishingDate } from "../_shared/onix.js";
+import {
+  availabilityDescription, availabilityMetafields, availabilityRule, needsContinuePolicy, type AvailabilityRule,
+} from "../_shared/availability.ts";
 import { chooseValidPrice } from "../_shared/price.ts";
 import { csvPriceAndStatus, decidePushPrice, validPrice, type PushPriceDecision } from "../_shared/push-price.ts";
 import { approvalMessage, checkPriceChange } from "../_shared/price-guard.ts";
@@ -77,6 +80,11 @@ interface BookMetadata {
   bokgruppe: string;
   bokgruppekode?: string;
   vekt: number | null;
+  // Tilgjengelighet (ONIX List 65): `availability` fra importen, `availability_code` fra books-raden
+  availability?: string | null;
+  availability_code?: string | null;
+  // Utgivelsesdato YYYY-MM-DD fra importen (extractPublishingDate)
+  publishingDate?: string | null;
 }
 
 // Bokgruppekode → samlingsnavn: COLLECTION_NAMES i _shared/collection-names.ts
@@ -96,7 +104,7 @@ function bokgruppeTagsForKode(kode: string): string[] {
 const PUSH_PRODUCT_FIELDS = `
   id title handle
   ${EGEN_PRIS_FIELD}
-  variants(first: 1) { edges { node { id sku price compareAtPrice } } }
+  variants(first: 1) { edges { node { id sku price compareAtPrice inventoryPolicy inventoryItem { tracked } } } }
   media(first: 1) { edges { node { id } } }
 `;
 
@@ -121,7 +129,7 @@ const PRODUCTS_BY_ISBN_SEARCH_QUERY = `
         id title handle
         ${BOK_ISBN_FIELD}
         ${EGEN_PRIS_FIELD}
-        variants(first: 1) { edges { node { id sku price compareAtPrice barcode } } }
+        variants(first: 1) { edges { node { id sku price compareAtPrice barcode inventoryPolicy inventoryItem { tracked } } } }
         media(first: 1) { edges { node { id } } }
       }
     }
@@ -383,25 +391,30 @@ async function findExistingProduct(book: BookMetadata, isbn: string): Promise<Re
 // Årsak til at en bok mangler pris, slått opp i Bokbasen med samme regel som
 // importen (choosePrice). Brukes når push får en bok uten pris og uten årsak
 // (f.eks. «Push alle» fra books). null hvis oppslaget feiler.
-async function fetchMissingPriceReason(isbn: string, credentials: BokbasenCredentials | null): Promise<string | null> {
+// Rå ONIX for én bok fra Bokbasen, eller null når oppslaget feiler
+async function fetchOnixXml(isbn: string, credentials: BokbasenCredentials | null): Promise<string | null> {
   try {
     const token = await getBokbasenToken(credentials);
     const res = await fetch(`${BOKBASEN_ONIX_URL}/${isbn}`, { headers: { Authorization: `Bearer ${token}` } });
-    if (!res.ok) return null;
-    const { price, reason } = chooseValidPrice(await res.text());
-    return price !== null
-      ? `Bokbasen har nå ${price} kr, men boka i arbeidslista mangler pris – importer den på nytt`
-      : reason;
+    return res.ok ? await res.text() : null;
   } catch {
     return null;
   }
+}
+
+function missingPriceReasonFromOnix(xml: string | null): string | null {
+  if (!xml) return null;
+  const { price, reason } = chooseValidPrice(xml);
+  return price !== null
+    ? `Bokbasen har nå ${price} kr, men boka i arbeidslista mangler pris – importer den på nytt`
+    : reason;
 }
 
 async function pushOneBook(
   book: BookMetadata,
   bokbasenCredentials: BokbasenCredentials | null = null,
   userId: string | null = null,
-): Promise<{ shopifyId: string; handle: string; variantId?: string; created: boolean; warning?: string; priceNote?: string; approvalRequired?: boolean }> {
+): Promise<{ shopifyId: string; handle: string; variantId?: string; created: boolean; warning?: string; priceNote?: string; approvalRequired?: boolean; availabilityNote?: string; status?: string }> {
   // Build tag list: author, title + bokgruppekode hierarchy
   const tagList = [book.author, book.title].filter(Boolean);
   if (book.bokgruppekode) {
@@ -424,10 +437,18 @@ async function pushOneBook(
   const existingVariantNode = (existing?.variants as { edges: { node: { compareAtPrice?: string | null } }[] } | undefined)?.edges?.[0]?.node;
   const lock = isUpdate ? priceLock(existing?.egenPris, existingVariantNode?.compareAtPrice) : null;
 
+  // ONIX hentes høyst én gang, og bare når noe mangler i boka vi fikk
+  // (prisårsak, tilgjengelighetskode eller utgivelsesdato)
+  let onixXml: string | null | undefined; // undefined = ikke hentet
+  const getOnix = async () => {
+    if (onixXml === undefined) onixXml = await fetchOnixXml(isbn, bokbasenCredentials);
+    return onixXml;
+  };
+
   // Pris: aldri 0. Mangler godkjent pris, opprettes en ny bok som utkast uten
   // pris, og en eksisterende bok beholder prisen sin (se _shared/push-price.ts).
   const missingReason = !lock && validPrice(book.price) === null
-    ? book.priceReason ?? await fetchMissingPriceReason(isbn, bokbasenCredentials)
+    ? book.priceReason ?? missingPriceReasonFromOnix(await getOnix())
     : null;
   const priceDecision: PushPriceDecision = lock
     ? { price: null, draft: false, note: priceLockMessage(lock) }
@@ -457,14 +478,36 @@ async function pushOneBook(
     }
   }
 
+  // Tilgjengelighet (ONIX List 65) → status, bok.tilgjengelighet og kjøpbarhet
+  // etter _shared/availability.ts. Mangler kode eller dato, hentes ONIX.
+  let availCode = book.availability ?? book.availability_code ?? null;
+  let pubDate = book.publishingDate ?? null;
+  let availKnown = !!availCode;
+  if (!availCode || !pubDate) {
+    const xml = await getOnix();
+    if (xml) {
+      availCode = availCode || extractAvailabilityCode(xml);
+      pubDate = pubDate || extractPublishingDate(xml);
+      availKnown = true;
+    }
+  }
+  // null = ukjent (Bokbasen svarte ikke og boka hadde ingen kode)
+  const availRule: AvailabilityRule | null = availKnown ? availabilityRule(availCode) : null;
+  const availabilityNote = availRule
+    ? availabilityDescription(availRule, pubDate)
+    : (isUpdate ? "Tilgjengelighet ukjent (Bokbasen svarte ikke): status ikke endret" : "Tilgjengelighet ukjent (Bokbasen svarte ikke): opprettet som utkast");
+
+  // Status: ny bok uten godkjent pris → alltid utkast (pakke A2). Ellers etter
+  // regelen. Ukjent tilgjengelighet: eksisterende bok beholder statusen, ny blir utkast.
+  const status = priceDecision.draft ? "DRAFT" : availRule ? availRule.status : (isUpdate ? null : "DRAFT");
+
   const productInput: Record<string, unknown> = {
     title: book.title,
     descriptionHtml: toHtml(book.description || ""),
     vendor: book.publisher || "",
     productType: book.author || "",
     tags,
-    // Eksisterende bøker: som før. Nye bøker uten godkjent pris: utkast.
-    status: priceDecision.draft ? "DRAFT" : "ACTIVE",
+    ...(status ? { status } : {}),
   };
 
   if (isUpdate && product) {
@@ -501,6 +544,9 @@ async function pushOneBook(
         barcode: isbn,
         // Uten godkjent pris sendes ikke pris: eksisterende pris blir stående
         ...(priceDecision.price !== null ? { price: priceDecision.price } : {}),
+        // Kjøpbar uansett lager: sporet lager med DENY får CONTINUE (beholdningen røres ikke)
+        ...(availRule && needsContinuePolicy(availRule, existingVariantNode as Parameters<typeof needsContinuePolicy>[1])
+          ? { inventoryPolicy: "CONTINUE" } : {}),
         taxable: false,
       }],
     });
@@ -554,6 +600,23 @@ async function pushOneBook(
   } catch (e) {
     warning = `bok.isbn ble ikke satt: ${String(e)}`;
   }
+  // Step 3c: bok.tilgjengelighet og bok.utgivelsesdato (bare når tilgjengeligheten er kjent)
+  if (availRule) {
+    try {
+      const mf = await shopifyGraphQL(`
+        mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields { id }
+            userErrors { field message }
+          }
+        }
+      `, { metafields: availabilityMetafields(product.id as string, availRule, pubDate) });
+      const errs = mf.data?.metafieldsSet?.userErrors as { message: string }[] | undefined;
+      if (errs?.length) warning = [warning, `Tilgjengelighet ble ikke satt: ${errs.map(e => e.message).join(", ")}`].filter(Boolean).join(". ");
+    } catch (e) {
+      warning = [warning, `Tilgjengelighet ble ikke satt: ${String(e)}`].filter(Boolean).join(". ");
+    }
+  }
   if (warning) console.error(`[push ${isbn}] ${warning}`);
 
   // Step 4: Image — only add if product has no image yet
@@ -572,7 +635,10 @@ async function pushOneBook(
 
   const priceNote = priceDecision.note ?? undefined;
   if (priceNote) console.warn(`[push ${isbn}] ${priceNote}`);
-  return { shopifyId: product.id as string, handle: product.handle as string, variantId, created: !isUpdate, warning, priceNote, approvalRequired };
+  return {
+    shopifyId: product.id as string, handle: product.handle as string, variantId, created: !isUpdate,
+    warning, priceNote, approvalRequired, availabilityNote, status: status ?? undefined,
+  };
 }
 
 // ── Sync Smart Collections ────────────────────────────────────────────────────
@@ -881,8 +947,9 @@ function booksToShopifyCSV(books: BookMetadata[]): string {
     const imageUrl = book.imageUrl || book.image_url || "";
 
     const isbn = normalizeIsbn(book.isbn);
-    // Uten godkjent pris: Status = draft og tom pris, aldri 0
-    const { price, status } = csvPriceAndStatus(book.price);
+    // Uten godkjent pris: Status = draft og tom pris, aldri 0. Ellers status
+    // etter tilgjengelighetsregelen (kommer/midlertidig utsolgt = active)
+    const { price, status } = csvPriceAndStatus(book.price, book.availability ?? book.availability_code ?? null);
     return [
       isbn ? newBookHandle(book, isbn) : book.isbn, book.title, book.description || "", book.publisher || "",
       book.author || "", tags, "TRUE", status, "Title", "Default Title",
@@ -1825,7 +1892,7 @@ serve(async (req: Request) => {
       for (const book of books) {
         try {
           const result = await pushOneBook(book, bokbasen, userId);
-          results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle, created: result.created, warning: result.warning, priceNote: result.priceNote, approvalRequired: result.approvalRequired });
+          results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle, created: result.created, warning: result.warning, priceNote: result.priceNote, approvalRequired: result.approvalRequired, availabilityNote: result.availabilityNote, status: result.status });
         } catch (e) {
           results.push({ isbn: book.isbn, success: false, error: String(e) });
         }

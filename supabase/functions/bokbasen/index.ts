@@ -3,7 +3,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
-import { extractBokgruppekode } from "../_shared/onix.js";
+import { extractAvailabilityCode, extractBokgruppekode, extractPublishingDate } from "../_shared/onix.js";
 import { chooseValidPrice } from "../_shared/price.ts";
 
 const BOKBASEN_API_BASE = "https://api.bokbasen.io/metadata";
@@ -365,13 +365,11 @@ function parseOnix(xmlText: string, isbn: string): BookMetadata | null {
     }
   }
 
-  // Availability (ONIX List 65) — from SupplyDetail block
-  let availability = "";
-  const supplyBlocks = [...xml.matchAll(/<SupplyDetail[\s\S]*?<\/SupplyDetail>/gi)];
-  for (const s of supplyBlocks) {
-    const avail = s[0].match(/<ProductAvailability[^>]*>(\d+)<\/ProductAvailability>/i)?.[1];
-    if (avail) { availability = avail; break; }
-  }
+  // Tilgjengelighet (ONIX List 65) og hel utgivelsesdato: felles lesing i _shared/onix.js.
+  // publishingDate (YYYY-MM-DD) settes som bok.utgivelsesdato ved push. Den finnes
+  // også for kommende bøker, i motsetning til year/publicationDate over.
+  const availability = extractAvailabilityCode(xml) ?? "";
+  const publishingDate = extractPublishingDate(xml);
 
   if (!title) return null;
 
@@ -393,6 +391,7 @@ function parseOnix(xmlText: string, isbn: string): BookMetadata | null {
     varegruppe,
     vekt: vekt ? parseFloat(vekt) : null,
     availability: availability || null,
+    publishingDate,
   };
 }
 
@@ -414,6 +413,7 @@ interface BookMetadata {
   varegruppe: string;
   vekt: number | null;
   availability: string | null;
+  publishingDate: string | null; // YYYY-MM-DD (extractPublishingDate)
 }
 
 // ── Route handlers ───────────────────────────────────────────────────────────
