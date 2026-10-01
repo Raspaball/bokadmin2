@@ -284,7 +284,8 @@ Oppgaven: `oppgaver/pakke-a2-prissikring.md`.
 | 0. Rydding i git | **Ferdig** (c83acaa, pushet). Live-prosjektets ref i oppgavefilene er byttet med en henvisning til `C:\Bokadmin\.env` |
 | 1. Aldri pris 0 | **Ferdig** (1ff7479). `shopify` og `bokbasen` er deployet og testet i Testbutikk (se over). Frontend (Import-siden) er ikke ute ennå: krever push til GitHub |
 | 2. Sperre mot store prishopp | **Ferdig** (3468aea, pushet). `price-update` og `shopify` er deployet, og nettsiden er ute. Migrasjonen `20261001120000_price_guard.sql` er kjørt i 2.0. Testet i Testbutikk (se under) |
-| 3–6 og «Til slutt» | Ikke startet |
+| 3. Egen pris og tilbud | **Ferdig**, deployet og testet (se under) |
+| 4–6 og «Til slutt» | Ikke startet |
 
 Del 2, det som er laget:
 - `_shared/price-guard.ts`: `checkPriceChange(gammel, ny, grense)` gir `same` (avvik under 0,01 kr), `set` (innenfor grensen), `fix` (gammel pris mangler eller er 0: settes) eller `approval` (over grensen: settes ikke). Akkurat på grensen settes. Tester: `scripts/price-guard.test.mjs`.
@@ -304,6 +305,18 @@ Testet i Testbutikk 2026-10-01 (sikkerhetskopi av alle priser før testene, samm
 | Push av Ingrid Winter (Winterkalypse nå!) etter manuell pris 200 | Prisen sendes ikke. `approvalRequired: true`, «Krever godkjenning: 200 → 449 kr (124,5 %)» |
 | Godkjenn på Oppdatering-siden (Eirik, innlogget) | Avkledd og Ingrid Winter satt til 449. `decided_by` og «Godkjent av eirikvr@gmail.com: …» i raden og `sync_log` |
 | Avvis (nytt tilfelle: Ingrid Winter 200, push) | Raden `rejected`, «Avvist av …: 200 → 449 kr (prisen er ikke endret)». Prisen stod på 200, satt tilbake til 449 for hånd |
+
+### Del 3: egen pris og tilbud
+
+`_shared/price-lock.ts` (`priceLock`, `EGEN_PRIS_FIELD`): prisen endres ikke når metafeltet `bok.egen_pris` er true, eller når varianten har `compareAtPrice` (tilbud). Egen pris går foran tilbud.
+
+- Prisjobben: hopper over produktet før Bokbasen-oppslaget og logger «Hoppet over: egen pris» / «Hoppet over: tilbud» (status `info`).
+- Push av eksisterende bok: prisen sendes ikke, alt annet oppdateres. `priceNote` = «Hoppet over: …». Ingen godkjenningsrad.
+- Godkjenning: avvises med melding hvis produktet har fått egen pris eller tilbud etter at raden ble laget.
+- Definisjonen `bok.egen_pris` (boolean, «Egen pris (Bokadmin endrer ikke prisen)», festet) er laget i Testbutikk med `node scripts/egen-pris-definition.mjs --create`. Må kjøres i livebutikken før 2.0 går live.
+- Tester: `scripts/price-lock.test.mjs`.
+
+Testet i Testbutikk: Avkledd med `egen_pris` = true og pris 111, Utyske med `compareAtPrice` 499 og pris 400. Prisjobb (oppdatering): begge hoppet over med riktig melding, 0 endret. Push med Bokbasen-pris 449: prisene stod, `priceNote` som over. Satt tilbake (metafeltet slettet, `compareAtPrice` fjernet, 449), og alle 65 produkter er like utgangspunktet.
 
 ## Funksjoner testet i 2.0 for første gang (2026-09-30)
 

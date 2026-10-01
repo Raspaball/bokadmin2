@@ -8,6 +8,7 @@ import { BOKBASEN_ONIX_URL, getBokbasenToken } from "../_shared/bokbasen-auth.ts
 import { choosePrice, type PriceChoice } from "../_shared/price.ts";
 import { approvalMessage, checkPriceChange, fixMessage } from "../_shared/price-guard.ts";
 import { getMaxPriceChangePct, recordPendingApproval } from "../_shared/price-approvals.ts";
+import { EGEN_PRIS_FIELD, priceLock, priceLockMessage } from "../_shared/price-lock.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 
 const PAGE_SIZE = 250;
@@ -32,12 +33,14 @@ interface ShopifyProduct {
   status: string;
   handle: string;
   bokIsbn?: { value: string } | null;
+  egenPris?: { value: string } | null;
   variants: {
     edges: Array<{
       node: {
         id: string;
         barcode: string | null;
         price: string;
+        compareAtPrice: string | null;
         inventoryItem: { sku: string | null };
       };
     }>;
@@ -79,12 +82,14 @@ async function fetchShopifyProductsPage(
             status
             handle
             ${BOK_ISBN_FIELD}
+            ${EGEN_PRIS_FIELD}
             variants(first: 1) {
               edges {
                 node {
                   id
                   barcode
                   price
+                  compareAtPrice
                   inventoryItem { sku }
                 }
               }
@@ -133,15 +138,19 @@ async function fetchBokbasenPrice(isbn: string, userId: string | null): Promise<
   return choosePrice(await res.text());
 }
 
-// Nåværende pris på varianten: tall, null (ingen pris) eller undefined (finnes ikke)
-async function getVariantPrice(variantId: string): Promise<number | null | undefined> {
-  const { data } = await shopifyGraphQL<{ productVariant: { price: string | null } | null }>(
-    `query variantPrice($id: ID!) { productVariant(id: $id) { price } }`,
+// Nåværende pris på varianten (tall eller null) og om den er låst (egen pris/tilbud).
+// undefined når varianten ikke finnes.
+async function getVariantPrice(variantId: string): Promise<{ price: number | null; lock: ReturnType<typeof priceLock> } | undefined> {
+  const { data } = await shopifyGraphQL<{
+    productVariant: { price: string | null; compareAtPrice: string | null; product: { egenPris: { value: string } | null } } | null;
+  }>(
+    `query variantPrice($id: ID!) { productVariant(id: $id) { price compareAtPrice product { ${EGEN_PRIS_FIELD} } } }`,
     { id: variantId },
   );
-  if (!data.productVariant) return undefined;
-  const p = parseFloat(data.productVariant.price ?? "");
-  return Number.isFinite(p) ? p : null;
+  const v = data.productVariant;
+  if (!v) return undefined;
+  const p = parseFloat(v.price ?? "");
+  return { price: Number.isFinite(p) ? p : null, lock: priceLock(v.product?.egenPris, v.compareAtPrice) };
 }
 
 function getEmailFromJWT(authHeader: string): string | null {
@@ -250,6 +259,24 @@ async function processBatch(jobId: string) {
       }).eq("id", jobId);
 
       if (!isbn || !variantId) {
+        skipped++;
+        processed++;
+        continue;
+      }
+
+      // Egen pris (bok.egen_pris) eller tilbud (compareAtPrice): prisen røres ikke
+      const lock = priceLock(product.egenPris, product.variants?.edges?.[0]?.node?.compareAtPrice);
+      if (lock) {
+        await supabase.from("sync_log").insert({
+          isbn,
+          title: product.handle,
+          action: "update",
+          status: "info",
+          message: priceLockMessage(lock),
+          shopify_id: product.id,
+          job_id: jobId,
+          user_id: userId,
+        });
         skipped++;
         processed++;
         continue;
@@ -441,8 +468,10 @@ serve(async (req) => {
           let note: string | null = null;
           if (decision === "approve") {
             // Bare hvis Shopify-prisen fortsatt er den gamle — ellers er den endret siden
-            const current = await getVariantPrice(row.shopify_variant_id);
-            if (current === undefined) throw new Error("Varianten finnes ikke lenger i Shopify");
+            const variant = await getVariantPrice(row.shopify_variant_id);
+            if (variant === undefined) throw new Error("Varianten finnes ikke lenger i Shopify");
+            if (variant.lock) throw new Error(`Prisen er låst i Shopify (${variant.lock}). Avvis endringen, eller fjern låsen først`);
+            const current = variant.price;
             const old = row.old_price === null ? null : Number(row.old_price);
             if ((old === null && current !== null && current > 0) || (old !== null && (current === null || Math.abs(current - old) >= 0.01))) {
               throw new Error(`Prisen i Shopify er endret siden (nå ${current ?? "mangler"} kr). Kjør prisjobben på nytt`);

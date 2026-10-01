@@ -8,9 +8,10 @@ import { buildBookHandle, normalizeIsbn } from "../_shared/handle.js";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { extractBokgruppekode } from "../_shared/onix.js";
 import { chooseValidPrice } from "../_shared/price.ts";
-import { csvPriceAndStatus, decidePushPrice, validPrice } from "../_shared/push-price.ts";
+import { csvPriceAndStatus, decidePushPrice, validPrice, type PushPriceDecision } from "../_shared/push-price.ts";
 import { approvalMessage, checkPriceChange } from "../_shared/price-guard.ts";
 import { getMaxPriceChangePct, recordPendingApproval } from "../_shared/price-approvals.ts";
+import { EGEN_PRIS_FIELD, priceLock, priceLockMessage } from "../_shared/price-lock.ts";
 import {
   SAFE_STORES, MIGRATION_PRODUCTS_QUERY, HANDLE_UPDATE_MUTATION,
   planHandleMigration, isBlockedRow, handleUpdateInput, type HandlePlanRow,
@@ -331,7 +332,8 @@ function bokgruppeTagsForKode(kode: string): string[] {
 // Felt pushOneBook trenger fra et eksisterende produkt
 const PUSH_PRODUCT_FIELDS = `
   id title handle
-  variants(first: 1) { edges { node { id sku price } } }
+  ${EGEN_PRIS_FIELD}
+  variants(first: 1) { edges { node { id sku price compareAtPrice } } }
   media(first: 1) { edges { node { id } } }
 `;
 
@@ -355,7 +357,8 @@ const PRODUCTS_BY_ISBN_SEARCH_QUERY = `
       nodes {
         id title handle
         ${BOK_ISBN_FIELD}
-        variants(first: 1) { edges { node { id sku price barcode } } }
+        ${EGEN_PRIS_FIELD}
+        variants(first: 1) { edges { node { id sku price compareAtPrice barcode } } }
         media(first: 1) { edges { node { id } } }
       }
     }
@@ -662,12 +665,19 @@ async function pushOneBook(
   const isUpdate = !!existing;
   const alreadyHasImage = ((existing?.media as { edges: unknown[] } | undefined)?.edges?.length ?? 0) > 0;
 
+  // Egen pris (bok.egen_pris) eller tilbud (compareAtPrice) på en eksisterende
+  // bok: prisen sendes ikke. Alt annet oppdateres som før (se _shared/price-lock.ts).
+  const existingVariantNode = (existing?.variants as { edges: { node: { compareAtPrice?: string | null } }[] } | undefined)?.edges?.[0]?.node;
+  const lock = isUpdate ? priceLock(existing?.egenPris, existingVariantNode?.compareAtPrice) : null;
+
   // Pris: aldri 0. Mangler godkjent pris, opprettes en ny bok som utkast uten
   // pris, og en eksisterende bok beholder prisen sin (se _shared/push-price.ts).
-  const missingReason = validPrice(book.price) === null
+  const missingReason = !lock && validPrice(book.price) === null
     ? book.priceReason ?? await fetchMissingPriceReason(isbn, bokbasenCredentials)
     : null;
-  const priceDecision = decidePushPrice(book.price, !isUpdate, missingReason);
+  const priceDecision: PushPriceDecision = lock
+    ? { price: null, draft: false, note: priceLockMessage(lock) }
+    : decidePushPrice(book.price, !isUpdate, missingReason);
 
   // Sperre mot store prishopp for eksisterende bøker (se _shared/price-guard.ts):
   // over grensen sendes ikke prisen, og endringen legges til godkjenning.
