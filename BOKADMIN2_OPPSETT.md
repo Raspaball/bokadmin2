@@ -288,7 +288,7 @@ Oppgaven: `oppgaver/pakke-a2-prissikring.md`.
 | 4. Tryggere standard og planlegging | **Ferdig**, deployet og testet (se under). Etter eiers valg er **ingen planlagte oppgaver lagt inn** |
 | 5. Rekkefølgen på pristypene | **Ferdig**: 04 > 02 > 03 > 01 > andre. Deployet (price-update, bokbasen, shopify). Sjekk i Testbutikk: 0 ville fått ny pris |
 | 6. Utfasede `input:`-argumenter | **Ferdig**, deployet (shopify, sjangre-sync) og testet på én kode (bkg-334) |
-| «Til slutt» | Pågår |
+| «Til slutt» | **Ferdig**: alt deployet, røyktest OK, dokumentasjon oppdatert (se under) |
 
 Del 2, det som er laget:
 - `_shared/price-guard.ts`: `checkPriceChange(gammel, ny, grense)` gir `same` (avvik under 0,01 kr), `set` (innenfor grensen), `fix` (gammel pris mangler eller er 0: settes) eller `approval` (over grensen: settes ikke). Akkurat på grensen settes. Tester: `scripts/price-guard.test.mjs`.
@@ -350,6 +350,27 @@ Sjekket mot Testbutikk med 2026-07 (introspeksjon; Shopify-validatoren i MCP bru
 - Skanning av alle mutasjoner i koden mot 2026-07: ingen utfasede argumenter igjen. **Gjenstår:** `collectionAddProducts` og `collectionRemoveProducts` (strømmer) er utfaset som hele mutasjoner («Use `collectionUpdate` with inclusion.selectionsToAdd / selectionsToRemove»).
 
 Testet i Testbutikk: midlertidige samlinger (smart og manuell) laget, kontrollert og slettet. `bkg-334` (1 produkt, ikke i meny) slettet og laget på nytt, først av `shopify/sync-collections` (1 opprettet, 24 fantes, 0 feil), så slettet igjen og laget av `sjangre-sync` (hele jobben: 43 tagget fra før, 1 opprettet, 24 fantes, 0 feil). Begge ga smart samling, TAG EQUALS bkg-334, 1 produkt. Ny ID, samme handle; tittelen er nå «Ungdom» (før «Bokgruppe 334»). Priser og status: 65 av 65 som før.
+
+### Til slutt: røyktest og status (2026-10-01)
+
+Deployet til 2.0: `price-update`, `shopify`, `bokbasen`, `sjangre-sync` (`availability-check` er ikke endret i A2). Migrasjoner kjørt: `20261001120000_price_guard.sql`, `20261001130000_scheduled_tasks_mode_oslo.sql`.
+
+| Røyktest (anon-nøkkel, samme endepunkter som nettsiden) | Resultat |
+|---|---|
+| Push av Avkledd (pris 449) | `created: false`, ingen notat, ingen godkjenning |
+| Push av Katalog 2004 (ingen pris i ONIX) | Opprettet som DRAFT, «Opprettet som utkast: mangler pris (ingen pris)». Slettet etterpå |
+| Prisjobb, sjekkmodus | «0 ville fått ny pris, 43 samme pris, 0 ville krevd godkjenning, hoppet over 22 (0 egen pris, 0 tilbud, 22 uten ISBN), 0 manglet godkjent pris, 0 feil» |
+| Godkjenningslista | 0 ventende (2 godkjent og 1 avvist fra testene i del 2) |
+| Priser og status i Testbutikk | 65 av 65 like sikkerhetskopien tatt før testene |
+
+Endret i Testbutikk og ikke satt tilbake (bevisst): metafeltdefinisjonen `bok.egen_pris` (del 3), og samlingen `bkg-334` (ny ID, tittel «Ungdom» i stedet for «Bokgruppe 334»; del 6).
+
+Gjenstår etter pakke A2:
+- Lage `bok.egen_pris` i livebutikken (`node scripts/egen-pris-definition.mjs --create`) før 2.0 går live.
+- Planlagte prisoppgaver (ingen lagt inn ennå): forslag nattlig sjekk 03:00 og ukentlig oppdatering (av til live).
+- Strømmer: `collectionAddProducts`/`collectionRemoveProducts` er utfaset (bruk `collectionUpdate` med `selectionsToAdd`/`selectionsToRemove`), og strømmer er ikke testet i 2.0.
+- Samlinger laget av sjangre-sync før del 6 kan ha navnet «Bokgruppe NNN» (f.eks. bkg-33, bkg-328, bkg-432). En synk endrer ikke titler på eksisterende samlinger.
+- `sjangre-sync` har ingen pg_cron-gjenopptaking; jobben går bare videre når nettsiden (eller et kall til `/resume`) driver den.
 
 ## Funksjoner testet i 2.0 for første gang (2026-09-30)
 

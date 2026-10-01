@@ -34,7 +34,12 @@ Prøv i så stor grad som mulig å bruke felles datakilder for viktige data som 
 | Data | Kilde | Brukt av |
 |---|---|---|
 | ONIX List 65 (tilgjengelighetskoder) | `src/app/utils/availabilityCodes.ts` | Import.tsx, BokbasenOppslag.tsx, TilgjengelighetTab.tsx; availability-check/index.ts har kopi. Full referanse: https://ns.editeur.org/onix/en/65 |
-| Bokgruppekode → navn-mapping | `COLLECTION_NAMES` i shopify/index.ts | shopify-edge function (autoritativ) |
+| Bokgruppekode → navn-mapping | `COLLECTION_NAMES` i `supabase/functions/_shared/collection-names.ts` (autoritativ, flyttet fra shopify/index.ts i pakke A2 del 6) | shopify (samlinger, megameny), sjangre-sync |
+| Samlingskall (2026-07) | `COLLECTION_CREATE_MUTATION` / `COLLECTION_UPDATE_MUTATION` / `tagSources()` i `_shared/collections.ts` (`collection:` + `sources`, ikke utfaset `input:` + `ruleSet`) | shopify (bkg-samlinger, strømmer), sjangre-sync |
+| Pris ved push/CSV (aldri 0) | `decidePushPrice()` / `csvPriceAndStatus()` i `_shared/push-price.ts` | pushOneBook, CSV-eksport |
+| Sperre mot store prishopp | `checkPriceChange()` i `_shared/price-guard.ts`; grense og ventende rader i `_shared/price-approvals.ts` (`user_settings.max_price_change_pct`, tabellen `price_approvals`) | price-update (jobb + `/approvals/decide`), pushOneBook, PrisGodkjenning.tsx |
+| Egen pris / tilbud (prisen røres ikke) | `priceLock()` / `EGEN_PRIS_FIELD` i `_shared/price-lock.ts` (metafelt `bok.egen_pris` eller `compareAtPrice`) | price-update, pushOneBook, godkjenning |
+| Prisjobbens sammendrag | `summarizeCounts()` i `_shared/price-summary.ts` → `jobs.result.summary` | price-update, Oppdatering.tsx (viser teksten) |
 | ISBN → bokgruppekode (cache) | Tabellen `bokgruppe_cache` + `books.bokgruppekode` via `loadKodeMap()` i sjangre-sync | sjangre-sync (enrich skriver, tagging leser). **Skriv aldri minimale rader i `books`** — books er arbeidslista på Import-siden, og «Tøm liste» sletter hele tabellen |
 | Bokgruppekode → bkg-tagg-hierarki | `bokgruppeTagsForKode()` i shopify/index.ts | pushOneBook (tagging ved eksport til Shopify) |
 | Handle-regel (tittel-forfatter-ISBN-13) | `buildBookHandle()` i `supabase/functions/_shared/handle.js` | pushOneBook, CSV-eksport, handle-migrering, scripts/migrate-handles.mjs |
@@ -52,7 +57,7 @@ Hvis du legger til data som brukes i mer enn én komponent eller Edge Function, 
 
 1. ~~**Bokbasen auth-URL i sjangre-sync**~~ — **Gjort 2026-09-30.** sjangre-sync bruker nå `auth.bokbasen.io`, `/metadata/export/onix/v2/` og SubjectSchemeIdentifier 37, som `bokbasen/` og `shopify/`. Den gamle varianten (login.bokbasen.io, `/onix/v2/`, skjema 23) feilet for alle oppslag.
 
-2. **`BOKGRUPPE_LABELS` i Sjangre.tsx → bruk COLLECTION_NAMES** — Sjangre.tsx vedlikeholder sin egen kopi av bokgruppe-labelene (kun 3-sifrede koder + separat `HOOFDKATEGORI` for 1-sifrede). Den autoritative kilden er `COLLECTION_NAMES` i `shopify/index.ts` som har 1-, 2- og 3-sifrede koder. Plan: opprett `src/app/utils/bokgruppe.ts` som eksporterer COLLECTION_NAMES, importer i Sjangre.tsx, fjern BOKGRUPPE_LABELS og HOOFDKATEGORI.
+2. **`BOKGRUPPE_LABELS` i Sjangre.tsx → bruk COLLECTION_NAMES** — Sjangre.tsx vedlikeholder sin egen kopi av bokgruppe-labelene (kun 3-sifrede koder + separat `HOOFDKATEGORI` for 1-sifrede). Den autoritative kilden er `COLLECTION_NAMES` i `_shared/collection-names.ts` som har 1-, 2- og 3-sifrede koder. Plan: opprett `src/app/utils/bokgruppe.ts` som eksporterer COLLECTION_NAMES, importer i Sjangre.tsx, fjern BOKGRUPPE_LABELS og HOOFDKATEGORI.
 
 3. **`FORMAT_OPTIONS` → flytt til `src/app/utils/formatCodes.ts`** — Definert i Import.tsx, duplikert som `FORMAT_ORDER` (bare labels) i ShopifyKatalog.tsx. Flytt til utils og importer begge steder.
 
@@ -99,7 +104,7 @@ Shared code lives in `supabase/functions/_shared/`. The `.js` modules there (`ha
 |---|---|
 | `bokbasen/` | Bokbasen ONIX v2 metadata: ISBN lookup, date-range, enrich-db |
 | `shopify/` | Shopify product push (single + bulk), catalog sync, CSV export, Smart Collections, feeds (manual collections), handle migration (`/handles/*`) |
-| `price-update/` | Long-running job: fetch current prices from Bokbasen and update Shopify variants. Endpoints: `/start`, `/status/:jobId`, `/cancel/:jobId`, `/resume/:jobId`, `/resume-paused`, `/active`, `/recent` |
+| `price-update/` | Long-running job: fetch current prices from Bokbasen and update Shopify variants. Endpoints: `/start` (`mode: analyze|update`, uten mode = `analyze`), `/status/:jobId`, `/cancel/:jobId`, `/resume/:jobId`, `/resume-paused`, `/active`, `/recent`, `/approvals/decide` (`{ ids, decision: approve|reject }`, krever innlogget bruker) |
 | `availability-check/` | Long-running job: check ONIX availability codes and optionally update Shopify. Same endpoints as price-update, plus `start` accepts `mode: analyze|update` |
 | `sjangre-sync/` | Long-running job: enrich bokgruppekode → tag products → create Smart Collections. Endpoints: `/start`, `/resume/:jobId`, `/resume-paused`, `/status/:jobId`, `/analyze`, `/active`, `/recent`, `/catalog-bkg-stats`, `/delete-empty-collections` |
 
@@ -120,6 +125,8 @@ All tables have a `user_id uuid` column (nullable) for multi-tenant isolation. T
 - SKU and weight live on `InventoryItem`, not `ProductVariant`
 - SEO is set with `metafieldsSet` (`namespace: "global"`, keys `title_tag` / `description_tag`), not via product input
 - `productCreate(product: ProductCreateInput)` / `productUpdate(product: ProductUpdateInput)` — the `input: ProductInput` argument is deprecated
+- Collections: `collectionCreate(collection: CollectionCreateInput)` / `collectionUpdate(collection: CollectionUpdateInput)` via `_shared/collections.ts`. Tag rules go in `sources` (`tagSources(tag)`); without `sources` the collection is manual. `collectionAddProducts`/`collectionRemoveProducts` (feeds) are deprecated in favour of `collectionUpdate` selections — not yet changed
+- The MCP GraphQL validator uses an older schema (no `collection:` argument): validate against Testbutikk with introspection when they disagree
 - Lookups: `productByIdentifier(identifier: { handle })` / `collectionByIdentifier(identifier: { handle })` — `productByHandle` / `collectionByHandle` are deprecated
 - Images: add with `productUpdate(product: { id }, media: [...])` (`productCreateMedia` is deprecated); read with `media` / `featuredMedia { preview { image { url } } }` (`images` / `featuredImage` are deprecated)
 - Validate every new or changed GraphQL string against the schema (Shopify's GraphQL validator) before deploying
@@ -129,6 +136,7 @@ All tables have a `user_id uuid` column (nullable) for multi-tenant isolation. T
 - ISBN → metafield `bok.isbn`, SKU, barcode. **Never read ISBN from `product.handle`** — use `extractIsbn()` and fetch `bok.isbn`, barcode and SKU in the query
 - Lookup before create (pushOneBook): `books.shopify_id` → customId `bok.isbn` (definition of type `id` in Testbutikk since 2026-10-01) → barcode/SKU search (also used when the customId lookup returns a GraphQL error) → handle = ISBN (legacy) → handle = new handle → create. `shopify_id` is saved to `books` after every push
 - Price/status → `decidePushPrice()` i `_shared/push-price.ts`: never price 0. New book without approved price → DRAFT without price; existing book without price → price not sent. CSV: `draft` + empty price
+- Existing book: price not sent when `bok.egen_pris` = true or the variant has `compareAtPrice` («Hoppet over: egen pris/tilbud»), or when the change exceeds `max_price_change_pct` (standard 30 %) → row in `price_approvals`, `approvalRequired: true`. Same rules in the price job (update mode); old price 0/missing is always set
 - Author → productType
 - Publisher → vendor
 - Tags = `"author, title"` + bokgruppekode hierarchy tags (`bkg-N`, `bkg-NN`, `bkg-NNN`)
@@ -200,12 +208,13 @@ Jobber kjører i 45s-pulser (Supabase Edge Function timeout). Hvert kall til `pr
 | `resume-paused-availability-jobs` | hvert minutt | `/availability-check/resume-paused` | Gjenopptar pauset tilgjengelighetsjobb |
 | `run-scheduled-tasks` | hvert minutt | `/price-update/start` eller `/availability-check/start` | Trigger planlagte oppgaver fra `scheduled_tasks`-tabellen |
 
-`run-scheduled-tasks` sender `user_id` i POST-body (siden migrasjon `20260226000002`) slik at per-bruker credentials fungerer.
+`run-scheduled-tasks` sender `user_id` i POST-body (siden migrasjon `20260226000002`) slik at per-bruker credentials fungerer. Siden `20261001130000` sender den også `mode` for prisjobber (`scheduled_tasks.config.mode`, uten mode: `analyze`), regner tidene i Europe/Oslo, og venter (flytter ikke `next_run_at`) mens en prisjobb for samme bruker kjører. Høyst én prisjobb startes per minutt; oppdatering går foran sjekk. URL og nøkkel hentes fra Vault (`project_url`, `anon_key`).
 
 ### Scheduled tasks-atferd
 
 - Ny oppgave opprettes med `next_run_at = NULL` → pg_cron trigger den UMIDDELBART (innen ~1 minutt), ikke ved det planlagte tidspunktet
-- Etter første kjøring settes `next_run_at = IMORGEN kl HH:00`
+- Etter første kjøring settes `next_run_at = IMORGEN kl HH:00` norsk tid (neste mandag / neste 1. for ukentlig/månedlig)
+- Prisoppgaver har `config.mode` (`analyze` = sjekk, `update` = endrer priser); Oppdatering-siden lar deg velge. Per 2026-10-01 er ingen planlagte oppgaver lagt inn i 2.0
 - Kjøringer fra planlagte oppgaver vises i "Siste oppdateringer"/"Siste sjekker" i UI-et — det er ingen distinksjon mellom manuelle og planlagte kjøringer i jobbtabellen
 - Toggle-knappen (▷/⏸) i UI setter `enabled = true/false` — avbryter IKKE en allerede kjørende jobb, forhindrer bare fremtidige kjøringer
 
@@ -353,7 +362,7 @@ supabase functions deploy shopify --no-verify-jwt
 
 When a book with bokgruppekode `417` is pushed to Shopify, it gets three tags: `bkg-4`, `bkg-41`, `bkg-417`. The `sync-collections` endpoint then creates (or verifies) one Smart Collection per tag, each with a rule `TAG = bkg-{code}`. Books are automatically assigned to all matching collections by Shopify.
 
-**The complete `COLLECTION_NAMES` map** in `supabase/functions/shopify/index.ts` is the authoritative source for all bokgruppe codes and their Norwegian names. All 1-, 2- and 3-digit codes are defined there. Do NOT simplify or truncate this map.
+**The complete `COLLECTION_NAMES` map** in `supabase/functions/_shared/collection-names.ts` is the authoritative source for all bokgruppe codes and their Norwegian names. All 1-, 2- and 3-digit codes are defined there. Do NOT simplify or truncate this map.
 
 **Sync workflow (2-fase):**
 1. `POST /bokbasen/enrich-db` — fills in missing `bokgruppekode` on books in Supabase from Bokbasen ONIX
