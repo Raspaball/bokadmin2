@@ -275,6 +275,52 @@ Testet i Testbutikk (shopify og bokbasen deployet):
 | Avkledd med pris | Som før: 449, ACTIVE, ingen notat |
 | Antall produkter etter testene | 65 |
 
+## Pakke B: standarden i eksporten (SEO og bokfelt, påbegynt 2026-10-02)
+
+Oppgaven: `oppgaver/pakke-b-seo-eksport.md`. Reglene står samlet i `_shared/book-standard.ts` (én ren funksjon som regner ut ønsket tilstand fra ONIX), og lesingen av ONIX i `_shared/onix.js`.
+
+### Del 1: forfatterne som liste
+
+`extractContributors()` gir `authors: string[]` som «Fornavn Etternavn» i `SequenceNumber`-rekkefølge. Bare rolle A01; finnes ingen A01, brukes første bidragsyter (rollen i `authorRole`). Funn i 103 rå poster: navnene står nesten alltid som `PersonNameInverted` («Brochmann, Nina»: 140 av 144), `PersonName` 1 gang, `NamesBeforeKey`/`KeyNames` aldri, `CorporateName` 3. 10 bøker har flere A01, 19 har ingen A01 (redaktør B01, A09 kartverk/forlag, eller ingen bidragsytere). Listen lagres i `books.authors` (migrasjon `20261002120000_books_authors.sql`), og handle bygges fra den. `firstAuthor()` brukes bare for gamle rader uten liste. Visningsteksten `author` er nå «Fornavn Etternavn, Fornavn Etternavn».
+
+### Del 2: bokfeltene og formatlisten
+
+Alle definisjonene i `bok` fantes i Testbutikk (`forfatter` liste, `format`, `sider` heltall, `utgivelsesaar` heltall, `spraak`, `serie`, `alder`, `thema` liste). Ingen ble laget.
+
+| Felt | Regel (`_shared/onix.js`) | Funn i 103 poster |
+|---|---|---|
+| `bok.forfatter` | listen fra del 1 | |
+| `bok.format` | `bookFormat()` i `_shared/book-format.ts` (under) | |
+| `bok.sider` | Extent 00, ellers 07, ellers 08, enhet 03 (sider) | 46 har sidetall (00: 42, 08: 4). Kommende bøker mangler ofte |
+| `bok.utgivelsesaar` | PublishingDate 01 (bare årstall hos Bokbasen), ellers PublicationDate | 103 |
+| `bok.spraak` | Language rolle 01 → norsk navn (nob Bokmål, nno Nynorsk, eng Engelsk …, mul Flere språk) | Bokmål 82, Engelsk 10, Nynorsk 8 |
+| `bok.serie` | Collection type 10 (forlagets serie), ellers 20 (tilordnet av Bokbasen), med nummer: «Ingrid Winter (5)». Type 11 (forlagsrekker som «Cap-serien», «Pekebok», «Cesam pocket») brukes ikke | 23 |
+| `bok.alder` | AudienceRange kvalifikator 17 (fra/til): «6–9 år», «fra 12 år». Flere områder slås sammen | 15. Alle med Thema-alder (5A…) hadde også AudienceRange, så Thema brukes ikke som reserve |
+| `bok.thema` | Subject skjema 93–99, i rekkefølge | 103 |
+
+Felt uten verdi i ONIX settes ikke, og Bokadmin tømmer dem aldri.
+
+**Format.** `ProductForm`/`ProductFormDetail` i rådataene (koder slått opp i ONIX-liste 150/175):
+
+| ProductForm (+ Detail) | Antall | `bok.format` | productType |
+|---|---|---|---|
+| BB (+ B502 med trykt omslag) | 61 | Innbundet | Bok |
+| BC | 20 | Heftet | Bok |
+| BC + B113 (Pocket, Sverige/Norge/Frankrike) | 6 | Pocket | Bok |
+| BC + B611 (bare store bokstaver) | 1 | Heftet | Bok |
+| ED + E101 (EPUB) | 4 | E-bok | E-bok |
+| AJ + A103 (MP3) | 3 | Lydbok | Lydbok |
+| CB (falset kart) | 3 | Kart | Bok |
+| AB (lydkassett) | 2 | Lydbok | Lydbok |
+| DB (CD-ROM) | 2 | Annet | Bok |
+| EB (app-lisens, uten e-bokformat) | 1 | Annet | E-bok |
+
+**Formatlisten (godkjent av Eirik 2026-10-02):** Innbundet, Heftet, Pocket, Kartonert, Spiral, Pappbok, Lydbok, E-bok, Kart, Annet. Oversettelse: BB/BG → Innbundet; BA/BC + B113, B114 (storpocket), B101/B104 (massemarked) → Pocket; BA/BC + B115 (kartonnasje), B116 (flexband) → Kartonert; BE eller B312–B314 → Spiral; BA/BC ellers → Heftet; BH → Pappbok; A* → Lydbok; E* med E101/E107/E116 → E-bok; C* → Kart; ellers Annet. Storpocket og Flexband er slått sammen med Pocket og Kartonert (Eiriks valg).
+
+`productType` er nå «Bok», «Lydbok» eller «E-bok» (før: forfatteren). CSV-eksporten bruker `productType` fra importen.
+
+NB: `FORMAT_OPTIONS` i Import.tsx (importfilteret) har feil koder (BD er løsblad, ikke spiral; AB er kassett, AI er DVD-lyd, DA er digitalt fysisk). Filteret matcher på etikett, ikke kode, så det virker, men kodene bør ryddes når filteret flyttes til `src/app/utils/formatCodes.ts`.
+
 ## Pakke C: kommende og midlertidig utsolgte bøker (2026-10-02)
 
 Oppgaven: `oppgaver/pakke-c-tilgjengelighet.md`. Beslutning (Eirik): kommende og midlertidig utsolgte bøker skal være synlige og kunne kjøpes, ikke utkast (utkast gir 404, og Google mister siden akkurat når kommende bøker gir søketrafikk). Prisregelen (List 58) er ikke endret.

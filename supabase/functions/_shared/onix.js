@@ -151,3 +151,158 @@ export function extractPublishingDate(xml) {
     ?? roleDate(x, "PublishingDate", "PublishingDateRole", "11")
     ?? fullDate(x.match(/<PublicationDate[^>]*>\s*([^<]+?)\s*<\/PublicationDate>/i)?.[1]);
 }
+
+// ── Bokfeltene (pakke B del 2) ───────────────────────────────────────────────
+// Kontrollert mot 103 rå ONIX 3.1-poster fra Bokbasen (2026-10-02). Funnene
+// står i BOKADMIN2_OPPSETT.md («Pakke B»).
+
+/** Første tekst i <tag> (uten attributter i navnet), dekodet og trimmet, eller "". */
+function firstText(xml, tag) {
+  const m = xml.match(new RegExp("<" + tag + "(?:\\s[^>]*)?>([\\s\\S]*?)</" + tag + ">", "i"));
+  return m ? decodeXmlText(m[1]).trim() : "";
+}
+
+/** Alle blokker <tag>…</tag>. */
+function blocks(xml, tag) {
+  return [...xml.matchAll(new RegExp("<" + tag + "(?:\\s[^>]*)?>[\\s\\S]*?</" + tag + ">", "gi"))].map((m) => m[0]);
+}
+
+/**
+ * ProductForm (List 150) og ProductFormDetail (List 175).
+ * @param {string} xml
+ * @returns {{ form: string | null, details: string[] }}
+ */
+export function extractProductForm(xml) {
+  const x = stripNamespaces(xml);
+  const form = firstText(x, "ProductForm") || null;
+  const details = [...x.matchAll(/<ProductFormDetail[^>]*>\s*([^<]+?)\s*<\/ProductFormDetail>/gi)].map((m) => m[1]);
+  return { form, details };
+}
+
+/**
+ * Sidetall: Extent med type 00 (hovedinnhold), ellers 07 (absolutt), ellers 08
+ * (sidetall i trykt utgave, f.eks. for e-bøker), og enhet 03 (sider). null ellers.
+ * @param {string} xml
+ * @returns {number | null}
+ */
+export function extractPages(xml) {
+  const found = {};
+  for (const b of blocks(stripNamespaces(xml), "Extent")) {
+    const type = firstText(b, "ExtentType");
+    const unit = firstText(b, "ExtentUnit");
+    const value = parseInt(firstText(b, "ExtentValue"), 10);
+    if (unit === "03" && Number.isFinite(value) && value > 0 && found[type] === undefined) found[type] = value;
+  }
+  return found["00"] ?? found["07"] ?? found["08"] ?? null;
+}
+
+/**
+ * Utgivelsesår: PublishingDate rolle 01 (hos Bokbasen bare årstall), ellers
+ * PublicationDate (ONIX 2.1). null ellers.
+ * @param {string} xml
+ * @returns {number | null}
+ */
+export function extractPublicationYear(xml) {
+  const x = stripNamespaces(xml);
+  for (const b of blocks(x, "PublishingDate")) {
+    if (firstText(b, "PublishingDateRole") !== "01") continue;
+    const y = firstText(b, "Date").match(/^(\d{4})/)?.[1];
+    if (y) return parseInt(y, 10);
+  }
+  const y = firstText(x, "PublicationDate").match(/^(\d{4})/)?.[1];
+  return y ? parseInt(y, 10) : null;
+}
+
+/** ISO 639-2/B-koder → norsk språknavn. Ukjente koder vises som koden. */
+export const LANGUAGE_NAMES = {
+  nob: "Bokmål", nno: "Nynorsk", nor: "Norsk", eng: "Engelsk", swe: "Svensk", dan: "Dansk",
+  ger: "Tysk", deu: "Tysk", fre: "Fransk", fra: "Fransk", spa: "Spansk", ita: "Italiensk",
+  rus: "Russisk", fin: "Finsk", isl: "Islandsk", ice: "Islandsk", dut: "Nederlandsk", nld: "Nederlandsk",
+  por: "Portugisisk", pol: "Polsk", ara: "Arabisk", sme: "Nordsamisk", smj: "Lulesamisk", sma: "Sørsamisk",
+  lat: "Latin", gre: "Gresk", ell: "Gresk", chi: "Kinesisk", zho: "Kinesisk", jpn: "Japansk",
+  mul: "Flere språk",
+};
+
+/**
+ * Språket boka er skrevet på: Language med rolle 01, som norsk navn.
+ * @param {string} xml
+ * @returns {string | null}
+ */
+export function extractLanguage(xml) {
+  for (const b of blocks(stripNamespaces(xml), "Language")) {
+    if (firstText(b, "LanguageRole") !== "01") continue;
+    const code = firstText(b, "LanguageCode").toLowerCase();
+    if (code) return LANGUAGE_NAMES[code] ?? code;
+  }
+  return null;
+}
+
+/**
+ * Serie: Collection med CollectionType 10 (forlagets serie), ellers 20
+ * (tilordnet av Bokbasen). Type 11 (forlagsrekker som «Cap-serien», «Pekebok»)
+ * brukes ikke. Med nummer: «Ingrid Winter (5)». ONIX 2.1: Series/TitleOfSeries.
+ * @param {string} xml
+ * @returns {string | null}
+ */
+export function extractSeries(xml) {
+  const x = stripNamespaces(xml);
+  const collections = blocks(x, "Collection").map((b) => ({
+    type: firstText(b, "CollectionType"),
+    title: firstText(b, "TitleText"),
+    part: firstText(b, "PartNumber"),
+  })).filter((c) => c.title);
+  const pick = collections.find((c) => c.type === "10") ?? collections.find((c) => c.type === "20");
+  if (pick) return pick.part ? `${pick.title} (${pick.part})` : pick.title;
+  const series = blocks(x, "Series")[0];
+  if (series) {
+    const title = firstText(series, "TitleOfSeries");
+    const part = firstText(series, "NumberWithinSeries");
+    if (title) return part ? `${title} (${part})` : title;
+  }
+  return null;
+}
+
+/**
+ * Aldersgruppe fra AudienceRange med kvalifikator 17 (interessealder, år):
+ * presisjon 01 = nøyaktig, 03 = fra, 04 = til. Flere områder slås sammen
+ * (laveste fra, høyeste til). «6–9 år», «fra 12 år», «til 3 år», «5 år».
+ * Alle poster med Thema-alder (5A…) hadde også AudienceRange, så Thema brukes ikke.
+ * @param {string} xml
+ * @returns {string | null}
+ */
+export function extractAudienceAge(xml) {
+  let from = null;
+  let to = null;
+  for (const b of blocks(stripNamespaces(xml), "AudienceRange")) {
+    if (firstText(b, "AudienceRangeQualifier") !== "17") continue;
+    const precisions = [...b.matchAll(/<AudienceRangePrecision[^>]*>\s*(\d+)\s*<\/AudienceRangePrecision>/gi)].map((m) => m[1]);
+    const values = [...b.matchAll(/<AudienceRangeValue[^>]*>\s*(\d+)\s*<\/AudienceRangeValue>/gi)].map((m) => parseInt(m[1], 10));
+    precisions.forEach((p, i) => {
+      const v = values[i];
+      if (!Number.isFinite(v)) return;
+      if (p === "01" || p === "03") from = from === null ? v : Math.min(from, v);
+      if (p === "01" || p === "04") to = to === null ? v : Math.max(to, v);
+    });
+  }
+  if (from !== null && to !== null) return from === to ? `${from} år` : `${from}–${to} år`;
+  if (from !== null) return `fra ${from} år`;
+  if (to !== null) return `til ${to} år`;
+  return null;
+}
+
+/**
+ * Thema-koder: Subject med skjema 93 (emne) og 94–99 (kvalifikatorer: sted,
+ * språk, tid, utdanning, interesse/alder, stil), i rekkefølge, uten duplikater.
+ * @param {string} xml
+ * @returns {string[]}
+ */
+export function extractThema(xml) {
+  const codes = [];
+  for (const b of blocks(stripNamespaces(xml), "Subject")) {
+    const scheme = firstText(b, "SubjectSchemeIdentifier");
+    if (!/^9[3-9]$/.test(scheme)) continue;
+    const code = firstText(b, "SubjectCode");
+    if (code && !codes.includes(code)) codes.push(code);
+  }
+  return codes;
+}

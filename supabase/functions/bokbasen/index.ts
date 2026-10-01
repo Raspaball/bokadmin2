@@ -3,7 +3,8 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
-import { extractAvailabilityCode, extractBokgruppekode, extractContributors, extractPublishingDate } from "../_shared/onix.js";
+import { extractAvailabilityCode, extractBokgruppekode, extractContributors, extractProductForm, extractPublishingDate } from "../_shared/onix.js";
+import { bookFormat } from "../_shared/book-format.ts";
 import { chooseValidPrice } from "../_shared/price.ts";
 
 const BOKBASEN_API_BASE = "https://api.bokbasen.io/metadata";
@@ -277,6 +278,10 @@ function parseOnix(xmlText: string, isbn: string): BookMetadata | null {
     SA: "Sammensatt produkt", SB: "Sammensatt (boks)", SC: "Sammensatt (kassett)",
   };
   const format = formatMap[formCode] || formCode;
+  // bok.format og productType etter den godkjente listen (_shared/book-format.ts).
+  // `format` over er fortsatt etiketten importfilteret på Import-siden bruker.
+  const { form: pf, details: pfd } = extractProductForm(xml);
+  const { format: bookFormatLabel, productType } = bookFormat(pf, pfd);
 
   // Forfatterne som liste «Fornavn Etternavn» i rekkefølge (A01, ellers første
   // bidragsyter med rollen i authorRole). Felles lesing i _shared/onix.js.
@@ -368,6 +373,8 @@ function parseOnix(xmlText: string, isbn: string): BookMetadata | null {
     author: authors.join(", "),
     authors,
     authorRole,
+    bookFormat: bookFormatLabel,
+    productType,
     publisher,
     year,
     publicationDate: publicationDate || null,
@@ -392,6 +399,8 @@ interface BookMetadata {
   author: string;
   authors: string[]; // «Fornavn Etternavn» i rekkefølge (extractContributors)
   authorRole: string | null; // A01, eller rollen til første bidragsyter når A01 mangler
+  bookFormat: string; // bok.format (Innbundet, Heftet, Pocket …)
+  productType: string; // Bok / Lydbok / E-bok
   publisher: string;
   year: string;
   publicationDate: string | null;

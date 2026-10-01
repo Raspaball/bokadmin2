@@ -17,6 +17,7 @@ import { getMaxPriceChangePct, recordPendingApproval } from "../_shared/price-ap
 import { EGEN_PRIS_FIELD, priceLock, priceLockMessage } from "../_shared/price-lock.ts";
 import { COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, tagSources } from "../_shared/collections.ts";
 import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
+import { bookFieldsFromOnix, bookMetafields, type BookFields } from "../_shared/book-standard.ts";
 import {
   SAFE_STORES, MIGRATION_PRODUCTS_QUERY, HANDLE_UPDATE_MUTATION,
   planHandleMigration, isBlockedRow, handleUpdateInput, type HandlePlanRow,
@@ -69,6 +70,7 @@ interface BookMetadata {
   title: string;
   author: string;
   authors?: string[] | null; // «Fornavn Etternavn» i rekkefølge (importen og books.authors)
+  productType?: string | null; // Bok / Lydbok / E-bok fra importen (brukes i CSV)
   publisher: string;
   year: string;
   format: string;
@@ -429,6 +431,14 @@ async function pushOneBook(
   const isbn = normalizeIsbn(book.isbn);
   if (!isbn) throw new Error(`Ugyldig ISBN: ${book.isbn}`);
 
+  // ONIX hentes én gang per push: bokfeltene (pakke B, _shared/book-standard.ts),
+  // og prisårsak/tilgjengelighet når de mangler i boka vi fikk. null = Bokbasen svarte ikke.
+  const onixXml = await fetchOnixXml(isbn, bokbasenCredentials);
+  const getOnix = async () => onixXml;
+  const fields: BookFields | null = onixXml ? bookFieldsFromOnix(onixXml) : null;
+  // Gamle books-rader uten forfatterliste: listen fra ONIX (handle og bok.forfatter)
+  if (!book.authors?.length && fields?.authors.length) book = { ...book, authors: fields.authors };
+
   // Step 1: Finn eksisterende produkt (se findExistingProduct), ellers opprett.
   // Handle settes bare ved opprettelse — eksisterende produkter beholder sin.
   const existing = await findExistingProduct(book, isbn);
@@ -440,14 +450,6 @@ async function pushOneBook(
   // bok: prisen sendes ikke. Alt annet oppdateres som før (se _shared/price-lock.ts).
   const existingVariantNode = (existing?.variants as { edges: { node: { compareAtPrice?: string | null } }[] } | undefined)?.edges?.[0]?.node;
   const lock = isUpdate ? priceLock(existing?.egenPris, existingVariantNode?.compareAtPrice) : null;
-
-  // ONIX hentes høyst én gang, og bare når noe mangler i boka vi fikk
-  // (prisårsak, tilgjengelighetskode eller utgivelsesdato)
-  let onixXml: string | null | undefined; // undefined = ikke hentet
-  const getOnix = async () => {
-    if (onixXml === undefined) onixXml = await fetchOnixXml(isbn, bokbasenCredentials);
-    return onixXml;
-  };
 
   // Pris: aldri 0. Mangler godkjent pris, opprettes en ny bok som utkast uten
   // pris, og en eksisterende bok beholder prisen sin (se _shared/push-price.ts).
@@ -509,7 +511,9 @@ async function pushOneBook(
     title: book.title,
     descriptionHtml: toHtml(book.description || ""),
     vendor: book.publisher || "",
-    productType: book.author || "",
+    // Bok / Lydbok / E-bok ut fra formatet (ikke lenger forfatter). Uten ONIX:
+    // ny bok blir «Bok», eksisterende beholder sin
+    ...(fields ? { productType: fields.productType } : isUpdate ? {} : { productType: "Bok" }),
     tags,
     ...(status ? { status } : {}),
   };
@@ -604,6 +608,28 @@ async function pushOneBook(
   } catch (e) {
     warning = `bok.isbn ble ikke satt: ${String(e)}`;
   }
+  // Step 3d: bokfeltene (bok.forfatter, format, sider, utgivelsesaar, spraak,
+  // serie, alder, thema) fra ONIX. Felt uten verdi i ONIX røres ikke.
+  if (fields) {
+    const wanted = bookMetafields(fields).map((m) => ({ ownerId: product!.id as string, ...m }));
+    if (wanted.length) {
+      try {
+        const mf = await shopifyGraphQL(`
+          mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+            metafieldsSet(metafields: $metafields) {
+              metafields { id }
+              userErrors { field message }
+            }
+          }
+        `, { metafields: wanted });
+        const errs = mf.data?.metafieldsSet?.userErrors as { message: string }[] | undefined;
+        if (errs?.length) warning = [warning, `Bokfelt ble ikke satt: ${errs.map(e => e.message).join(", ")}`].filter(Boolean).join(". ");
+      } catch (e) {
+        warning = [warning, `Bokfelt ble ikke satt: ${String(e)}`].filter(Boolean).join(". ");
+      }
+    }
+  }
+
   // Step 3c: bok.tilgjengelighet og bok.utgivelsesdato (bare når tilgjengeligheten er kjent)
   if (availRule) {
     try {
@@ -956,7 +982,7 @@ function booksToShopifyCSV(books: BookMetadata[]): string {
     const { price, status } = csvPriceAndStatus(book.price, book.availability ?? book.availability_code ?? null);
     return [
       isbn ? newBookHandle(book, isbn) : book.isbn, book.title, book.description || "", book.publisher || "",
-      book.author || "", tags, "TRUE", status, "Title", "Default Title",
+      book.productType || "Bok", tags, "TRUE", status, "Title", "Default Title",
       book.isbn, book.isbn, price, "FALSE", "Media > Books > Print Books",
       "continue", "", book.vekt ?? "", "g", "manual", "TRUE", "FALSE",
       imageUrl, book.title, (book.description || "").slice(0, 320),
