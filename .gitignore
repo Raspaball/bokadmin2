@@ -7,3 +7,4 @@ dist/
 
 # Supabase CLI-lenke (må aldri peke på live-prosjektet)
 supabase/.temp/
+supabase/functions/deno.lock

@@ -275,6 +275,33 @@ Testet i Testbutikk (shopify og bokbasen deployet):
 | Avkledd med pris | Som før: 449, ACTIVE, ingen notat |
 | Antall produkter etter testene | 65 |
 
+## Status pakke A2, prissikring (pauset 2026-10-01)
+
+Oppgaven: `oppgaver/pakke-a2-prissikring.md`.
+
+| Del | Status |
+|---|---|
+| 0. Rydding i git | **Ferdig** (c83acaa, pushet). Live-prosjektets ref i oppgavefilene er byttet med en henvisning til `C:\Bokadmin\.env` |
+| 1. Aldri pris 0 | **Ferdig** (1ff7479). `shopify` og `bokbasen` er deployet og testet i Testbutikk (se over). Frontend (Import-siden) er ikke ute ennå: krever push til GitHub |
+| 2. Sperre mot store prishopp | **Kodet og committet lokalt, ikke deployet eller testet i Testbutikk.** Migrasjonen `20261001120000_price_guard.sql` er **kjørt** i 2.0 (av Eirik i SQL Editor, verifisert: `max_price_change_pct` = 30, tabellen `price_approvals` finnes) |
+| 3–6 og «Til slutt» | Ikke startet |
+
+Del 2, det som er laget:
+- `_shared/price-guard.ts`: `checkPriceChange(gammel, ny, grense)` gir `same` (avvik under 0,01 kr), `set` (innenfor grensen), `fix` (gammel pris mangler eller er 0: settes) eller `approval` (over grensen: settes ikke). Akkurat på grensen settes. Tester: `scripts/price-guard.test.mjs`.
+- `_shared/price-approvals.ts`: leser grensen fra `user_settings` (standard 30), og skriver én ventende rad per variant i `price_approvals`.
+- Prisjobben: i oppdateringsmodus legges endringer over grensen i `price_approvals` og logges «Krever godkjenning: <gammel> → <ny> kr (<x> %)»; `fix` logges «Pris satt: …». I sjekkmodus står det i avviksmeldingen at endringen ville krevd godkjenning.
+- Push av eksisterende bok: samme sperre. Prisen sendes ikke, og svaret har `approvalRequired: true` og meldingen i `priceNote`.
+- `POST /price-update/approvals/decide { ids, decision: approve|reject }`: krever innlogget bruker. Godkjenning setter prisen bare hvis Shopify-prisen fortsatt er den gamle, og logger «Godkjent av <e-post>: …» i `sync_log` og i raden (`decided_by`, `decision_note`).
+- Nettsiden: kortet «Priser som krever godkjenning» på Oppdatering-siden (`PrisGodkjenning.tsx`) med grenseinnstillingen, «Godkjenn»/«Avvis» per rad og for valgte.
+
+Neste steg når vi fortsetter (planen som ble lagt fram):
+1. Deploy `price-update` og `shopify`.
+2. Sett manuelt i Testbutikk: Avkledd 449 → 111, Utyske 449 → 400, Borgen 449 → 0. Kjør prisjobben i oppdateringsmodus. Forventet: Avkledd krever godkjenning, Utyske og Borgen settes til 449.
+3. Push av Ingrid Winter etter manuell pris 200: skal kreve godkjenning.
+4. Push til GitHub (Vercel), og Eirik godkjenner Avkledd og avviser Ingrid Winter på Oppdatering-siden. Godkjenningsendepunktet krever innlogging, så det kan ikke testes med anon-nøkkelen.
+5. Sett Ingrid Winter tilbake til 449, og kontroller at alle priser i Testbutikk er som før.
+6. Fortsett med del 3.
+
 ## Funksjoner testet i 2.0 for første gang (2026-09-30)
 
 Mot Testbutikk, via de samme endepunktene som sidene bruker. Livebutikken er ikke rørt, og 2.0 skal ikke prøves mot den ennå.

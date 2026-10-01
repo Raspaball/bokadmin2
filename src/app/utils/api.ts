@@ -157,6 +157,7 @@ export interface UserSettings {
   bokbasen_client_id: string | null;
   bokbasen_client_secret: string | null;
   bokbasen_subscription: string;
+  max_price_change_pct?: number; // sperre mot store prishopp, standard 30 (se _shared/price-guard.ts)
   setup_completed: boolean;
   created_at: string;
   updated_at: string;
@@ -659,6 +660,60 @@ export const catalogSnapshots = {
 };
 
 // ── Price Update Jobs ───────────────────────────────────────────────────────
+
+// ── Prisendringer som krever godkjenning (sperre mot store prishopp) ───────────
+
+export interface PriceApproval {
+  id: string;
+  isbn: string;
+  title: string | null;
+  shopify_product_id: string;
+  shopify_variant_id: string;
+  old_price: number | null;
+  new_price: number;
+  change_pct: number | null;
+  source: "price-update" | "push";
+  status: "pending" | "approved" | "rejected";
+  job_id: string | null;
+  created_at: string;
+  updated_at: string;
+  decided_at: string | null;
+  decided_by: string | null;
+  decision_note: string | null;
+}
+
+export const priceApprovals = {
+  async listPending(): Promise<PriceApproval[]> {
+    const { data, error } = await supabase
+      .from("price_approvals")
+      .select("*")
+      .eq("status", "pending")
+      .order("updated_at", { ascending: false })
+      .limit(500);
+    if (error) throw error;
+    return data ?? [];
+  },
+
+  async listDecided(limit = 20): Promise<PriceApproval[]> {
+    const { data, error } = await supabase
+      .from("price_approvals")
+      .select("*")
+      .neq("status", "pending")
+      .order("decided_at", { ascending: false })
+      .limit(limit);
+    if (error) throw error;
+    return data ?? [];
+  },
+
+  // Godkjenn (setter ny pris i Shopify) eller avvis
+  async decide(ids: string[], decision: "approve" | "reject"): Promise<Array<{ id: string; ok: boolean; error?: string }>> {
+    const res = await callEdgeFunction("price-update/approvals/decide", {
+      method: "POST",
+      body: JSON.stringify({ ids, decision }),
+    });
+    return (await res.json()).results;
+  },
+};
 
 export const priceJobs = {
   async start(mode: "analyze" | "update" = "update"): Promise<{ jobId: string }> {

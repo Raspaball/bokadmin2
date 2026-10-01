@@ -5,6 +5,7 @@ import { Loader2, RefreshCw, CheckCircle2, AlertCircle, FileText, Plus, Trash2, 
 import { priceJobs, scheduledTasks, syncLog, type Job, type ScheduledTask, type SyncLogEntry } from '../utils/api';
 import { toast } from 'sonner';
 import { TilgjengelighetTab } from './TilgjengelighetTab';
+import { PrisGodkjenning } from './PrisGodkjenning';
 
 const CRON_PRESETS = [
   { label: 'Daglig kl 03:00', value: '0 3 * * *' },
@@ -394,6 +395,9 @@ export function Oppdatering() {
           )}
         </CardContent>
       </Card>
+
+      {/* Priser som krever godkjenning (sperre mot store prishopp) */}
+      <PrisGodkjenning />
 
       {/* Last Completed Jobs */}
       {recentJobs.length > 0 && (

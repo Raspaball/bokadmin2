@@ -9,6 +9,8 @@ import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { extractBokgruppekode } from "../_shared/onix.js";
 import { chooseValidPrice } from "../_shared/price.ts";
 import { csvPriceAndStatus, decidePushPrice, validPrice } from "../_shared/push-price.ts";
+import { approvalMessage, checkPriceChange } from "../_shared/price-guard.ts";
+import { getMaxPriceChangePct, recordPendingApproval } from "../_shared/price-approvals.ts";
 import {
   SAFE_STORES, MIGRATION_PRODUCTS_QUERY, HANDLE_UPDATE_MUTATION,
   planHandleMigration, isBlockedRow, handleUpdateInput, type HandlePlanRow,
@@ -641,7 +643,8 @@ async function fetchMissingPriceReason(isbn: string, credentials: BokbasenCreden
 async function pushOneBook(
   book: BookMetadata,
   bokbasenCredentials: BokbasenCredentials | null = null,
-): Promise<{ shopifyId: string; handle: string; variantId?: string; created: boolean; warning?: string; priceNote?: string }> {
+  userId: string | null = null,
+): Promise<{ shopifyId: string; handle: string; variantId?: string; created: boolean; warning?: string; priceNote?: string; approvalRequired?: boolean }> {
   // Build tag list: author, title + bokgruppekode hierarchy
   const tagList = [book.author, book.title].filter(Boolean);
   if (book.bokgruppekode) {
@@ -665,6 +668,30 @@ async function pushOneBook(
     ? book.priceReason ?? await fetchMissingPriceReason(isbn, bokbasenCredentials)
     : null;
   const priceDecision = decidePushPrice(book.price, !isUpdate, missingReason);
+
+  // Sperre mot store prishopp for eksisterende bøker (se _shared/price-guard.ts):
+  // over grensen sendes ikke prisen, og endringen legges til godkjenning.
+  let approvalRequired = false;
+  if (isUpdate && existing && priceDecision.price !== null) {
+    const existingVariant = (existing.variants as { edges: { node: { id: string; price: string } }[] })?.edges?.[0]?.node;
+    const change = checkPriceChange(existingVariant?.price, Number(priceDecision.price), await getMaxPriceChangePct(userId));
+    if (change.action === "approval" && existingVariant) {
+      await recordPendingApproval({
+        isbn,
+        title: book.title,
+        shopify_product_id: existing.id as string,
+        shopify_variant_id: existingVariant.id,
+        old_price: parseFloat(existingVariant.price),
+        new_price: Number(priceDecision.price),
+        change_pct: change.pct,
+        source: "push",
+        user_id: userId,
+      });
+      priceDecision.note = approvalMessage(existingVariant.price, Number(priceDecision.price), change.pct!);
+      priceDecision.price = null;
+      approvalRequired = true;
+    }
+  }
 
   const productInput: Record<string, unknown> = {
     title: book.title,
@@ -781,7 +808,7 @@ async function pushOneBook(
 
   const priceNote = priceDecision.note ?? undefined;
   if (priceNote) console.warn(`[push ${isbn}] ${priceNote}`);
-  return { shopifyId: product.id as string, handle: product.handle as string, variantId, created: !isUpdate, warning, priceNote };
+  return { shopifyId: product.id as string, handle: product.handle as string, variantId, created: !isUpdate, warning, priceNote, approvalRequired };
 }
 
 // ── Sync Smart Collections ────────────────────────────────────────────────────
@@ -2036,7 +2063,7 @@ serve(async (req: Request) => {
       if (!book?.isbn) return new Response(JSON.stringify({ error: "Missing book data" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
-      const result = await pushOneBook(book, bokbasen);
+      const result = await pushOneBook(book, bokbasen, userId);
       return new Response(JSON.stringify({ success: true, ...result }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -2048,8 +2075,8 @@ serve(async (req: Request) => {
       const results = [];
       for (const book of books) {
         try {
-          const result = await pushOneBook(book, bokbasen);
-          results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle, created: result.created, warning: result.warning, priceNote: result.priceNote });
+          const result = await pushOneBook(book, bokbasen, userId);
+          results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle, created: result.created, warning: result.warning, priceNote: result.priceNote, approvalRequired: result.approvalRequired });
         } catch (e) {
           results.push({ isbn: book.isbn, success: false, error: String(e) });
         }

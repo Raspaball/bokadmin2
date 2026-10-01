@@ -6,6 +6,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
 import { BOKBASEN_ONIX_URL, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { choosePrice, type PriceChoice } from "../_shared/price.ts";
+import { approvalMessage, checkPriceChange, fixMessage } from "../_shared/price-guard.ts";
+import { getMaxPriceChangePct, recordPendingApproval } from "../_shared/price-approvals.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 
 const PAGE_SIZE = 250;
@@ -131,6 +133,26 @@ async function fetchBokbasenPrice(isbn: string, userId: string | null): Promise<
   return choosePrice(await res.text());
 }
 
+// Nåværende pris på varianten: tall, null (ingen pris) eller undefined (finnes ikke)
+async function getVariantPrice(variantId: string): Promise<number | null | undefined> {
+  const { data } = await shopifyGraphQL<{ productVariant: { price: string | null } | null }>(
+    `query variantPrice($id: ID!) { productVariant(id: $id) { price } }`,
+    { id: variantId },
+  );
+  if (!data.productVariant) return undefined;
+  const p = parseFloat(data.productVariant.price ?? "");
+  return Number.isFinite(p) ? p : null;
+}
+
+function getEmailFromJWT(authHeader: string): string | null {
+  try {
+    const payload = JSON.parse(atob(authHeader.replace("Bearer ", "").split(".")[1]));
+    return payload.email ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function updateShopifyPrice(
   _userId: string | null,
   productId: string,
@@ -182,6 +204,8 @@ async function processBatch(jobId: string) {
   const pageStartIndex: number = job.config?.page_start_index || 0;
   const userId: string | null = job.user_id || null;
   const mode: string = job.config?.mode || "update";
+  // Sperre mot store prishopp (se _shared/price-guard.ts)
+  const maxPct = await getMaxPriceChangePct(userId);
   let succeeded = job.succeeded || 0;
   let failed = job.failed || 0;
   let skipped = job.skipped || 0;
@@ -268,7 +292,8 @@ async function processBatch(jobId: string) {
         }
 
         const shopifyPrice = currentPrice ? parseFloat(currentPrice) : null;
-        if (shopifyPrice !== null && Math.abs(shopifyPrice - bokbasenPrice) < 0.01) {
+        const change = checkPriceChange(shopifyPrice, bokbasenPrice, maxPct);
+        if (change.action === "same") {
           skipped++;
           processed++;
           continue;
@@ -281,12 +306,39 @@ async function processBatch(jobId: string) {
             title: product.handle,
             action: "update",
             status: "success",
-            message: `Avvik: ${shopifyPrice ?? "mangler"} → ${bokbasenPrice} kr (ikke oppdatert)`,
+            message: change.action === "approval"
+              ? `Avvik: ${shopifyPrice ?? "mangler"} → ${bokbasenPrice} kr (ikke oppdatert; ${approvalMessage(shopifyPrice, bokbasenPrice, change.pct!).toLowerCase()})`
+              : `Avvik: ${shopifyPrice ?? "mangler"} → ${bokbasenPrice} kr (ikke oppdatert)`,
             shopify_id: product.id,
             job_id: jobId,
             user_id: userId,
           });
           succeeded++;
+        } else if (change.action === "approval") {
+          // Over grensen: prisen endres ikke, men legges til godkjenning
+          await recordPendingApproval({
+            isbn,
+            title: product.handle,
+            shopify_product_id: product.id,
+            shopify_variant_id: variantId,
+            old_price: shopifyPrice,
+            new_price: bokbasenPrice,
+            change_pct: change.pct,
+            source: "price-update",
+            job_id: jobId,
+            user_id: userId,
+          });
+          await supabase.from("sync_log").insert({
+            isbn,
+            title: product.handle,
+            action: "update",
+            status: "info",
+            message: approvalMessage(shopifyPrice, bokbasenPrice, change.pct!),
+            shopify_id: product.id,
+            job_id: jobId,
+            user_id: userId,
+          });
+          skipped++;
         } else {
           // Update mode: actually change the price in Shopify
           const shopifyOk = await updateShopifyPrice(userId, product.id, variantId, bokbasenPrice);
@@ -297,7 +349,7 @@ async function processBatch(jobId: string) {
             action: "update",
             status: shopifyOk ? "success" : "error",
             message: shopifyOk
-              ? `Pris endret: ${shopifyPrice} → ${bokbasenPrice} kr`
+              ? (change.action === "fix" ? fixMessage(shopifyPrice, bokbasenPrice) : `Pris endret: ${shopifyPrice} → ${bokbasenPrice} kr`)
               : `Pris endret (${shopifyPrice} → ${bokbasenPrice}), men Shopify-oppdatering feilet`,
             shopify_id: product.id,
             job_id: jobId,
@@ -365,6 +417,62 @@ serve(async (req) => {
     const path = url.pathname.replace(/^\/price-update\/?/, "");
     const supabase = getSupabase();
     const jwtUserId = getUserIdFromJWT(req.headers.get("Authorization") ?? "");
+
+    // POST /price-update/approvals/decide  { ids: string[], decision: "approve" | "reject" }
+    // Godkjenner (setter ny pris i Shopify) eller avviser ventende prisendringer
+    // fra price_approvals. Krever innlogget bruker; hvem som bestemte logges.
+    if (path === "approvals/decide" && req.method === "POST") {
+      const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), {
+        status, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+      if (!jwtUserId) return json({ error: "Krever innlogging" }, 401);
+      const body = await req.json().catch(() => ({}));
+      const ids: string[] = Array.isArray(body.ids) ? body.ids.filter((x: unknown) => typeof x === "string") : [];
+      const decision = body.decision === "approve" ? "approve" : body.decision === "reject" ? "reject" : null;
+      if (!ids.length || !decision) return json({ error: "Mangler ids eller decision (approve/reject)" }, 400);
+      const who = getEmailFromJWT(req.headers.get("Authorization") ?? "") ?? jwtUserId;
+
+      const { data: rows, error } = await supabase.from("price_approvals").select("*").in("id", ids).eq("status", "pending");
+      if (error) return json({ error: error.message }, 500);
+
+      const results: Array<{ id: string; ok: boolean; error?: string }> = [];
+      for (const row of rows ?? []) {
+        try {
+          let note: string | null = null;
+          if (decision === "approve") {
+            // Bare hvis Shopify-prisen fortsatt er den gamle — ellers er den endret siden
+            const current = await getVariantPrice(row.shopify_variant_id);
+            if (current === undefined) throw new Error("Varianten finnes ikke lenger i Shopify");
+            const old = row.old_price === null ? null : Number(row.old_price);
+            if ((old === null && current !== null && current > 0) || (old !== null && (current === null || Math.abs(current - old) >= 0.01))) {
+              throw new Error(`Prisen i Shopify er endret siden (nå ${current ?? "mangler"} kr). Kjør prisjobben på nytt`);
+            }
+            const ok = await updateShopifyPrice(row.user_id, row.shopify_product_id, row.shopify_variant_id, Number(row.new_price));
+            if (!ok) throw new Error("Shopify-oppdatering feilet");
+            note = `Godkjent av ${who}: ${row.old_price ?? "mangler"} → ${row.new_price} kr`;
+          } else {
+            note = `Avvist av ${who}: ${row.old_price ?? "mangler"} → ${row.new_price} kr (prisen er ikke endret)`;
+          }
+          await supabase.from("price_approvals").update({
+            status: decision === "approve" ? "approved" : "rejected",
+            decided_at: new Date().toISOString(),
+            decided_by: who,
+            decision_note: note,
+            updated_at: new Date().toISOString(),
+          }).eq("id", row.id).eq("status", "pending");
+          await supabase.from("sync_log").insert({
+            isbn: row.isbn, title: row.title, action: "update", status: "success",
+            message: note, shopify_id: row.shopify_product_id, job_id: row.job_id, user_id: jwtUserId,
+          });
+          results.push({ id: row.id, ok: true });
+        } catch (e) {
+          results.push({ id: row.id, ok: false, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      const missing = ids.filter((id) => !(rows ?? []).some((r) => r.id === id));
+      for (const id of missing) results.push({ id, ok: false, error: "Finnes ikke eller er allerede behandlet" });
+      return json({ results });
+    }
 
     // POST /price-update/start
     if (path === "start" && req.method === "POST") {
