@@ -3,7 +3,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
-import { shopifyGraphQL } from "../_shared/shopify.ts";
+import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 
 const PAGE_SIZE = 250;
@@ -140,7 +140,7 @@ async function fetchShopifyProductsPage(
   // meaning DRAFT and ARCHIVED products are never checked or re-activated.
   const query = `
     query($first: Int!, $after: String) {
-      products(first: $first, after: $after, query: "status:active OR status:draft OR status:archived") {
+      products(first: $first, after: $after, query: "${ALL_PRODUCT_STATUSES}") {
         pageInfo { hasNextPage endCursor }
         edges {
           node {
@@ -181,7 +181,7 @@ async function fetchShopifyProductsPage(
 async function getShopifyProductCount(_userId: string | null): Promise<number> {
   try {
     const { data } = await shopifyGraphQL<{ productsCount: { count: number } }>(
-      `{ productsCount(query: "status:active OR status:draft OR status:archived") { count } }`
+      `{ productsCount(query: "${ALL_PRODUCT_STATUSES}") { count } }`
     );
     return data.productsCount?.count || 0;
   } catch {

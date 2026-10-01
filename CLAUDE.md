@@ -162,7 +162,7 @@ Kanonisk kilde: `src/app/utils/availabilityCodes.ts` — kopi i `availability-ch
   - 44 (bestilles direkte fra vareeier — IKKE permanent), 45 (selges ikke enkeltvis — IKKE permanent)
   - 47 (nedsettelse), 48 (utsolgt/POD), 50 (selges kun enkeltvis), 51 (utgiver angir utsolgt), 52 (ikke dette marked)
   - 97–99 (ukjent / kontakt kundetjeneste)
-- **NB**: Shopify `products`-query MÅ bruke `query: "status:active OR status:draft OR status:archived"` — uten dette hentes bare ACTIVE-produkter
+- **NB**: Shopify `products`-/`productsCount`-spørringer som skal treffe hele katalogen bruker `query: "${ALL_PRODUCT_STATUSES}"` fra `_shared/shopify.ts` (Testbutikk 2026-10-01: arkiverte kom med også uten filter, utkast ikke kontrollert — filteret settes uansett)
 
 ### Job resume-arkitektur (kritisk — ikke endre uten å lese dette)
 

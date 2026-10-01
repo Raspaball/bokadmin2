@@ -11,6 +11,11 @@
 
 export const SHOPIFY_API_VERSION = "2026-07";
 
+// Søkefilter for spørringer som skal treffe hele katalogen, også utkast og
+// arkiverte produkter: products(query: …) og productsCount(query: …).
+// Samme tekst står i _shared/handle-migration.js (ren JS, kan ikke importere TS).
+export const ALL_PRODUCT_STATUSES = "status:active OR status:draft OR status:archived";
+
 // Forny nøkkelen 5 minutter før den utløper
 const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
 const MAX_THROTTLE_RETRIES = 3;

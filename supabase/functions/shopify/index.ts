@@ -2,7 +2,7 @@
 // Deploy: supabase functions deploy shopify --no-verify-jwt
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { getShopDomain, shopifyGraphQL } from "../_shared/shopify.ts";
+import { ALL_PRODUCT_STATUSES, getShopDomain, shopifyGraphQL } from "../_shared/shopify.ts";
 import { buildBookHandle, normalizeIsbn } from "../_shared/handle.js";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import {
@@ -527,7 +527,7 @@ const COLLECTION_CREATE_MUTATION = `
 
 const ALL_PRODUCTS_QUERY = `
   query GetProducts($first: Int!, $after: String) {
-    products(first: $first, after: $after) {
+    products(first: $first, after: $after, query: "${ALL_PRODUCT_STATUSES}") {
       edges {
         cursor
         node { id handle tags ${PRODUCT_ISBN_FIELDS} }
@@ -539,7 +539,7 @@ const ALL_PRODUCTS_QUERY = `
 
 const CATALOG_PRODUCTS_QUERY = `
   query GetCatalogProducts($first: Int!, $after: String, $sortKey: ProductSortKeys, $reverse: Boolean) {
-    products(first: $first, after: $after, sortKey: $sortKey, reverse: $reverse) {
+    products(first: $first, after: $after, sortKey: $sortKey, reverse: $reverse, query: "${ALL_PRODUCT_STATUSES}") {
       edges {
         cursor
         node {
@@ -630,7 +630,7 @@ async function findProductByCustomId(isbn: string): Promise<Record<string, unkno
 // Reserve: søk på strekkode/SKU med eksakt ISBN-kontroll.
 async function findProductByBarcodeOrSku(isbn: string): Promise<Record<string, unknown> | null> {
   const r = await shopifyGraphQL(PRODUCTS_BY_ISBN_SEARCH_QUERY, {
-    q: `(barcode:${isbn} OR sku:${isbn}) AND (status:active OR status:draft OR status:archived)`,
+    q: `(barcode:${isbn} OR sku:${isbn}) AND (${ALL_PRODUCT_STATUSES})`,
   });
   const nodes: Record<string, unknown>[] = r.data?.products?.nodes ?? [];
   return nodes.find((n) => extractIsbn(n) === isbn) ?? null;
@@ -852,7 +852,7 @@ async function analyzeCollections(): Promise<AnalyzeResult> {
     if (after) variables.after = after;
     const result = await shopifyGraphQL(`
       query($first: Int!, $after: String) {
-        products(first: $first, after: $after) {
+        products(first: $first, after: $after, query: "${ALL_PRODUCT_STATUSES}") {
           pageInfo { hasNextPage endCursor }
           edges { cursor node { handle tags ${PRODUCT_ISBN_FIELDS} } }
         }
@@ -2017,7 +2017,7 @@ serve(async (req: Request) => {
     // POST /shopify/test — verify the server's Shopify connection (Dev Dashboard app,
     // credentials from Supabase secrets). Returns shop name, domain and product count.
     if (path === "test" && req.method === "POST") {
-      const result = await shopifyGraphQL(`{ shop { name myshopifyDomain } productsCount { count } }`, {});
+      const result = await shopifyGraphQL(`{ shop { name myshopifyDomain } productsCount(query: "${ALL_PRODUCT_STATUSES}") { count } }`, {});
       return new Response(JSON.stringify({
         success: true,
         shopName: result.data?.shop?.name,
@@ -2124,7 +2124,7 @@ serve(async (req: Request) => {
 
     // GET /shopify/count — hent totalt antall produkter med én query
     if (path === "count" && req.method === "GET") {
-      const result = await shopifyGraphQL(`{ productsCount { count } }`, {});
+      const result = await shopifyGraphQL(`{ productsCount(query: "${ALL_PRODUCT_STATUSES}") { count } }`, {});
       const count: number = result.data?.productsCount?.count ?? 0;
       return new Response(JSON.stringify({ count }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -2164,7 +2164,7 @@ serve(async (req: Request) => {
 
       // Build Shopify search query — title, product_type (author), vendor, handle, and ISBN via barcode/SKU
       const escaped = searchQuery.replace(/"/g, '\\"');
-      const shopifyQuery = `title:*${escaped}* OR product_type:*${escaped}* OR vendor:*${escaped}* OR handle:*${escaped}* OR barcode:${escaped} OR sku:${escaped}`;
+      const shopifyQuery = `(title:*${escaped}* OR product_type:*${escaped}* OR vendor:*${escaped}* OR handle:*${escaped}* OR barcode:${escaped} OR sku:${escaped}) AND (${ALL_PRODUCT_STATUSES})`;
       const after: string | undefined = body.after || undefined;
       const first = Math.min(body.first || 50, 100);
 

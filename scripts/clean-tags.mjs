@@ -239,7 +239,7 @@ async function main() {
     try {
       pageData = await shopifyGql(shopDomain, accessToken, `
         query($first: Int!, $after: String) {
-          products(first: $first, after: $after) {
+          products(first: $first, after: $after, query: "status:active OR status:draft OR status:archived") {
             pageInfo { hasNextPage endCursor }
             edges { node { id handle tags } }
           }

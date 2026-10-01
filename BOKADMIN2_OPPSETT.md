@@ -97,7 +97,7 @@ Testbutikk står nå med nye handles (andre kjøring). Testboka 9788205621060 li
 Gjenstår:
 - Sjekke 301 i nettleseren med storefront-passordet (f.eks. `/products/9788203461392`).
 - ~~ShopifyKatalog bruker handle som ISBN~~ — rettet 2026-09-30, se under.
-- `analyzeCollections`, `fullSyncCollections` og sjangre-sync henter produkter uten statusfilter (se CLAUDE.md om `status:active OR …`). Uendret her.
+- ~~`analyzeCollections`, `fullSyncCollections` og sjangre-sync henter produkter uten statusfilter~~ (rettet 2026-10-01, se «Statusfilter» under).
 - ~~`bok.isbn` som typen `id`~~ (gjort 2026-10-01). Om `bok.forfatter` skal settes ved push.
 - Livebutikken: migreringen er klar, men krever `ALLOW_HANDLE_MIGRATION=true` og at 2.0 har erstattet dagens Bokadmin (live tåler ikke nye handles).
 
@@ -111,6 +111,30 @@ Definisjonen `bok.isbn` i Testbutikk er slettet og laget på nytt med typen `id`
 - **Avvik:** Shopify står med `validationStatus: SOME_INVALID` (43 gyldige, 0 ugyldige), og customId-oppslag svarer «Metafields have not completed migrating to to be valid for unique capability». Trolig fordi verdiene ble satt mens Shopify fortsatt slettet de gamle verdiene og bygde unik-indeksen. Unik kan ikke slås av for typen `id`, og ny lagring av én verdi hjalp ikke. Lærdom for livebutikken: vent til definisjonen er `ALL_VALID` og `metafieldsCount` er 0 før verdiene settes inn igjen.
 - **Eksport (pushOneBook):** oppslaget er nå `books.shopify_id` → customId `bok.isbn` → strekkode/SKU → handle = ISBN → ny handle. Feiler customId-oppslaget med en GraphQL-feil (feil type, eller migreringen over), brukes strekkode/SKU for det kallet. Før stoppet en slik feil hele push. Bare «type 'id' is required» huskes for resten av instansen.
 - **Handle-migreringen** slår ikke opp enkeltbøker. Den henter hele katalogen og bruker `extractIsbn` (bok.isbn → strekkode → SKU → ISBN-handle), som allerede har riktig rekkefølge. Ingen endring.
+
+## Statusfilter på produktspørringer (2026-10-01)
+
+Filteret står ett sted: `ALL_PRODUCT_STATUSES` i `_shared/shopify.ts` (`status:active OR status:draft OR status:archived`). `_shared/handle-migration.js` og skriptene har teksten selv (ren JS).
+
+Målt i Testbutikk: `products` uten filter ga 65 av 65 (43 ACTIVE, 22 ARCHIVED). Arkiverte kommer altså med også uten filter. Butikken har ingen utkast, så det er ikke kontrollert for DRAFT. Filteret er lagt inn uansett, så spørringene ikke avhenger av Shopifys standard.
+
+Endret (skal treffe hele katalogen):
+
+| Hvor | Spørring |
+|---|---|
+| sjangre-sync | taggefasen, berikingsfasen, `catalog-bkg-stats`, og `productsCount` i tagge- og berikingsfasen, `analyze` og `start` |
+| shopify | `analyzeCollections`, `fullSyncCollections` (`ALL_PRODUCTS_QUERY`), katalogen (`CATALOG_PRODUCTS_QUERY`), katalogsøket (`(søk) AND (statusfilter)`), `/count` og `/test` (`productsCount`) |
+| price-update, availability-check | Hadde filteret. Bruker nå konstanten |
+| scripts/clean-tags.mjs | produktløkka |
+
+Med vilje ikke endret:
+
+| Hvor | Hvorfor |
+|---|---|
+| shopify: oppslag på strekkode/SKU ved push | Hadde filteret fra før |
+| shopify: `collection.products` (feeds, `getActiveBkgCodes`) | Produkter i en samling, ikke et katalogsøk. Feltet tar ikke `query` |
+| sjangre-sync: `collections(…)` ved sletting av tomme samlinger | Samlinger, ikke produkter |
+| `_shared/handle-migration.js`, `scripts/migrate-handles.mjs`, `scripts/isbn-definition.mjs` | Hadde filteret fra før |
 
 ## Funksjoner testet i 2.0 for første gang (2026-09-30)
 

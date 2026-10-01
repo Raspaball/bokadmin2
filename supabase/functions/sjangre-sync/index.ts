@@ -3,7 +3,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
-import { shopifyGraphQL } from "../_shared/shopify.ts";
+import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 
 // Felt extractIsbn trenger (bok.isbn, strekkode, SKU) — handle er ikke lenger ISBN
@@ -278,7 +278,7 @@ async function processSyncBatch(jobId: string) {
   try {
     if (config.phase === "tagging") {
       if (!config.total_products) {
-        const countResult = await shopifyGraphQL(`{ productsCount { count } }`, {});
+        const countResult = await shopifyGraphQL(`{ productsCount(query: "${ALL_PRODUCT_STATUSES}") { count } }`, {});
         config.total_products = ((countResult.data as Record<string, unknown>)?.productsCount as { count: number })?.count ?? 0;
         await supabase.from("jobs").update({ total_items: config.total_products, config }).eq("id", jobId);
       }
@@ -288,7 +288,7 @@ async function processSyncBatch(jobId: string) {
 
       const r = await shopifyGraphQL(`
         query($first: Int!, $after: String) {
-          products(first: $first, after: $after) {
+          products(first: $first, after: $after, query: "${ALL_PRODUCT_STATUSES}") {
             pageInfo { hasNextPage endCursor }
             edges { node { id handle tags ${PRODUCT_ISBN_FIELDS} } }
           }
@@ -407,7 +407,7 @@ async function processEnrichBatch(jobId: string) {
 
   try {
     if (!config.total_products) {
-      const countResult = await shopifyGraphQL(`{ productsCount { count } }`, {});
+      const countResult = await shopifyGraphQL(`{ productsCount(query: "${ALL_PRODUCT_STATUSES}") { count } }`, {});
       config.total_products = ((countResult.data as Record<string, unknown>)?.productsCount as { count: number })?.count ?? 0;
       await supabase.from("jobs").update({ total_items: config.total_products, config }).eq("id", jobId);
     }
@@ -417,7 +417,7 @@ async function processEnrichBatch(jobId: string) {
 
     const r = await shopifyGraphQL(`
       query($first: Int!, $after: String) {
-        products(first: $first, after: $after) {
+        products(first: $first, after: $after, query: "${ALL_PRODUCT_STATUSES}") {
           pageInfo { hasNextPage endCursor }
           edges { node { handle ${PRODUCT_ISBN_FIELDS} } }
         }
@@ -536,7 +536,7 @@ serve(async (req) => {
     // GET /sjangre-sync/analyze
     if (path === "analyze" && req.method === "GET") {
 
-      const countResult = await shopifyGraphQL(`{ productsCount { count } }`, {});
+      const countResult = await shopifyGraphQL(`{ productsCount(query: "${ALL_PRODUCT_STATUSES}") { count } }`, {});
       const totalShopifyProducts = ((countResult.data as Record<string, unknown>)?.productsCount as { count: number })?.count ?? 0;
 
       const { count: withKode } = await supabase
@@ -597,7 +597,7 @@ serve(async (req) => {
       const { data: existing } = await exQ.single();
       if (existing) return new Response(JSON.stringify({ error: "En synk kjøres allerede", jobId: existing.id }), { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
-      const countResult = await shopifyGraphQL(`{ productsCount { count } }`, {});
+      const countResult = await shopifyGraphQL(`{ productsCount(query: "${ALL_PRODUCT_STATUSES}") { count } }`, {});
       const totalProducts = ((countResult.data as Record<string, unknown>)?.productsCount as { count: number })?.count ?? 0;
 
       const { data: job, error } = await supabase.from("jobs").insert({
@@ -701,7 +701,7 @@ serve(async (req) => {
         if (after) vars.after = after;
         const result = await shopifyGraphQL(`
           query($first: Int!, $after: String) {
-            products(first: $first, after: $after) {
+            products(first: $first, after: $after, query: "${ALL_PRODUCT_STATUSES}") {
               pageInfo { hasNextPage endCursor }
               edges { cursor node { tags } }
             }
