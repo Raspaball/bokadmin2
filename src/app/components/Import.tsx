@@ -143,8 +143,8 @@ function ImportResultLog({
 
 // Loggmelding for push: handle, prisnotat (pakke A2) og tilgjengelighet (pakke C),
 // f.eks. «Pushet til Shopify som avkledd-…. Kommer 15.11.2026: ACTIVE, kan forhåndsbestilles»
-function pushLogMessage(r: { handle?: string; priceNote?: string; availabilityNote?: string }): string {
-  return [`Pushet til Shopify som ${r.handle}`, r.priceNote, r.availabilityNote].filter(Boolean).join('. ');
+function pushLogMessage(r: { handle?: string; priceNote?: string; availabilityNote?: string; seoNote?: string }): string {
+  return [`Pushet til Shopify som ${r.handle}`, r.priceNote, r.availabilityNote, r.seoNote].filter(Boolean).join('. ');
 }
 
 export function Import() {
@@ -348,7 +348,7 @@ export function Import() {
         chunk.find(c => c.id === b.id) ? { ...b, pushing: true } : b
       ));
 
-      let results: Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string; availabilityNote?: string }>;
+      let results: Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string; availabilityNote?: string; seoNote?: string }>;
       try {
         results = await shopify.pushBooks(chunk);
       } catch (e) {

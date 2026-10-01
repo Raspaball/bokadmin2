@@ -6,7 +6,7 @@ import { ALL_PRODUCT_STATUSES, getShopDomain, shopifyGraphQL } from "../_shared/
 import { BOKBASEN_ONIX_URL, type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { buildBookHandle, normalizeIsbn } from "../_shared/handle.js";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
-import { extractAvailabilityCode, extractBokgruppekode, extractPublishingDate } from "../_shared/onix.js";
+import { extractAvailabilityCode, extractBokgruppekode, extractDescription, extractPublishingDate } from "../_shared/onix.js";
 import {
   availabilityDescription, availabilityMetafields, availabilityRule, needsContinuePolicy, type AvailabilityRule,
 } from "../_shared/availability.ts";
@@ -19,6 +19,7 @@ import { COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, tagSources } fr
 import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
 import { bookFieldsFromOnix, bookMetafields, type BookFields } from "../_shared/book-standard.ts";
 import { CATEGORY_IDS, CATEGORY_NAMES } from "../_shared/book-format.ts";
+import { bookSeo, decideSeo, legacySeo, parseSeoAuto, seoMetafields } from "../_shared/book-seo.ts";
 import {
   SAFE_STORES, MIGRATION_PRODUCTS_QUERY, HANDLE_UPDATE_MUTATION,
   planHandleMigration, isBlockedRow, handleUpdateInput, type HandlePlanRow,
@@ -110,6 +111,9 @@ const PUSH_PRODUCT_FIELDS = `
   ${EGEN_PRIS_FIELD}
   variants(first: 1) { edges { node { id sku price compareAtPrice inventoryPolicy inventoryItem { tracked } } } }
   media(first: 1) { edges { node { id } } }
+  seoTitleMf: metafield(namespace: "global", key: "title_tag") { value }
+  seoDescMf: metafield(namespace: "global", key: "description_tag") { value }
+  seoAuto: metafield(namespace: "bokadmin", key: "seo_auto") { value }
 `;
 
 const PRODUCT_BY_ID_QUERY = `
@@ -135,6 +139,9 @@ const PRODUCTS_BY_ISBN_SEARCH_QUERY = `
         ${EGEN_PRIS_FIELD}
         variants(first: 1) { edges { node { id sku price compareAtPrice barcode inventoryPolicy inventoryItem { tracked } } } }
         media(first: 1) { edges { node { id } } }
+        seoTitleMf: metafield(namespace: "global", key: "title_tag") { value }
+        seoDescMf: metafield(namespace: "global", key: "description_tag") { value }
+        seoAuto: metafield(namespace: "bokadmin", key: "seo_auto") { value }
       }
     }
   }
@@ -421,7 +428,7 @@ async function pushOneBook(
   book: BookMetadata,
   bokbasenCredentials: BokbasenCredentials | null = null,
   userId: string | null = null,
-): Promise<{ shopifyId: string; handle: string; variantId?: string; created: boolean; warning?: string; priceNote?: string; approvalRequired?: boolean; availabilityNote?: string; status?: string }> {
+): Promise<{ shopifyId: string; handle: string; variantId?: string; created: boolean; warning?: string; priceNote?: string; approvalRequired?: boolean; availabilityNote?: string; status?: string; seoNote?: string }> {
   // Build tag list: author, title + bokgruppekode hierarchy
   const tagList = [book.author, book.title].filter(Boolean);
   if (book.bokgruppekode) {
@@ -575,22 +582,37 @@ async function pushOneBook(
     } catch (_) { /* non-critical */ }
   }
 
-  // Step 3: SEO via metafields
+  // Step 3: SEO-tittel og metabeskrivelse (_shared/book-seo.ts). Et felt skrives
+  // bare når det er tomt, lik det Bokadmin sist genererte (bokadmin.seo_auto)
+  // eller lik den gamle automatikken; manuelle endringer står.
+  const seoNotes: string[] = [];
   try {
-    await shopifyGraphQL(`
-      mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
-        metafieldsSet(metafields: $metafields) {
-          metafields { id key value }
-          userErrors { field message }
-        }
-      }
-    `, {
-      metafields: [
-        { ownerId: product.id, namespace: "global", key: "title_tag", value: book.title || "", type: "single_line_text_field" },
-        // single_line_text_field avviser linjeskift — og da feiler hele metafieldsSet-kallet
-        { ownerId: product.id, namespace: "global", key: "description_tag", value: (book.description || "").replace(/\s+/g, " ").trim().slice(0, 320), type: "single_line_text_field" },
-      ],
+    const seoText = onixXml ? extractDescription(onixXml) : "";
+    const wantedSeo = bookSeo({
+      title: book.title,
+      authors: book.authors?.length ? book.authors : fields?.authors ?? [],
+      format: fields?.format ?? null,
+      year: fields?.year ?? (parseInt(book.year, 10) || null),
+      description: seoText || book.description || "",
     });
+    const decision = decideSeo(
+      { title: (existing?.seoTitleMf as { value?: string } | null)?.value, description: (existing?.seoDescMf as { value?: string } | null)?.value },
+      wantedSeo,
+      parseSeoAuto((existing?.seoAuto as { value?: string } | null)?.value),
+      legacySeo(book.title, book.description),
+    );
+    seoNotes.push(...decision.notes);
+    const seoInput = seoMetafields(product.id as string, decision, wantedSeo);
+    if (seoInput.length) {
+      await shopifyGraphQL(`
+        mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields { id key value }
+            userErrors { field message }
+          }
+        }
+      `, { metafields: seoInput });
+    }
   } catch (_) { /* non-critical */ }
 
   // Step 3b: bok.isbn — brukes til oppslag ved neste push (customId). Eget kall,
@@ -671,6 +693,7 @@ async function pushOneBook(
   return {
     shopifyId: product.id as string, handle: product.handle as string, variantId, created: !isUpdate,
     warning, priceNote, approvalRequired, availabilityNote, status: status ?? undefined,
+    seoNote: seoNotes.length ? seoNotes.join(". ") : undefined,
   };
 }
 
@@ -1926,7 +1949,7 @@ serve(async (req: Request) => {
       for (const book of books) {
         try {
           const result = await pushOneBook(book, bokbasen, userId);
-          results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle, created: result.created, warning: result.warning, priceNote: result.priceNote, approvalRequired: result.approvalRequired, availabilityNote: result.availabilityNote, status: result.status });
+          results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle, created: result.created, warning: result.warning, priceNote: result.priceNote, approvalRequired: result.approvalRequired, availabilityNote: result.availabilityNote, status: result.status, seoNote: result.seoNote });
         } catch (e) {
           results.push({ isbn: book.isbn, success: false, error: String(e) });
         }

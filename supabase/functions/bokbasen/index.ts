@@ -3,7 +3,10 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
-import { extractAvailabilityCode, extractBokgruppekode, extractContributors, extractProductForm, extractPublishingDate } from "../_shared/onix.js";
+import {
+  extractAvailabilityCode, extractBokgruppekode, extractContributors, extractDescription, extractProductForm,
+  extractPublishingDate, extractTitle, onixText,
+} from "../_shared/onix.js";
 import { bookFormat } from "../_shared/book-format.ts";
 import { chooseValidPrice } from "../_shared/price.ts";
 
@@ -51,72 +54,8 @@ function parseOnixMulti(xmlText: string): BookMetadata[] {
 function parseOnix(xmlText: string, isbn: string): BookMetadata | null {
   // Strip namespaces for easier parsing
   const xml = xmlText.replace(/\s+xmlns[^"]*"[^"]*"/g, "").replace(/<(\w+:)/g, "<").replace(/<\/(\w+:)/g, "</");
-  const stripText = (value: string): string => {
-    // 1. Extract CDATA
-    let s = value.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
-
-    // 2. Decode &lt;/&gt; so entity-encoded HTML becomes real tags for stripping
-    s = s.replace(/&lt;/g, "<").replace(/&gt;/g, ">");
-
-    // 3. Mark semantic breaks with control-char placeholders BEFORE stripping tags.
-    //    \x01 = line break (<br>), \x02 = paragraph break (</p> </li> etc.)
-    //    Raw \n/\r in source are XML/HTML source-formatting, NOT semantic — convert to space later.
-    s = s
-      .replace(/<br\s*\/?>/gi, "\x01")
-      .replace(/<\/(p|li|div|h[1-6])>/gi, "\x02")
-      .replace(/<[^>]+>/g, "");
-
-    // 4. Source-formatting whitespace (XML line wraps) → single space.
-    //    Only the placeholder \x01/\x02 chars carry semantic break info.
-    s = s.replace(/[\r\n\t]+/g, " ");
-
-    // 5. Decode named HTML entities (most common typographic chars for Norwegian books)
-    s = s
-      .replace(/&amp;/g, "&")
-      .replace(/&quot;/g, '"')
-      .replace(/&apos;/gi, "'")
-      .replace(/&nbsp;/gi, " ")
-      .replace(/&shy;/gi, "")        // soft hyphen — remove
-      .replace(/&zwj;/gi, "")        // zero-width joiner — remove
-      .replace(/&zwnj;/gi, "")       // zero-width non-joiner — remove
-      .replace(/&laquo;/gi, "«")
-      .replace(/&raquo;/gi, "»")
-      .replace(/&ldquo;/gi, "\u201C")
-      .replace(/&rdquo;/gi, "\u201D")
-      .replace(/&lsquo;/gi, "\u2018")
-      .replace(/&rsquo;/gi, "\u2019")
-      .replace(/&ndash;/gi, "–")
-      .replace(/&mdash;/gi, "—")
-      .replace(/&hellip;/gi, "…")
-      .replace(/&bull;/gi, "•")
-      .replace(/&middot;/gi, "·")
-      .replace(/&infin;/gi, "∞")
-      .replace(/&copy;/gi, "©")
-      .replace(/&reg;/gi, "®")
-      .replace(/&trade;/gi, "™")
-      .replace(/&euro;/gi, "€");
-
-    // 6. Decode numeric HTML entities (&#NNN; and &#xHHH;)
-    s = s
-      .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => {
-        try { return String.fromCodePoint(parseInt(h, 16)); } catch { return ""; }
-      })
-      .replace(/&#([0-9]+);/g, (_, n) => {
-        try { return String.fromCodePoint(parseInt(n, 10)); } catch { return ""; }
-      });
-
-    // 7. Remove invisible/control characters that may have been decoded (soft hyphens etc.)
-    s = s.replace(/\u00AD/g, "").replace(/\u200B/g, "").replace(/\u200C/g, "").replace(/\u200D/g, "");
-
-    // 8. Restore semantic breaks, clean up whitespace
-    return s
-      .replace(/\x01/g, "\n")        // <br> → newline
-      .replace(/\x02/g, "\n\n")      // </p> etc. → paragraph break
-      .replace(/ {2,}/g, " ")        // collapse multiple spaces
-      .replace(/ ?\n ?/g, "\n")      // trim spaces around newlines
-      .replace(/\n{3,}/g, "\n\n")    // max 2 consecutive newlines
-      .trim();
-  };
+  // Ren tekst fra et ONIX-felt: felles regel i _shared/onix.js (onixText)
+  const stripText = onixText;
 
   const get = (tag: string) => {
     const m = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i"));
@@ -128,97 +67,9 @@ function parseOnix(xmlText: string, isbn: string): BookMetadata | null {
     return matches.map(m => m[1].replace(/<[^>]+>/g, "").trim());
   };
 
-  // Title — find product title from DescriptiveDetail TitleDetail TitleType=01,
-  // preferring product-level TitleElement (TitleElementLevel=01).
-  // Collection blocks are stripped to avoid matching series titles.
-  let title = "";
-  const ddMatch = xml.match(/<DescriptiveDetail[\s\S]*?<\/DescriptiveDetail>/i);
-  if (ddMatch) {
-    const ddStripped = ddMatch[0].replace(/<Collection[\s\S]*?<\/Collection>/gi, "");
-    const titleDetails = [...ddStripped.matchAll(/<TitleDetail[\s\S]*?<\/TitleDetail>/gi)];
-    for (const td of titleDetails) {
-      const ttype = td[0].match(/<TitleType[^>]*>(.*?)<\/TitleType>/i)?.[1]?.trim();
-      if (ttype !== "01") continue;
-
-      const titleElements = [...td[0].matchAll(/<TitleElement[\s\S]*?<\/TitleElement>/gi)];
-      if (titleElements.length) {
-        for (const te of titleElements) {
-          const level = te[0].match(/<TitleElementLevel[^>]*>(.*?)<\/TitleElementLevel>/i)?.[1]?.trim();
-          if (level && level !== "01") continue;
-          const prefix = stripText(te[0].match(/<TitlePrefix[^>]*>([\s\S]*?)<\/TitlePrefix>/i)?.[1] || "");
-          const withoutPrefix = stripText(te[0].match(/<TitleWithoutPrefix[^>]*>([\s\S]*?)<\/TitleWithoutPrefix>/i)?.[1] || "");
-          const titleText = stripText(te[0].match(/<TitleText[^>]*>([\s\S]*?)<\/TitleText>/i)?.[1] || "");
-          const subtitle = stripText(te[0].match(/<Subtitle[^>]*>([\s\S]*?)<\/Subtitle>/i)?.[1] || "");
-          const baseTitle = (prefix && withoutPrefix)
-            ? `${prefix} ${withoutPrefix}`
-            : (withoutPrefix || titleText);
-          const fullTitle = [baseTitle, subtitle].filter(Boolean).join(": ");
-          if (fullTitle) {
-            title = fullTitle;
-            break;
-          }
-        }
-      }
-
-      if (!title) {
-        const titleText = stripText(td[0].match(/<TitleText[^>]*>([\s\S]*?)<\/TitleText>/i)?.[1] || "");
-        const subtitle = stripText(td[0].match(/<Subtitle[^>]*>([\s\S]*?)<\/Subtitle>/i)?.[1] || "");
-        title = [titleText, subtitle].filter(Boolean).join(": ");
-      }
-
-      if (title) {
-        break;
-      }
-    }
-  }
-  if (!title) {
-    const fallbackTitle = get("TitleText");
-    const fallbackSubtitle = get("Subtitle");
-    title = [fallbackTitle, fallbackSubtitle].filter(Boolean).join(": ");
-  }
-
-  // Description — choose best text by type priority (not first block):
-  // ONIX 3 TextContent: prefer 03, then 02, then 01
-  // ONIX 2 OtherText: prefer 03, then 01, then 02
-  let description = "";
-  const TEXT_RE = /<Text(?![A-Za-z])[^>]*>([\s\S]*?)<\/Text>/i;
-  const ONIX3_DESC_PRIORITY = ["03", "02", "01"];
-  const ONIX2_DESC_PRIORITY = ["03", "01", "02"];
-
-  const pickBestText = (blocks: { type: string; text: string }[], priority: string[]) => {
-    for (const wanted of priority) {
-      const hit = blocks.find(b => b.type === wanted && b.text);
-      if (hit) return hit.text;
-    }
-    const nonReview = blocks.find(b => b.text && !["06", "07", "08", "11", "12", "13", "14"].includes(b.type));
-    return nonReview?.text || blocks.find(b => b.text)?.text || "";
-  };
-
-  const textContentBlocks = [...xml.matchAll(/<TextContent[\s\S]*?<\/TextContent>/gi)];
-  if (textContentBlocks.length) {
-    const candidates: { type: string; text: string }[] = [];
-    for (const block of textContentBlocks) {
-      const type = block[0].match(/<TextType(?![A-Za-z])[^>]*>(.*?)<\/TextType>/i)?.[1]?.trim() || "";
-      const textEl = block[0].match(TEXT_RE)?.[1] || "";
-      const text = stripText(textEl);
-      if (text) candidates.push({ type, text });
-    }
-    description = pickBestText(candidates, ONIX3_DESC_PRIORITY);
-  }
-
-  if (!description) {
-    const otherTextBlocks = [...xml.matchAll(/<OtherText[\s\S]*?<\/OtherText>/gi)];
-    if (otherTextBlocks.length) {
-      const candidates: { type: string; text: string }[] = [];
-      for (const block of otherTextBlocks) {
-        const type = block[0].match(/<TextTypeCode[^>]*>(.*?)<\/TextTypeCode>/i)?.[1]?.trim() || "";
-        const textEl = block[0].match(TEXT_RE)?.[1] || "";
-        const text = stripText(textEl);
-        if (text) candidates.push({ type, text });
-      }
-      description = pickBestText(candidates, ONIX2_DESC_PRIORITY);
-    }
-  }
+  // Tittel og forlagstekst: felles lesing i _shared/onix.js (flyttet uendret dit i pakke B)
+  const title = extractTitle(xml);
+  const description = extractDescription(xml);
 
   // Publisher
   const publisher = get("PublisherName");

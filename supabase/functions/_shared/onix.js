@@ -21,6 +21,152 @@ export function stripNamespaces(xml) {
 }
 
 /**
+ * Tekst fra et ONIX-felt som ren tekst med avsnitt: CDATA pakkes ut, kodet HTML
+ * (&lt;br&gt;) blir tagger, <br> → linjeskift, </p> </li> </div> </hN> → tomt
+ * linjeskift (avsnitt), andre tagger fjernes, entiteter dekodes. Linjeskift i
+ * XML-kilden er formatering og blir mellomrom. Flyttet uendret fra importen
+ * (bokbasen/index.ts, stripText) i pakke B.
+ * @param {string} value
+ * @returns {string}
+ */
+export function onixText(value) {
+  // 1. CDATA
+  let s = String(value ?? "").replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
+  // 2. &lt;/&gt; → tagger, så kodet HTML kan fjernes
+  s = s.replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+  // 3. Semantiske skift som plassholdere før taggene fjernes: \x01 = linjeskift, \x02 = avsnitt
+  s = s
+    .replace(/<br\s*\/?>/gi, "\x01")
+    .replace(/<\/(p|li|div|h[1-6])>/gi, "\x02")
+    .replace(/<[^>]+>/g, "");
+  // 4. Linjeskift i XML-kilden er formatering → mellomrom
+  s = s.replace(/[\r\n\t]+/g, " ");
+  // 5. Navngitte entiteter
+  s = s
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&shy;/gi, "")
+    .replace(/&zwj;/gi, "")
+    .replace(/&zwnj;/gi, "")
+    .replace(/&laquo;/gi, "«")
+    .replace(/&raquo;/gi, "»")
+    .replace(/&ldquo;/gi, "“")
+    .replace(/&rdquo;/gi, "”")
+    .replace(/&lsquo;/gi, "‘")
+    .replace(/&rsquo;/gi, "’")
+    .replace(/&ndash;/gi, "–")
+    .replace(/&mdash;/gi, "—")
+    .replace(/&hellip;/gi, "…")
+    .replace(/&bull;/gi, "•")
+    .replace(/&middot;/gi, "·")
+    .replace(/&infin;/gi, "∞")
+    .replace(/&copy;/gi, "©")
+    .replace(/&reg;/gi, "®")
+    .replace(/&trade;/gi, "™")
+    .replace(/&euro;/gi, "€");
+  // 6. Tallreferanser
+  s = s
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => {
+      try { return String.fromCodePoint(parseInt(h, 16)); } catch { return ""; }
+    })
+    .replace(/&#([0-9]+);/g, (_, n) => {
+      try { return String.fromCodePoint(parseInt(n, 10)); } catch { return ""; }
+    });
+  // 7. Usynlige tegn
+  s = s.replace(/­/g, "").replace(/​/g, "").replace(/‌/g, "").replace(/‍/g, "");
+  // 8. Skift tilbake, rydd mellomrom
+  return s
+    .replace(/\x01/g, "\n")
+    .replace(/\x02/g, "\n\n")
+    .replace(/ {2,}/g, " ")
+    .replace(/ ?\n ?/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * Produkttittelen: TitleDetail med TitleType 01 i DescriptiveDetail (serier
+ * fjernes først), TitleElement på nivå 01. Prefiks + tittel uten prefiks, og
+ * undertittel etter kolon: «Gleden med skjeden: Alt om …». Flyttet uendret fra importen.
+ * @param {string} xml
+ * @returns {string}
+ */
+export function extractTitle(xml) {
+  const x = stripNamespaces(xml);
+  const field = (block, tag) => onixText(block.match(new RegExp("<" + tag + "[^>]*>([\\s\\S]*?)</" + tag + ">", "i"))?.[1] || "");
+  let title = "";
+  const dd = x.match(/<DescriptiveDetail[\s\S]*?<\/DescriptiveDetail>/i);
+  if (dd) {
+    const ddStripped = dd[0].replace(/<Collection[\s\S]*?<\/Collection>/gi, "");
+    for (const td of ddStripped.matchAll(/<TitleDetail[\s\S]*?<\/TitleDetail>/gi)) {
+      const ttype = td[0].match(/<TitleType[^>]*>(.*?)<\/TitleType>/i)?.[1]?.trim();
+      if (ttype !== "01") continue;
+      for (const te of td[0].matchAll(/<TitleElement[\s\S]*?<\/TitleElement>/gi)) {
+        const level = te[0].match(/<TitleElementLevel[^>]*>(.*?)<\/TitleElementLevel>/i)?.[1]?.trim();
+        if (level && level !== "01") continue;
+        const prefix = field(te[0], "TitlePrefix");
+        const withoutPrefix = field(te[0], "TitleWithoutPrefix");
+        const titleText = field(te[0], "TitleText");
+        const subtitle = field(te[0], "Subtitle");
+        const baseTitle = (prefix && withoutPrefix) ? `${prefix} ${withoutPrefix}` : (withoutPrefix || titleText);
+        const full = [baseTitle, subtitle].filter(Boolean).join(": ");
+        if (full) { title = full; break; }
+      }
+      if (!title) {
+        title = [field(td[0], "TitleText"), field(td[0], "Subtitle")].filter(Boolean).join(": ");
+      }
+      if (title) break;
+    }
+  }
+  if (!title) title = [field(x, "TitleText"), field(x, "Subtitle")].filter(Boolean).join(": ");
+  return title;
+}
+
+/**
+ * Forlagsteksten som ren tekst med avsnitt (onixText). ONIX 3 TextContent:
+ * TextType 03, så 02, så 01; ONIX 2.1 OtherText: 03, så 01, så 02. Ellers
+ * første tekst som ikke er anmeldelse/omtale (06–08, 11–14). "" uten tekst.
+ * Flyttet uendret fra importen.
+ * @param {string} xml
+ * @returns {string}
+ */
+export function extractDescription(xml) {
+  const x = stripNamespaces(xml);
+  const TEXT_RE = /<Text(?![A-Za-z])[^>]*>([\s\S]*?)<\/Text>/i;
+  const pick = (cands, priority) => {
+    for (const wanted of priority) {
+      const hit = cands.find((b) => b.type === wanted && b.text);
+      if (hit) return hit.text;
+    }
+    const nonReview = cands.find((b) => b.text && !["06", "07", "08", "11", "12", "13", "14"].includes(b.type));
+    return nonReview?.text || cands.find((b) => b.text)?.text || "";
+  };
+  const collect = (blockRe, typeRe) => {
+    const cands = [];
+    for (const block of x.matchAll(blockRe)) {
+      const type = block[0].match(typeRe)?.[1]?.trim() || "";
+      const text = onixText(block[0].match(TEXT_RE)?.[1] || "");
+      if (text) cands.push({ type, text });
+    }
+    return cands;
+  };
+  const onix3 = collect(/<TextContent[\s\S]*?<\/TextContent>/gi, /<TextType(?![A-Za-z])[^>]*>(.*?)<\/TextType>/i);
+  let description = onix3.length ? pick(onix3, ["03", "02", "01"]) : "";
+  if (!description) {
+    const onix2 = collect(/<OtherText[\s\S]*?<\/OtherText>/gi, /<TextTypeCode[^>]*>(.*?)<\/TextTypeCode>/i);
+    if (onix2.length) description = pick(onix2, ["03", "01", "02"]);
+  }
+  return description;
+}
+
+/** Forlaget (PublisherName), eller "". */
+export function extractPublisher(xml) {
+  return onixText(stripNamespaces(xml).match(/<PublisherName[^>]*>([\s\S]*?)<\/PublisherName>/i)?.[1] || "");
+}
+
+/**
  * Første bokgruppekode (skjema 37) i ONIX-teksten, eller null.
  * Teksten kan være en hel melding eller én <Product>-blokk; ved flere
  * produkter i én melding må hver blokk sendes inn for seg.
