@@ -21,6 +21,7 @@ import { bookDescription, bookFieldsFromOnix, bookMetafields, type BookFields } 
 import { CATEGORY_IDS, CATEGORY_NAMES } from "../_shared/book-format.ts";
 import { bookSeo, decideSeo, legacySeo, parseSeoAuto, seoMetafields } from "../_shared/book-seo.ts";
 import { coverAlt, coverChanges, coverFilename, type CoverChange } from "../_shared/book-cover.ts";
+import { cleanBookTags } from "../_shared/book-tags.ts";
 import {
   SAFE_STORES, MIGRATION_PRODUCTS_QUERY, HANDLE_UPDATE_MUTATION,
   planHandleMigration, isBlockedRow, handleUpdateInput, type HandlePlanRow,
@@ -100,7 +101,7 @@ function bokgruppeTagsForKode(kode: string): string[] {
 
 // Felt pushOneBook trenger fra et eksisterende produkt
 const PUSH_PRODUCT_FIELDS = `
-  id title handle
+  id title handle tags
   ${EGEN_PRIS_FIELD}
   variants(first: 1) { edges { node { id sku price compareAtPrice inventoryPolicy inventoryItem { tracked } } } }
   media(first: 1) { edges { node { id alt ... on MediaImage { image { url } } } } }
@@ -127,7 +128,7 @@ const PRODUCTS_BY_ISBN_SEARCH_QUERY = `
   query productsByIsbn($q: String!) {
     products(first: 5, query: $q) {
       nodes {
-        id title handle
+        id title handle tags
         ${BOK_ISBN_FIELD}
         ${EGEN_PRIS_FIELD}
         variants(first: 1) { edges { node { id sku price compareAtPrice barcode inventoryPolicy inventoryItem { tracked } } } }
@@ -444,13 +445,10 @@ async function pushOneBook(
   book: BookMetadata,
   bokbasenCredentials: BokbasenCredentials | null = null,
   userId: string | null = null,
-): Promise<{ shopifyId: string; handle: string; variantId?: string; created: boolean; warning?: string; priceNote?: string; approvalRequired?: boolean; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string }> {
-  // Build tag list: author, title + bokgruppekode hierarchy
-  const tagList = [book.author, book.title].filter(Boolean);
-  if (book.bokgruppekode) {
-    tagList.push(...bokgruppeTagsForKode(book.bokgruppekode));
-  }
-  const tags = tagList.join(", ");
+): Promise<{ shopifyId: string; handle: string; variantId?: string; created: boolean; warning?: string; priceNote?: string; approvalRequired?: boolean; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string; tagNote?: string }> {
+  // Tagger: bare bokgruppekode-hierarkiet (bkg-N, bkg-NN, bkg-NNN). Forfatter og
+  // tittel er ikke lenger tagger (pakke B del 7, _shared/book-tags.ts).
+  const bkgTags = book.bokgruppekode ? bokgruppeTagsForKode(book.bokgruppekode) : [];
 
   const isbn = normalizeIsbn(book.isbn);
   if (!isbn) throw new Error(`Ugyldig ISBN: ${book.isbn}`);
@@ -541,6 +539,16 @@ async function pushOneBook(
     year: fields?.year ?? (parseInt(book.year, 10) || null),
   }, book.publisher);
   const descriptionNote = desc.fallback ? "Mangler forlagstekst: reservebeskrivelse brukt" : undefined;
+
+  // Tagger: eksisterende produkt beholder alle tagger unntatt forfatter/tittel,
+  // og får bkg-*. Nytt produkt får bare bkg-*.
+  const tagResult = cleanBookTags(
+    isUpdate ? ((existing?.tags as string[] | undefined) ?? []) : [],
+    { title: book.title, authors: book.authors?.length ? book.authors : fields?.authors ?? [], authorTexts: [book.author] },
+    bkgTags,
+  );
+  const tags = tagResult.tags;
+  const tagNote = tagResult.removed.length ? `Fjernet tagger: ${tagResult.removed.join(", ")}` : undefined;
 
   const productInput: Record<string, unknown> = {
     title: book.title,
@@ -736,6 +744,7 @@ async function pushOneBook(
     warning, priceNote, approvalRequired, availabilityNote, status: status ?? undefined,
     seoNote: seoNotes.length ? seoNotes.join(". ") : undefined,
     descriptionNote,
+    tagNote,
   };
 }
 
@@ -1039,9 +1048,8 @@ function booksToShopifyCSV(books: BookMetadata[]): string {
   ];
 
   const rows = books.map(book => {
-    const tagList = [book.author, book.title].filter(Boolean);
-    if (book.bokgruppekode) tagList.push(...bokgruppeTagsForKode(book.bokgruppekode));
-    const tags = tagList.join(", ");
+    // Bare bkg-tagger (pakke B del 7): forfatter og tittel er ikke tagger
+    const tags = (book.bokgruppekode ? bokgruppeTagsForKode(book.bokgruppekode) : []).join(", ");
     const imageUrl = book.imageUrl || book.image_url || "";
 
     const isbn = normalizeIsbn(book.isbn);
@@ -1991,7 +1999,7 @@ serve(async (req: Request) => {
       for (const book of books) {
         try {
           const result = await pushOneBook(book, bokbasen, userId);
-          results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle, created: result.created, warning: result.warning, priceNote: result.priceNote, approvalRequired: result.approvalRequired, availabilityNote: result.availabilityNote, status: result.status, seoNote: result.seoNote, descriptionNote: result.descriptionNote });
+          results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle, created: result.created, warning: result.warning, priceNote: result.priceNote, approvalRequired: result.approvalRequired, availabilityNote: result.availabilityNote, status: result.status, seoNote: result.seoNote, descriptionNote: result.descriptionNote, tagNote: result.tagNote });
         } catch (e) {
           results.push({ isbn: book.isbn, success: false, error: String(e) });
         }

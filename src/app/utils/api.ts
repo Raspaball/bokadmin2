@@ -502,7 +502,7 @@ export const bokbasen = {
 
 export const shopify = {
   // Push one book to Shopify
-  async pushBook(book: BokbasenSearchResult | Book): Promise<{ shopifyId: string; handle: string; variantId?: string; created?: boolean; warning?: string; priceNote?: string; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string }> {
+  async pushBook(book: BokbasenSearchResult | Book): Promise<{ shopifyId: string; handle: string; variantId?: string; created?: boolean; warning?: string; priceNote?: string; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string; tagNote?: string }> {
     const res = await callEdgeFunction("shopify/push", {
       method: "POST",
       body: JSON.stringify({ book }),
@@ -511,7 +511,7 @@ export const shopify = {
   },
 
   // Push multiple books to Shopify
-  async pushBooks(bookList: (BokbasenSearchResult | Book)[]): Promise<Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string }>> {
+  async pushBooks(bookList: (BokbasenSearchResult | Book)[]): Promise<Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string; tagNote?: string }>> {
     const res = await callEdgeFunction("shopify/push-bulk", {
       method: "POST",
       body: JSON.stringify({ books: bookList }),
