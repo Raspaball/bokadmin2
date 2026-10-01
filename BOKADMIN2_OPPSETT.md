@@ -275,7 +275,7 @@ Testet i Testbutikk (shopify og bokbasen deployet):
 | Avkledd med pris | Som før: 449, ACTIVE, ingen notat |
 | Antall produkter etter testene | 65 |
 
-## Status pakke A2, prissikring (pauset 2026-10-01)
+## Status pakke A2, prissikring
 
 Oppgaven: `oppgaver/pakke-a2-prissikring.md`.
 
@@ -283,7 +283,7 @@ Oppgaven: `oppgaver/pakke-a2-prissikring.md`.
 |---|---|
 | 0. Rydding i git | **Ferdig** (c83acaa, pushet). Live-prosjektets ref i oppgavefilene er byttet med en henvisning til `C:\Bokadmin\.env` |
 | 1. Aldri pris 0 | **Ferdig** (1ff7479). `shopify` og `bokbasen` er deployet og testet i Testbutikk (se over). Frontend (Import-siden) er ikke ute ennå: krever push til GitHub |
-| 2. Sperre mot store prishopp | **Kodet og committet lokalt, ikke deployet eller testet i Testbutikk.** Migrasjonen `20261001120000_price_guard.sql` er **kjørt** i 2.0 (av Eirik i SQL Editor, verifisert: `max_price_change_pct` = 30, tabellen `price_approvals` finnes) |
+| 2. Sperre mot store prishopp | **Ferdig** (3468aea, pushet). `price-update` og `shopify` er deployet, og nettsiden er ute. Migrasjonen `20261001120000_price_guard.sql` er kjørt i 2.0. Testet i Testbutikk (se under) |
 | 3–6 og «Til slutt» | Ikke startet |
 
 Del 2, det som er laget:
@@ -294,13 +294,16 @@ Del 2, det som er laget:
 - `POST /price-update/approvals/decide { ids, decision: approve|reject }`: krever innlogget bruker. Godkjenning setter prisen bare hvis Shopify-prisen fortsatt er den gamle, og logger «Godkjent av <e-post>: …» i `sync_log` og i raden (`decided_by`, `decision_note`).
 - Nettsiden: kortet «Priser som krever godkjenning» på Oppdatering-siden (`PrisGodkjenning.tsx`) med grenseinnstillingen, «Godkjenn»/«Avvis» per rad og for valgte.
 
-Neste steg når vi fortsetter (planen som ble lagt fram):
-1. Deploy `price-update` og `shopify`.
-2. Sett manuelt i Testbutikk: Avkledd 449 → 111, Utyske 449 → 400, Borgen 449 → 0. Kjør prisjobben i oppdateringsmodus. Forventet: Avkledd krever godkjenning, Utyske og Borgen settes til 449.
-3. Push av Ingrid Winter etter manuell pris 200: skal kreve godkjenning.
-4. Push til GitHub (Vercel), og Eirik godkjenner Avkledd og avviser Ingrid Winter på Oppdatering-siden. Godkjenningsendepunktet krever innlogging, så det kan ikke testes med anon-nøkkelen.
-5. Sett Ingrid Winter tilbake til 449, og kontroller at alle priser i Testbutikk er som før.
-6. Fortsett med del 3.
+Testet i Testbutikk 2026-10-01 (sikkerhetskopi av alle priser før testene, sammenlignet etterpå: 65 av 65 like):
+
+| Test | Resultat |
+|---|---|
+| Prisjobb, oppdatering. Avkledd satt til 111 (Bokbasen 449) | Ikke endret. «Krever godkjenning: 111 → 449 kr (304,5 %)», ventende rad i `price_approvals` |
+| Samme jobb. Utyske satt til 400 (449) | Satt: «Pris endret: 400 → 449 kr» (12,3 %, under grensen) |
+| Samme jobb. Borgen satt til 0 (Bokbasen 429) | Satt: «Pris satt: 0 → 429 kr (gammel pris manglet eller var 0)» |
+| Push av Ingrid Winter (Winterkalypse nå!) etter manuell pris 200 | Prisen sendes ikke. `approvalRequired: true`, «Krever godkjenning: 200 → 449 kr (124,5 %)» |
+| Godkjenn på Oppdatering-siden (Eirik, innlogget) | Avkledd og Ingrid Winter satt til 449. `decided_by` og «Godkjent av eirikvr@gmail.com: …» i raden og `sync_log` |
+| Avvis (nytt tilfelle: Ingrid Winter 200, push) | Raden `rejected`, «Avvist av …: 200 → 449 kr (prisen er ikke endret)». Prisen stod på 200, satt tilbake til 449 for hånd |
 
 ## Funksjoner testet i 2.0 for første gang (2026-09-30)
 
