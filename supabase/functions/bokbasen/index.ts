@@ -3,6 +3,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
+import { extractBokgruppekode } from "../_shared/onix.js";
 
 const BOKBASEN_API_BASE = "https://api.bokbasen.io/metadata";
 
@@ -329,13 +330,12 @@ function parseOnix(xmlText: string, isbn: string): BookMetadata | null {
 
   // Subjects — single pass for all subject-based fields
   let genre = "";
-  let bokgruppekode = "";  // SubjectSchemeIdentifier 37 = Forleggerforeningen 3-digit code
+  const bokgruppekode = extractBokgruppekode(xml) ?? "";  // skjema 37, se _shared/onix.js
   let varegruppe = "";     // SubjectSchemeIdentifier 38 = Norsk varegruppe
   const subjects = [...xml.matchAll(/<Subject[\s\S]*?<\/Subject>/gi)];
   for (const s of subjects) {
     const scheme = s[0].match(/<SubjectSchemeIdentifier[^>]*>(.*?)<\/SubjectSchemeIdentifier>/i)?.[1];
     const code = s[0].match(/<SubjectCode[^>]*>(.*?)<\/SubjectCode>/i)?.[1] || "";
-    if (scheme === "37" && code) bokgruppekode = code;
     if (scheme === "38" && code) varegruppe = code;
     if (!genre) {
       if (scheme === "93") {

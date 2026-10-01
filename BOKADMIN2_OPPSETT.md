@@ -146,6 +146,33 @@ Med vilje ikke endret:
 - Små forskjeller fra før: `shopify` godtok ett felt fra `user_settings` og resten fra hemmelighetene. Nå gjelder samme regel som i de andre (begge eller ingen). Sjangre-sync hadde ikke cache; nå deler den cachen.
 - Testet: `deno check` på alle fem, og enhetstest av modulen med falsk `fetch` (5 av 5). Testes mot Bokbasen ved deploy.
 
+## Bokgruppekode: skjema 37 (2026-10-01)
+
+Rå ONIX hentet fra Bokbasen (bare lesing, via `bokbasen/isbn/<isbn>?raw=true`) for 89 titler: de 43 bøkene i Testbutikk (nye, 2025–26) og 46 eldre titler (1990–2012) fra alle bokgrupper. Lagret i `scripts/out/onix*/` (git-ignorert). Bokbasen leverer ONIX **3.1** med lange tagger.
+
+ONIX-kodeliste 27: **37 = «Bokgrupper»** (Forleggerforeningen), **38 = «Varegrupper»** (Bokhandlerforeningen, 5 sifre), **23 = «Publisher's own category code»**.
+
+| Type | Eksempel | År | Skjema 37 | Skjema 38 | Skjema 23 |
+|---|---|---|---|---|---|
+| Skjønnlitteratur, norsk | Utyske (9788203462566) | 2026 | 411 | 41010 | – |
+| Krim, oversatt | Joona Linna (9788234713958) | 2026 | 427 | 43010 | – |
+| Sakprosa | Avkledd (9788203461392) | 2026 | 312 | 39020 | – |
+| Barn | Årstidskvartetten (9788248940470) | 2025 | 432 | 46040 | – |
+| Ungdom | Vardari (9788234729836) | 2026 | 434 | 47010 | – |
+| Tegneserie (Thema X, Dewey 741.59) | Espens hemmelige dagbok (9788205379800) | 2008 | 430 | 45020 | – |
+| Tegneserie, engelsk | Garfield at 25 (9780345455307) | 2002 | 703 | 45020 | – |
+| Eldre roman | Min evige tysker (9788202125387) | 1990 | 411 | 41010 | – |
+| Eldre barnebok | Redd Lerpolds! (9788210035739) | 1992 | 433 | 46060 | – |
+| Billigbok/pocket | Døde menns klubb (9788202160203) | 1997 | 504 | 43030 | – |
+| Skolebok | Kunststücke 2 (9788205189065) | 1990 | 120 | 12010 | – |
+| Kart | Finland (9788202086367) | 1992 | 810 | 71500 | – |
+
+Alle 89: skjema 37 finnes i alle, alltid 3 sifre. Skjema 23 finnes i ingen. (Andre skjemaer: 38, 93 Thema, 24 «Bokbasen_LitteraryType», D3/C8 Nasjonalbibliotekets emneord, 01 Dewey med `SubjectSchemeVersion` 23/nor — det er Dewey-utgave 23, ikke skjema 23.)
+
+- Det er skjema 37 som gir de tre sifrene bkg-taggene og de smarte samlingene bruker. Ingen reserve til 23 er lagt inn.
+- Lesingen ligger nå i `extractBokgruppekode()` i `_shared/onix.js` (ren JS + `.d.ts`), brukt av `bokbasen`, `shopify` og `sjangre-sync`. Første kode med 1–3 sifre vinner. Før tok `bokbasen` den siste og godtok hva som helst; for dataene over gir det samme resultat. Tester: `scripts/onix.test.mjs`.
+- Ingen bkg-tagger i Testbutikk er endret.
+
 ## Funksjoner testet i 2.0 for første gang (2026-09-30)
 
 Mot Testbutikk, via de samme endepunktene som sidene bruker. Livebutikken er ikke rørt, og 2.0 skal ikke prøves mot den ennå.

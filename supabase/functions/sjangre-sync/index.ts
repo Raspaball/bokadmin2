@@ -6,6 +6,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
 import { BOKBASEN_ONIX_URL, clearBokbasenToken, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
+import { extractBokgruppekode } from "../_shared/onix.js";
 
 // Felt extractIsbn trenger (bok.isbn, strekkode, SKU) — handle er ikke lenger ISBN
 const PRODUCT_ISBN_FIELDS = `${BOK_ISBN_FIELD} variants(first: 1) { nodes { barcode sku } }`;
@@ -32,23 +33,6 @@ function getUserIdFromJWT(authHeader: string): string | null {
   } catch {
     return null;
   }
-}
-
-// ── Bokbasen auth ─────────────────────────────────────────────────────────────
-
-// Bokgruppekode = SubjectSchemeIdentifier 37 (som bokbasen/ og shopify/).
-// Navnerom-prefikser fjernes først, slik fetchBokgruppekode i shopify/ gjør.
-function extractBokgruppekode(rawXml: string): string | null {
-  const xml = rawXml
-    .replace(/\s+xmlns[^"]*"[^"]*"/g, "")
-    .replace(/<(\w+:)/g, "<")
-    .replace(/<\/(\w+:)/g, "</");
-  for (const s of xml.matchAll(/<Subject[\s\S]*?<\/Subject>/gi)) {
-    const scheme = s[0].match(/<SubjectSchemeIdentifier[^>]*>(.*?)<\/SubjectSchemeIdentifier>/i)?.[1];
-    const code = s[0].match(/<SubjectCode[^>]*>(.*?)<\/SubjectCode>/i)?.[1]?.trim();
-    if (scheme === "37" && code) return code;
-  }
-  return null;
 }
 
 function bokgruppeTagsForKode(kode: string): string[] {

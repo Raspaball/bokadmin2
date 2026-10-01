@@ -39,6 +39,7 @@ Prøv i så stor grad som mulig å bruke felles datakilder for viktige data som 
 | Handle-regel (tittel-forfatter-ISBN-13) | `buildBookHandle()` i `supabase/functions/_shared/handle.js` | pushOneBook, CSV-eksport, handle-migrering, scripts/migrate-handles.mjs |
 | ISBN fra Shopify-produkt | `extractIsbn()` i `supabase/functions/_shared/isbn.js` (bok.isbn → strekkode → SKU → ISBN-handle) | price-update, availability-check, sjangre-sync, shopify (samlinger, migrering), scripts |
 | Plan for handle-migrering | `planHandleMigration()` i `supabase/functions/_shared/handle-migration.js` | /shopify/handles/*, scripts/migrate-handles.mjs |
+| Bokgruppekode fra ONIX (skjema 37) | `extractBokgruppekode()` i `supabase/functions/_shared/onix.js` | bokbasen, shopify, sjangre-sync |
 | Bokbasen-innlogging (legitimasjon, token-cache, ONIX-URL) | `getBokbasenCredentials()` / `getBokbasenToken()` / `BOKBASEN_ONIX_URL` i `supabase/functions/_shared/bokbasen-auth.ts` | bokbasen, shopify, price-update, availability-check, sjangre-sync |
 | Formatfilter (ONIX ProductForm) | `FORMAT_OPTIONS` i Import.tsx | Kun Import.tsx — kan flyttes til utils/ hvis det trengs andre steder |
 

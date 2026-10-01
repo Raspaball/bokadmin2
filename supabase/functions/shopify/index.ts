@@ -6,6 +6,7 @@ import { ALL_PRODUCT_STATUSES, getShopDomain, shopifyGraphQL } from "../_shared/
 import { BOKBASEN_ONIX_URL, type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { buildBookHandle, normalizeIsbn } from "../_shared/handle.js";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
+import { extractBokgruppekode } from "../_shared/onix.js";
 import {
   SAFE_STORES, MIGRATION_PRODUCTS_QUERY, HANDLE_UPDATE_MUTATION,
   planHandleMigration, isBlockedRow, handleUpdateInput, type HandlePlanRow,
@@ -25,7 +26,7 @@ interface PublicationsCacheEntry {
 
 const publicationsCache = new Map<string, PublicationsCacheEntry>();
 
-// Minimal ONIX parser: only extracts SubjectSchemeIdentifier 37 (bokgruppekode)
+// Bokgruppekode for ett ISBN (skjema 37, se _shared/onix.js)
 async function fetchBokgruppekode(isbn: string, credentials: BokbasenCredentials | null): Promise<string | null> {
   try {
     const token = await getBokbasenToken(credentials);
@@ -33,16 +34,7 @@ async function fetchBokgruppekode(isbn: string, credentials: BokbasenCredentials
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) return null;
-    const xml = (await res.text())
-      .replace(/\s+xmlns[^"]*"[^"]*"/g, "")
-      .replace(/<(\w+:)/g, "<")
-      .replace(/<\/(\w+:)/g, "</");
-    for (const s of xml.matchAll(/<Subject[\s\S]*?<\/Subject>/gi)) {
-      const scheme = s[0].match(/<SubjectSchemeIdentifier[^>]*>(.*?)<\/SubjectSchemeIdentifier>/i)?.[1];
-      const code = s[0].match(/<SubjectCode[^>]*>(.*?)<\/SubjectCode>/i)?.[1]?.trim();
-      if (scheme === "37" && code) return code;
-    }
-    return null;
+    return extractBokgruppekode(await res.text());
   } catch {
     return null;
   }
