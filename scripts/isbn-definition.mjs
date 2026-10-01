@@ -8,6 +8,7 @@
 // KJØRING (fra prosjektmappa), i denne rekkefølgen:
 //   node scripts/isbn-definition.mjs --status     # tell og ta vare på verdiene (endrer ingenting)
 //   node scripts/isbn-definition.mjs --recreate   # slett definisjonen (med verdier) og lag den med typen id
+//                                                 # (--redo: også når den allerede har typen id)
 //   node scripts/isbn-definition.mjs --restore    # vis hvilke verdier som vil bli satt (endrer ingenting)
 //   node scripts/isbn-definition.mjs --restore --execute   # sett verdiene
 //   node scripts/isbn-definition.mjs --verify     # slå opp alle med customId og sammenlign
@@ -127,6 +128,17 @@ function isbnFromVariant(product) {
   return { isbn: fromBarcode ?? fromSku, source: fromBarcode ? "strekkode" : fromSku ? "SKU" : null };
 }
 
+async function waitFor(label, check, maxMinutes = 30) {
+  const start = Date.now();
+  while (!(await check())) {
+    if (Date.now() - start > maxMinutes * 60_000) fail(`Ventet ${maxMinutes} min uten at ${label}. Prøv igjen senere.`);
+    process.stdout.write(`  Venter til ${label} … ${Math.round((Date.now() - start) / 1000)} s`);
+    await new Promise((r) => setTimeout(r, 15_000));
+  }
+  console.log(`
+  OK: ${label}`);
+}
+
 function readBackup() {
   if (!existsSync(backupFile)) fail(`Fant ingen sikkerhetskopi (${backupFile}). Kjør --status først.`);
   return JSON.parse(readFileSync(backupFile, "utf8"));
@@ -167,7 +179,7 @@ async function recreate() {
   const ageH = (Date.now() - Date.parse(backup.createdAt)) / 36e5;
   if (ageH > BACKUP_MAX_AGE_H) fail(`Sikkerhetskopien er ${ageH.toFixed(1)} timer gammel. Kjør --status på nytt.`);
   const current = await getDefinition();
-  if (current?.type.name === "id") fail("bok.isbn har allerede typen id. Ingenting å gjøre.");
+  if (current?.type.name === "id" && !flag("redo")) fail("bok.isbn har allerede typen id. Ingenting å gjøre (--redo lager den på nytt likevel).");
   if (current && current.id !== backup.definition?.id) fail("Definisjonen i butikken er ikke den samme som i sikkerhetskopien. Kjør --status på nytt.");
   // Finnes ikke definisjonen (slettet i en kjøring der opprettelsen feilet), lages den fra sikkerhetskopien
   const old = current ?? backup.definition;
@@ -179,6 +191,10 @@ async function recreate() {
     if (del.userErrors.length) fail(`Sletting feilet: ${JSON.stringify(del.userErrors)}`);
     console.log(`  Slettet: ${del.deletedDefinitionId}`);
   }
+
+  // De gamle verdiene slettes i bakgrunnen. Lages definisjonen før de er borte,
+  // kan Shopifys unik-migrering henge (Testbutikk 2026-10-01).
+  await waitFor("gamle verdier slettet", async () => (await fetchAllProducts()).every((p) => !p.bokIsbn));
 
   const definition = {
     name: old.name,
@@ -200,6 +216,7 @@ async function recreate() {
     fail(`Oppretting feilet: ${JSON.stringify(created.userErrors)}\nDefinisjonen er slettet. Gamle innstillinger ligger i ${backupFile} (definition); --recreate kan kjøres igjen.`);
   }
   console.log(`  Laget: ${JSON.stringify(created.createdDefinition)}`);
+  await waitFor("definisjonen er ALL_VALID", async () => (await getDefinition())?.validationStatus === "ALL_VALID");
   console.log(`\nNeste steg: node scripts/isbn-definition.mjs --restore\n`);
 }
 

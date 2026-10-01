@@ -108,7 +108,8 @@ Definisjonen `bok.isbn` i Testbutikk er slettet og laget på nytt med typen `id`
 - Verktøy: `scripts/isbn-definition.mjs` (`--status`, `--recreate`, `--restore [--execute]`, `--verify`). Nøkler i `scripts/.env.local`. Kjører bare mot Testbutikk.
 - Før: 65 produkter, 43 med `bok.isbn` (type `single_line_text_field`). Alle 43 verdiene var lik strekkoden. Sikkerhetskopi: `scripts/out/bok-isbn-backup-testbutikk-9434-for-sletting.json` (git-ignorert).
 - Ny definisjon: samme navn («ISBN»), nøkkel, beskrivelse, storefront `PUBLIC_READ`, festet, admin-filtrerbar, unik (typen `id` krever unik). 43 verdier satt inn igjen fra strekkoden (eksakt ISBN-13), alle av typen `id`.
-- **Avvik:** Shopify står med `validationStatus: SOME_INVALID` (43 gyldige, 0 ugyldige), og customId-oppslag svarer «Metafields have not completed migrating to to be valid for unique capability». Trolig fordi verdiene ble satt mens Shopify fortsatt slettet de gamle verdiene og bygde unik-indeksen. Unik kan ikke slås av for typen `id`, og ny lagring av én verdi hjalp ikke. Lærdom for livebutikken: vent til definisjonen er `ALL_VALID` og `metafieldsCount` er 0 før verdiene settes inn igjen.
+- **Første forsøk hang:** verdiene ble satt mens Shopify fortsatt slettet de gamle i bakgrunnen. Definisjonen ble stående på `validationStatus: SOME_INVALID` (43 gyldige, 0 ugyldige), og customId-oppslag svarte «Metafields have not completed migrating to to be valid for unique capability» i over 30 minutter. Unik kan ikke slås av for typen `id`, og ny lagring av én verdi hjalp ikke.
+- **Andre forsøk (samme dag, godkjent av Eirik):** `--recreate --redo` sletter, venter til alle gamle verdier er borte, lager definisjonen og venter til den er `ALL_VALID`. Deretter `--restore --execute`: 43 av 43 satt, `ALL_VALID`, og `--verify` fant 43 av 43 med customId. **Lærdom for livebutikken:** bruk denne rekkefølgen (skriptet håndhever den nå).
 - **Eksport (pushOneBook):** oppslaget er nå `books.shopify_id` → customId `bok.isbn` → strekkode/SKU → handle = ISBN → ny handle. Feiler customId-oppslaget med en GraphQL-feil (feil type, eller migreringen over), brukes strekkode/SKU for det kallet. Før stoppet en slik feil hele push. Bare «type 'id' is required» huskes for resten av instansen.
 - **Handle-migreringen** slår ikke opp enkeltbøker. Den henter hele katalogen og bruker `extractIsbn` (bok.isbn → strekkode → SKU → ISBN-handle), som allerede har riktig rekkefølge. Ingen endring.
 
@@ -223,6 +224,27 @@ Rå ONIX for 103 titler (bare lesing): 43 nye i Testbutikk (2025–26, flere for
 Tester: `scripts/price.test.mjs` (ONIX 3 og 2.1: NOK og EUR med samme type, bare EUR, `DefaultCurrencyCode`, 04 fra i morgen mot 02 nå, 04 utløpt i går mot 01 uten datoer, to 04 med ulike startdatoer, territorium uten NO, ingen godkjent pris, Oslo-tid).
 
 Kontroll mot Testbutikk (lokalt, bare lesing, 2026-10-01): 65 produkter, 22 uten ISBN, 43 med samme pris som regelen gir, 0 med ny pris, 0 uten godkjent pris. Ingen priser er endret.
+
+## Pakke A steg 3: deploy og røyktest (2026-10-01)
+
+`bokbasen`, `shopify`, `price-update`, `availability-check` og `sjangre-sync` er deployet til 2.0 etter commit 00e920e. Testene er kjørt mot de samme endepunktene som bokadmin2.vercel.app bruker (anon-nøkkel), ikke i nettleseren.
+
+| Test | Resultat |
+|---|---|
+| Import av én bok (`bokbasen/isbn`) | Avkledd: pris 449 (04), bkg 312. Min evige tysker (1990): pris 259 (02), bkg 411. Alt starter med en drøm: 349, bkg 334 |
+| Push, bok med migrert handle (Avkledd) | Funnet, `created: false`, samme produkt, ingen advarsel. `books` er tom, så oppslaget gikk via ISBN (customId) og ikke `shopify_id` |
+| Push, bok laget med ny handle (9788205621060) | Funnet, `created: false`, samme produkt |
+| Sjangersynk på én bok | Cache-raden for 9788205621060 ble fjernet, og berikingsjobben hentet den fra Bokbasen igjen (334). 65 behandlet, 2 koder funnet (også 9788284680378, som manglet fra før), 41 i cache, 0 feil |
+| Katalogliste og søk | 65 produkter (43 ACTIVE, 22 ARCHIVED), 43 med ISBN. Søk «avkledd» treffer, pris 449. `/count` 65 |
+| Samlingsanalyse | 43 tagget, 0 trenger tagging, 22 uplasserbare, 25 samlinger |
+| Prisjobb, sjekkmodus | 65 av 65 behandlet, 0 avvik, 0 feil, 65 hoppet over (22 uten ISBN, 43 med samme pris). Ingen priser endret |
+| Antall produkter etter push | 65 (ingen duplikater) |
+
+Funnet underveis, ikke rettet:
+- `price-update/start` bruker `update` som standard når `mode` mangler. Et kall uten `mode` endrer altså priser.
+- `collectionCreate(input:)`, `collectionUpdate(input:)` (shopify, sjangre-sync) og `productUpdate(input:)` (`scripts/clean-tags.mjs`) bruker utfasede argumenter. De virker i 2026-07, men bør over på `collection:`/`product:`.
+- `sjangre-sync/analyze` leser `books` (tom i 2.0) og viser derfor 0 bøker. Samlingsanalysen i `shopify` gir riktige tall.
+- `node --test scripts/` virker ikke på Node 22 (mappe som argument). Bruk `node --test scripts/*.test.mjs` (54 tester).
 
 ## Funksjoner testet i 2.0 for første gang (2026-09-30)
 

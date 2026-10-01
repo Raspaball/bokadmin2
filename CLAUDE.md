@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 npm run dev        # Start Vite dev server
 npm run build      # Production build
+node --test scripts/*.test.mjs   # Tester for _shared-modulene (handle, onix, price)
 
 # Deploy a Supabase Edge Function (must be run from project root).
 # Bokadmin 2.0: ALWAYS pass the 2.0 project ref — never link or deploy to the live project.
