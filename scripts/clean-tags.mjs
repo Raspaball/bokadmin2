@@ -283,12 +283,12 @@ async function main() {
         // Faktisk oppdatering
         try {
           const mutResult = await shopifyGql(shopDomain, accessToken, `
-            mutation($input: ProductInput!) {
-              productUpdate(input: $input) {
+            mutation($product: ProductUpdateInput!) {
+              productUpdate(product: $product) {
                 userErrors { field message }
               }
             }
-          `, { input: { id: product.id, tags: keptTags } });
+          `, { product: { id: product.id, tags: keptTags } });
 
           const userErrors = mutResult?.productUpdate?.userErrors ?? [];
           if (userErrors.length) {

@@ -7,6 +7,8 @@ import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
 import { BOKBASEN_ONIX_URL, clearBokbasenToken, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { extractBokgruppekode } from "../_shared/onix.js";
+import { COLLECTION_CREATE_MUTATION, tagSources } from "../_shared/collections.ts";
+import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
 
 // Felt extractIsbn trenger (bok.isbn, strekkode, SKU) — handle er ikke lenger ISBN
 const PRODUCT_ISBN_FIELDS = `${BOK_ISBN_FIELD} variants(first: 1) { nodes { barcode sku } }`;
@@ -42,42 +44,6 @@ function bokgruppeTagsForKode(kode: string): string[] {
   if (kode.length >= 3) tags.push(`bkg-${kode.slice(0, 3)}`);
   return tags;
 }
-
-const COLLECTION_NAMES: Record<string, string> = {
-  "1": "Lærebøker og fagbøker", "11": "Fagbøker", "110": "Skolebøker (grunnskole og vgs)",
-  "2": "Kommisjonsbok, lover, forskning", "21": "Lærebøker høyere utdanning",
-  "210": "Lærebøker høyere utdanning", "211": "Jus", "212": "Økonomi og administrasjon",
-  "213": "Helse og sosialfag", "214": "Samfunnsvitenskapelige fag", "215": "Pedagogikk",
-  "219": "Naturvitenskapelige fag",
-  "3": "Sakprosa", "31": "Sakprosa", "310": "Diverse sakprosa", "311": "Kultur, religion, kunst",
-  "312": "Samfunn og historie", "313": "Kropp og sinn", "314": "Barn og oppdragelse",
-  "315": "Mat og drikke", "316": "Friluftsliv og hobby", "317": "Hobby",
-  "318": "Teknikk og vitenskap", "319": "Memoarer og biografier",
-  "320": "Samfunn, politikk, debatt", "321": "Kristendom",
-  "4": "Norsk skjønnlitteratur", "41": "Norsk skjønnlitteratur", "410": "Norsk skjønnlitteratur",
-  "411": "Norske romaner", "412": "Norske noveller", "413": "Norsk lyrikk",
-  "415": "Norsk essays og blandinger", "417": "Norsk krim og spenning", "418": "Norsk klassisk litteratur",
-  "43": "Norsk barn og ungdom", "430": "Norsk barn", "431": "Norske billedbøker",
-  "433": "Norsk junior (8-12 år)", "434": "Norsk ungdom (12-16 år)",
-  "5": "Oversatt skjønnlitteratur", "50": "Billigbøker",
-  "501": "Oversatt billigbok sakprosa", "502": "Oversatt billigbok skjønnlitteratur",
-  "504": "Oversatt billigbok skjønnlitteratur", "51": "Oversatte romaner",
-  "510": "Oversatte romaner", "511": "Oversatte romaner", "517": "Oversatt krim og spenning",
-  "52": "Oversatt barn", "520": "Oversatte billedbøker", "54": "Oversatt barn og ungdom",
-  "540": "Oversatt barn", "550": "Oversatt junior", "560": "Oversatt ungdom",
-  "7": "Kommisjonsbok og lover", "70": "Kommisjonsbok",
-  "701": "Kommisjonsbok – Tidsskrifter", "703": "Kommisjonsbok – Forskning/lovsamling",
-  "708": "Lover og forskrifter",
-  "8": "E-bok og lydbok", "85": "E-bøker", "850": "E-bok diverse",
-  "851": "E-bok norsk sakprosa", "852": "E-bok norsk skjønnlitteratur",
-  "853": "E-bok oversatt sakprosa", "854": "E-bok oversatt skjønnlitteratur",
-  "856": "E-bok barn og ungdom", "88": "Lydbøker", "880": "Lydbok diverse",
-  "881": "Lydbok norsk sakprosa", "882": "Lydbok norsk skjønnlitteratur",
-  "883": "Lydbok oversatt sakprosa", "884": "Lydbok oversatt skjønnlitteratur",
-  "886": "Lydbok barn og ungdom",
-  "9": "Serier og tegneserier", "91": "Norske serier", "910": "Norske serieromaner",
-  "92": "Tegneserier", "920": "Tegneserier",
-};
 
 type SupabaseClient = ReturnType<typeof getSupabase>;
 
@@ -128,17 +94,8 @@ async function ensureCollections(koder: Set<string>): Promise<CollectionSyncResu
         existing++;
         details.push({ code, status: "existing" });
       } else {
-        const cr = await shopifyGraphQL(`
-          mutation($input: CollectionInput!) {
-            collectionCreate(input: $input) {
-              collection { id }
-              userErrors { field message }
-            }
-          }`, {
-          input: {
-            title, handle,
-            ruleSet: { appliedDisjunctively: false, rules: [{ column: "TAG", relation: "EQUALS", condition: `bkg-${code}` }] },
-          }
+        const cr = await shopifyGraphQL(COLLECTION_CREATE_MUTATION, {
+          collection: { title, handle, sources: tagSources(`bkg-${code}`) },
         });
         const { collection, userErrors } = (cr.data as Record<string, unknown>)?.collectionCreate as { collection: { id: string } | null; userErrors: { message: string }[] } || {};
         if (userErrors?.length) throw new Error(userErrors.map((e: { message: string }) => e.message).join(", "));

@@ -287,7 +287,8 @@ Oppgaven: `oppgaver/pakke-a2-prissikring.md`.
 | 3. Egen pris og tilbud | **Ferdig**, deployet og testet (se under) |
 | 4. Tryggere standard og planlegging | **Ferdig**, deployet og testet (se under). Etter eiers valg er **ingen planlagte oppgaver lagt inn** |
 | 5. Rekkefølgen på pristypene | **Ferdig**: 04 > 02 > 03 > 01 > andre. Deployet (price-update, bokbasen, shopify). Sjekk i Testbutikk: 0 ville fått ny pris |
-| 6 og «Til slutt» | Ikke startet |
+| 6. Utfasede `input:`-argumenter | **Ferdig**, deployet (shopify, sjangre-sync) og testet på én kode (bkg-334) |
+| «Til slutt» | Pågår |
 
 Del 2, det som er laget:
 - `_shared/price-guard.ts`: `checkPriceChange(gammel, ny, grense)` gir `same` (avvik under 0,01 kr), `set` (innenfor grensen), `fix` (gammel pris mangler eller er 0: settes) eller `approval` (over grensen: settes ikke). Akkurat på grensen settes. Tester: `scripts/price-guard.test.mjs`.
@@ -337,6 +338,18 @@ Testet: cron-løkka kjørt i en transaksjon som ble rullet tilbake, med to midle
 ### Del 5: rekkefølgen på pristypene
 
 `choosePrice` i `_shared/price.ts` velger nå 04 > 02 > 03 > 01 > andre (priser med mva før priser uten). Kommentaren øverst i fila, testene (nye tilfeller: 03 mot 02, 03 mot 04, 01 mot 03, alle fire, 01 mot annen type), regelen over og CLAUDE.md er oppdatert. Prisjobb i sjekkmodus i Testbutikk etter deploy: «0 ville fått ny pris, 43 samme pris, …, 0 feil».
+
+### Del 6: utfasede `input:`-argumenter
+
+Sjekket mot Testbutikk med 2026-07 (introspeksjon; Shopify-validatoren i MCP bruker et eldre skjema der `collection:` ikke finnes):
+- `collectionCreate(input:)` og `collectionUpdate(input:)` er utfaset → `collection: CollectionCreateInput` / `CollectionUpdateInput`. Den nye modellen har ikke `ruleSet`; regler heter `sources` (`source.inclusion.conditions[].productTag` med `TAGGED_WITH`). Samlingen blir likevel smart, med samme `ruleSet` (TAG EQUALS bkg-N) og samme produkter. Uten `sources` blir samlingen manuell (strømmer).
+- `productUpdate(input:)` → `product: ProductUpdateInput` (`scripts/clean-tags.mjs`).
+- `_shared/collections.ts`: `COLLECTION_CREATE_MUTATION`, `COLLECTION_UPDATE_MUTATION`, `tagSources(tag)`, brukt av shopify (bkg-samlinger, strømmer) og sjangre-sync.
+- `feedCreate` sendte `collectionType: "MANUAL"`, som ikke finnes i `CollectionInput`, og har trolig aldri virket. Nå `collection: { title }`. Strømmer er fortsatt ikke testet i 2.0.
+- `COLLECTION_NAMES` er flyttet til `_shared/collection-names.ts`. sjangre-sync hadde en avkortet kopi, så samlinger fra Sjangre-siden fikk «Bokgruppe NNN» for koder som manglet der (f.eks. 334, 33, 328, 432 i Testbutikk). Eksisterende samlinger har fortsatt det gamle navnet; bare `bkg-334` er laget på nytt («Ungdom»).
+- Skanning av alle mutasjoner i koden mot 2026-07: ingen utfasede argumenter igjen. **Gjenstår:** `collectionAddProducts` og `collectionRemoveProducts` (strømmer) er utfaset som hele mutasjoner («Use `collectionUpdate` with inclusion.selectionsToAdd / selectionsToRemove»).
+
+Testet i Testbutikk: midlertidige samlinger (smart og manuell) laget, kontrollert og slettet. `bkg-334` (1 produkt, ikke i meny) slettet og laget på nytt, først av `shopify/sync-collections` (1 opprettet, 24 fantes, 0 feil), så slettet igjen og laget av `sjangre-sync` (hele jobben: 43 tagget fra før, 1 opprettet, 24 fantes, 0 feil). Begge ga smart samling, TAG EQUALS bkg-334, 1 produkt. Ny ID, samme handle; tittelen er nå «Ungdom» (før «Bokgruppe 334»). Priser og status: 65 av 65 som før.
 
 ## Funksjoner testet i 2.0 for første gang (2026-09-30)
 
