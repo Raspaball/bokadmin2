@@ -4,7 +4,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/
 import { Upload, Loader2, CheckCircle2, AlertCircle, ShoppingBag, XCircle, Trash2, Calendar } from 'lucide-react';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
-import { bokbasen, books, shopify, syncLog, type Book } from '../utils/api';
+import { bokbasen, books, shopify, syncLog, type Book, type SyncLogEntry } from '../utils/api';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { toast } from 'sonner';
 import { BokbasenOppslag } from './BokbasenOppslag';
@@ -143,6 +143,14 @@ function ImportResultLog({
 
 export function Import() {
   const [addedBooks, setAddedBooks] = useState<ImportedBook[]>([]);
+  // Push-logg for bøker som ble utkast eller fikk prisen stående fordi pris mangler
+  const [missingPriceLog, setMissingPriceLog] = useState<SyncLogEntry[]>([]);
+  const loadMissingPriceLog = () => {
+    syncLog.getByActions(['push'], 200)
+      .then(entries => setMissingPriceLog(entries.filter(e => /mangler pris|Pris ikke endret/.test(e.message ?? ''))))
+      .catch(() => {});
+  };
+  useEffect(() => { loadMissingPriceLog(); }, []);
   const [isLoadingBooks, setIsLoadingBooks] = useState(false);
   const [selectedFormats, setSelectedFormats] = useState<Set<string>>(
     new Set(FORMAT_OPTIONS.filter(f => f.defaultOn).map(f => f.label))
@@ -322,6 +330,7 @@ export function Import() {
 
     let successCount = 0;
     let failCount = 0;
+    let priceNoteCount = 0;
 
     for (let i = 0; i < toPush.length; i += 10) {
       if (cancelBatchRef.current) break;
@@ -332,7 +341,7 @@ export function Import() {
         chunk.find(c => c.id === b.id) ? { ...b, pushing: true } : b
       ));
 
-      let results: Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string }>;
+      let results: Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string }>;
       try {
         results = await shopify.pushBooks(chunk);
       } catch (e) {
@@ -353,8 +362,8 @@ export function Import() {
             isbn: book.isbn,
             title: book.title,
             action: 'push',
-            status: 'success',
-            message: `Pushet til Shopify som ${res.handle}`,
+            status: res.priceNote ? 'info' : 'success',
+            message: res.priceNote ? `Pushet til Shopify som ${res.handle}. ${res.priceNote}` : `Pushet til Shopify som ${res.handle}`,
             shopify_id: res.shopifyId,
             job_id: null,
           });
@@ -362,6 +371,7 @@ export function Import() {
             b.id === book.id ? { ...b, pushing: false, pushed: true, shopify_id: res.shopifyId, shopify_handle: res.handle } : b
           ));
           successCount++;
+          if (res.priceNote) priceNoteCount++;
         } else {
           await syncLog.add({
             isbn: book.isbn,
@@ -385,8 +395,10 @@ export function Import() {
     const wasCancelled = cancelBatchRef.current;
     if (successCount > 0) toast.success(`${successCount} bøker eksportert til Shopify${wasCancelled ? ' (avbrutt)' : ''}`);
     if (failCount > 0) toast.error(`${failCount} bøker feilet`);
+    if (priceNoteCount > 0) toast.warning(`${priceNoteCount} bøker mangler pris — se «Mangler pris»`);
     if (wasCancelled) toast.info('Eksport avbrutt');
     setIsBatchPushing(false);
+    loadMissingPriceLog();
   };
 
   const handleCancelBatchPush = () => {
@@ -414,8 +426,8 @@ export function Import() {
         isbn: book.isbn,
         title: book.title,
         action: 'push',
-        status: 'success',
-        message: `Pushet til Shopify som ${result.handle}`,
+        status: result.priceNote ? 'info' : 'success',
+        message: result.priceNote ? `Pushet til Shopify som ${result.handle}. ${result.priceNote}` : `Pushet til Shopify som ${result.handle}`,
         shopify_id: result.shopifyId,
         job_id: null,
       });
@@ -424,6 +436,7 @@ export function Import() {
       ));
       toast.success(`"${book.title}" pushet til Shopify`);
       if (result.warning) toast.warning(result.warning);
+      if (result.priceNote) { toast.warning(result.priceNote); loadMissingPriceLog(); }
     } catch (error) {
       await syncLog.add({
         isbn: book.isbn,
@@ -574,6 +587,8 @@ export function Import() {
   const [descriptionBook, setDescriptionBook] = useState<ImportedBook | null>(null);
 
   const unpushedBooks = addedBooks.filter(b => !b.shopify_id && !b.pushed);
+  // Bøker uten godkjent pris (0 eller lavere regnes som manglende). Push setter aldri pris 0.
+  const booksMissingPrice = addedBooks.filter(b => !(Number(b.price) > 0));
 
   return (
     <div className="space-y-6">
@@ -669,6 +684,12 @@ export function Import() {
                       </button>
                       <p className="text-xs text-gray-600">{book.author}</p>
                       <p className="text-xs text-gray-400 font-mono">{book.isbn}</p>
+                      {!(Number(book.price) > 0) && (
+                        <span className="inline-flex items-center text-xs bg-amber-100 text-amber-800 rounded px-2 py-0.5 mt-1">
+                          <AlertCircle className="size-3 mr-1" />
+                          Mangler pris: blir utkast i Shopify
+                        </span>
+                      )}
                     </div>
                     <div className="flex-shrink-0">
                       {book.shopify_id || book.pushed ? (
@@ -697,6 +718,53 @@ export function Import() {
           )}
         </CardContent>
       </Card>
+
+      {/* Mangler pris */}
+      {(booksMissingPrice.length > 0 || missingPriceLog.length > 0) && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <AlertCircle className="size-5 text-amber-600" />
+              Mangler pris
+            </CardTitle>
+            <CardDescription>
+              Bøker uten godkjent pris fra Bokbasen. Nye bøker opprettes som utkast uten pris, og eksisterende bøker beholder prisen i Shopify.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {booksMissingPrice.length > 0 && (
+              <div>
+                <p className="text-sm font-medium mb-2">I arbeidslisten ({booksMissingPrice.length})</p>
+                <div className="border rounded-lg divide-y max-h-[240px] overflow-y-auto">
+                  {booksMissingPrice.map(b => (
+                    <div key={b.id} className="p-2 text-sm flex justify-between gap-2">
+                      <span className="truncate">{b.title}</span>
+                      <span className="text-xs text-gray-400 font-mono">{b.isbn}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {missingPriceLog.length > 0 && (
+              <div>
+                <p className="text-sm font-medium mb-2">Fra push-loggen ({missingPriceLog.length})</p>
+                <div className="border rounded-lg divide-y max-h-[240px] overflow-y-auto">
+                  {missingPriceLog.map(e => (
+                    <div key={e.id} className="p-2 text-sm">
+                      <div className="flex justify-between gap-2">
+                        <span className="truncate">{e.title ?? e.isbn}</span>
+                        <span className="text-xs text-gray-400">{new Date(e.created_at).toLocaleString('nb-NO')}</span>
+                      </div>
+                      <p className="text-xs text-amber-800">{(e.message ?? '').replace(/^Pushet til Shopify som \S+\. /, '')}</p>
+                      <p className="text-xs text-gray-400 font-mono">{e.isbn}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Format Filter */}
       <Card>

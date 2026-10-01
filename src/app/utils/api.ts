@@ -104,6 +104,7 @@ export interface BokbasenSearchResult {
   year: string;
   format: string;
   price: number | null;
+  priceReason?: string | null; // årsak når price mangler (choosePrice i _shared/price.ts)
   description: string;
   imageUrl: string;
   genre: string;
@@ -496,7 +497,7 @@ export const bokbasen = {
 
 export const shopify = {
   // Push one book to Shopify
-  async pushBook(book: BokbasenSearchResult | Book): Promise<{ shopifyId: string; handle: string; variantId?: string; created?: boolean; warning?: string }> {
+  async pushBook(book: BokbasenSearchResult | Book): Promise<{ shopifyId: string; handle: string; variantId?: string; created?: boolean; warning?: string; priceNote?: string }> {
     const res = await callEdgeFunction("shopify/push", {
       method: "POST",
       body: JSON.stringify({ book }),
@@ -505,7 +506,7 @@ export const shopify = {
   },
 
   // Push multiple books to Shopify
-  async pushBooks(bookList: (BokbasenSearchResult | Book)[]): Promise<Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string }>> {
+  async pushBooks(bookList: (BokbasenSearchResult | Book)[]): Promise<Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string }>> {
     const res = await callEdgeFunction("shopify/push-bulk", {
       method: "POST",
       body: JSON.stringify({ books: bookList }),

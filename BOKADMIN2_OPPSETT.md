@@ -246,6 +246,35 @@ Funnet underveis, ikke rettet:
 - `sjangre-sync/analyze` leser `books` (tom i 2.0) og viser derfor 0 bøker. Samlingsanalysen i `shopify` gir riktige tall.
 - `node --test scripts/` virker ikke på Node 22 (mappe som argument). Bruk `node --test scripts/*.test.mjs` (54 tester).
 
+## Pakke A2 del 1: aldri pris 0 (2026-10-01)
+
+Før satte push `price: book.price ? String(book.price) : "0"` og alltid `status: "ACTIVE"`. En bok uten pris ble lagt ut til 0 kr, og en bok som lå ute fikk prisen overskrevet til 0.
+
+Nå (`_shared/push-price.ts`, brukt av `pushOneBook` og CSV-eksporten):
+
+| Tilfelle | Push (enkelt, «Push alle», bulk) | CSV |
+|---|---|---|
+| Godkjent pris (> 0) | Som før: pris satt, ACTIVE | Pris, `active` |
+| Ny bok uten godkjent pris | Opprettes som **DRAFT**, pris sendes ikke. «Opprettet som utkast: mangler pris (<årsak>)» | `draft`, tom pris |
+| Eksisterende bok uten godkjent pris | Pris sendes ikke og blir stående. Status som før. «Pris ikke endret: <årsak>» | `draft`, tom pris |
+| Pris 0 eller lavere | Som manglende pris | Som manglende pris |
+
+- Årsaken kommer fra `choosePrice`: importen gir `priceReason` (via `chooseValidPrice`). Mangler den (f.eks. «Push alle» fra `books`), slår push opp boka i Bokbasen. Har Bokbasen fått pris siden importen, står det «Bokbasen har nå X kr, men boka i arbeidslista mangler pris – importer den på nytt».
+- Manuell prisendring i katalogen (`/catalog/update`) avviser 0 eller lavere.
+- `sync_log`: push med prisnotat logges med status `info` og meldingen «Pushet til Shopify som <handle>. <notat>».
+- Import-siden: merket «Mangler pris: blir utkast i Shopify» på bøker i arbeidslisten, og kortet «Mangler pris» med bøkene i arbeidslisten og push-loggen.
+- En ny variant uten pris får Shopifys standard 0,00, men produktet er et utkast og kan ikke kjøpes.
+- Tester: `scripts/push-price.test.mjs`.
+
+Testet i Testbutikk (shopify og bokbasen deployet):
+
+| Test | Resultat |
+|---|---|
+| Ny bok uten pris: Katalog 2004 (9788202237868, ingen Price i ONIX) | Opprettet som DRAFT, «Opprettet som utkast: mangler pris (ingen pris)». Produktet er slettet etterpå |
+| Eksisterende bok, pris satt manuelt til 111 kr (Avkledd), push uten pris | Pris fortsatt 111, ACTIVE, «Pris ikke endret: Bokbasen har nå 449 kr …». Satt tilbake til 449 |
+| Avkledd med pris | Som før: 449, ACTIVE, ingen notat |
+| Antall produkter etter testene | 65 |
+
 ## Funksjoner testet i 2.0 for første gang (2026-09-30)
 
 Mot Testbutikk, via de samme endepunktene som sidene bruker. Livebutikken er ikke rørt, og 2.0 skal ikke prøves mot den ennå.

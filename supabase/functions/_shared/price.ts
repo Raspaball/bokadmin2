@@ -146,9 +146,16 @@ export function pickPriceUpdatePrice(xml: string, today?: string): number | null
 
 /**
  * Pris for import og alt annet som leser pris fra ONIX: choosePrice, men
- * 0 eller lavere godtas ikke. Ingen godkjent pris gir null.
+ * 0 eller lavere godtas ikke. Ingen godkjent pris gir price = null og en årsak.
  */
+export function chooseValidPrice(xml: string, today?: string): { price: number | null; reason: string | null } {
+  const choice = choosePrice(xml, today);
+  if (choice.price === null) return { price: null, reason: choice.reason ?? "ingen pris" };
+  if (choice.price <= 0) return { price: null, reason: "pris 0 eller lavere" };
+  return { price: choice.price, reason: null };
+}
+
+/** chooseValidPrice uten årsak. */
 export function pickValidPrice(xml: string, today?: string): number | null {
-  const price = pickPriceUpdatePrice(xml, today);
-  return price !== null && price > 0 ? price : null;
+  return chooseValidPrice(xml, today).price;
 }

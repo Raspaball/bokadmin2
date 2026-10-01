@@ -128,6 +128,7 @@ All tables have a `user_id uuid` column (nullable) for multi-tenant isolation. T
 - Handle → `buildBookHandle()`: `<hovedtittel, maks 60 tegn>-<første forfatter, fornavn etternavn>-<ISBN-13>`, e.g. `avkledd-nina-brochmann-9788203461392`. Set only when the product is created; a re-push never changes it
 - ISBN → metafield `bok.isbn`, SKU, barcode. **Never read ISBN from `product.handle`** — use `extractIsbn()` and fetch `bok.isbn`, barcode and SKU in the query
 - Lookup before create (pushOneBook): `books.shopify_id` → customId `bok.isbn` (definition of type `id` in Testbutikk since 2026-10-01) → barcode/SKU search (also used when the customId lookup returns a GraphQL error) → handle = ISBN (legacy) → handle = new handle → create. `shopify_id` is saved to `books` after every push
+- Price/status → `decidePushPrice()` i `_shared/push-price.ts`: never price 0. New book without approved price → DRAFT without price; existing book without price → price not sent. CSV: `draft` + empty price
 - Author → productType
 - Publisher → vendor
 - Tags = `"author, title"` + bokgruppekode hierarchy tags (`bkg-N`, `bkg-NN`, `bkg-NNN`)

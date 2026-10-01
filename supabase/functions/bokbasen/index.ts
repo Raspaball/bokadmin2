@@ -4,7 +4,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { extractBokgruppekode } from "../_shared/onix.js";
-import { pickValidPrice } from "../_shared/price.ts";
+import { chooseValidPrice } from "../_shared/price.ts";
 
 const BOKBASEN_API_BASE = "https://api.bokbasen.io/metadata";
 
@@ -295,7 +295,7 @@ function parseOnix(xmlText: string, isbn: string): BookMetadata | null {
   }
 
   // Pris: samme regel som prisjobben (NOK, Norge, gyldig i dag), 0 eller lavere gir null (se _shared/price.ts)
-  const price = pickValidPrice(xml);
+  const { price, reason: priceReason } = chooseValidPrice(xml);
 
   // Image URL — ONIX 3: <SupportingResource> with ResourceContentType 01
   // ONIX 2: <MediaFile> with MediaFileTypeCode 04 (front cover)
@@ -384,6 +384,7 @@ function parseOnix(xmlText: string, isbn: string): BookMetadata | null {
     publicationDate: publicationDate || null,
     format,
     price,
+    priceReason,
     description,
     imageUrl,
     genre,
@@ -404,6 +405,7 @@ interface BookMetadata {
   publicationDate: string | null;
   format: string;
   price: number | null;
+  priceReason: string | null; // årsak når price er null (choosePrice), f.eks. «ingen NOK-pris»
   description: string;
   imageUrl: string;
   genre: string;
