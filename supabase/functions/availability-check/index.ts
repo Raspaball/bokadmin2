@@ -4,8 +4,12 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
-import { getBokbasenToken } from "../_shared/bokbasen-auth.ts";
+import { BOKBASEN_ONIX_URL, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
+import { extractAvailabilityCode, extractPublishingDate } from "../_shared/onix.js";
+import {
+  availabilityDescription, availabilityMetafields, availabilityRule, needsContinuePolicy, type AvailabilityRule,
+} from "../_shared/availability.ts";
 
 const PAGE_SIZE = 250;
 const TIMEOUT_MS = 45_000; // Leave 15s headroom
@@ -29,13 +33,16 @@ interface ShopifyProduct {
   status: string;
   handle: string;
   bokIsbn?: { value: string } | null;
+  tilgjengelighet?: { value: string } | null;
+  utgivelsesdato?: { value: string } | null;
   variants: {
     edges: Array<{
       node: {
         id: string;
         barcode: string | null;
         price: string;
-        inventoryItem: { sku: string | null };
+        inventoryPolicy: string;
+        inventoryItem: { sku: string | null; tracked: boolean };
       };
     }>;
   };
@@ -76,13 +83,16 @@ async function fetchShopifyProductsPage(
             status
             handle
             ${BOK_ISBN_FIELD}
+            tilgjengelighet: metafield(namespace: "bok", key: "tilgjengelighet") { value }
+            utgivelsesdato: metafield(namespace: "bok", key: "utgivelsesdato") { value }
             variants(first: 1) {
               edges {
                 node {
                   id
                   barcode
                   price
-                  inventoryItem { sku }
+                  inventoryPolicy
+                  inventoryItem { sku tracked }
                 }
               }
             }
@@ -119,74 +129,108 @@ async function getShopifyProductCount(_userId: string | null): Promise<number> {
 
 // extractIsbn: felles regel i _shared/isbn.js (bok.isbn → strekkode → SKU → ISBN-handle)
 
-// ── ONIX List 65 → Shopify status mapping ───────────────────────────────────
-// Canonical source: src/app/utils/availabilityCodes.ts (frontend).
-// This Deno function cannot import from src/, so the logic is duplicated here.
-// Keep in sync with mapAvailabilityToShopifyStatus() in availabilityCodes.ts.
-//
-// ACTIVE:   20–23 (tilgjengelig)
-// ARCHIVED: 43=bekreftet utsolgt, 44=ikke vårt produkt, 45=rettighetstap, 46=trukket
-// DRAFT:    everything else (midlertidig/usikker utilgjengelighet)
-function mapAvailabilityToShopifyStatus(code: string): "ACTIVE" | "DRAFT" | "ARCHIVED" {
-  const num = parseInt(code, 10);
-  if (isNaN(num)) return "DRAFT";
-  if (num >= 20 && num <= 23) return "ACTIVE";
-  // Permanently unavailable: no longer supplied (43), withdrawn from sale (46), recalled (49)
-  // 44 = "Apply direct" and 45 = "Not sold separately" are NOT permanent → DRAFT
-  if (num === 43 || num === 46 || num === 49) return "ARCHIVED";
-  return "DRAFT";
+// ── ONIX List 65 → status, bok.tilgjengelighet og kjøpbarhet ────────────────
+// Regelen står i _shared/availability.ts (availabilityRule), felles med push og
+// CSV-eksporten. Koden og datoen leses med _shared/onix.js.
+
+interface OnixAvailability {
+  code: string | null;
+  /** Utgivelsesdato som YYYY-MM-DD, eller null */
+  date: string | null;
 }
 
-function availabilityStatusLabel(code: string): string {
-  const num = parseInt(code, 10);
-  if (isNaN(num)) return "unknown";
-  if (num >= 20 && num <= 23) return "available";
-  if (num === 43 || num === 44 || num === 45 || num === 46) return "permanently_unavailable";
-  if (num >= 30 && num <= 34) return "temporarily_unavailable";
-  if (num >= 40) return "not_available";
-  if (num === 1 || (num >= 9 && num <= 12)) return "not_yet_available";
-  return "unknown";
-}
-
-async function fetchBokbasenAvailability(isbn: string, userId: string | null): Promise<string | null> {
+/** Tilgjengelighetskode og utgivelsesdato fra Bokbasen, eller null når oppslaget feiler. */
+async function fetchBokbasenAvailability(isbn: string, userId: string | null): Promise<OnixAvailability | null> {
   const token = await getBokbasenToken(userId);
-  const res = await fetch(`https://api.bokbasen.io/metadata/export/onix/v2/${isbn}`, {
+  const res = await fetch(`${BOKBASEN_ONIX_URL}/${isbn}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-
   if (!res.ok) return null;
-
-  const xml = (await res.text())
-    .replace(/\s+xmlns[^"]*"[^"]*"/g, "")
-    .replace(/<(\w+:)/g, "<")
-    .replace(/<\/(\w+:)/g, "</");
-
-  const supplyBlocks = [...xml.matchAll(/<SupplyDetail[\s\S]*?<\/SupplyDetail>/gi)];
-  for (const s of supplyBlocks) {
-    const avail = s[0].match(/<ProductAvailability[^>]*>(\d+)<\/ProductAvailability>/i)?.[1];
-    if (avail) return avail;
-  }
-  return null;
+  const xml = await res.text();
+  return { code: extractAvailabilityCode(xml), date: extractPublishingDate(xml) };
 }
 
-async function updateShopifyProductStatus(
-  _userId: string | null,
-  productId: string,
-  newStatus: "ACTIVE" | "DRAFT" | "ARCHIVED"
-): Promise<boolean> {
-  try {
-    const { data } = await shopifyGraphQL<{ productUpdate: { userErrors: Array<unknown> } }>(
-      `mutation productUpdate($product: ProductUpdateInput!) {
+interface AvailabilityChanges {
+  status?: { from: string; to: string };
+  tilgjengelighet?: { from: string | null; to: string };
+  utgivelsesdato?: { from: string | null; to: string };
+  /** inventoryPolicy DENY → CONTINUE (sporet lager), slik at boka kan kjøpes uansett lager */
+  continuePolicy?: boolean;
+}
+
+/** Hva som må endres på produktet for å følge regelen. Tomt objekt = ingenting. */
+function availabilityChanges(product: ShopifyProduct, rule: AvailabilityRule, date: string | null): AvailabilityChanges {
+  const changes: AvailabilityChanges = {};
+  if (product.status !== rule.status) changes.status = { from: product.status || "ukjent", to: rule.status };
+  const currentTilg = product.tilgjengelighet?.value ?? null;
+  if (currentTilg !== rule.tilgjengelighet) changes.tilgjengelighet = { from: currentTilg, to: rule.tilgjengelighet };
+  const currentDate = product.utgivelsesdato?.value ?? null;
+  if (date && currentDate !== date) changes.utgivelsesdato = { from: currentDate, to: date };
+  if (needsContinuePolicy(rule, product.variants?.edges?.[0]?.node)) changes.continuePolicy = true;
+  return changes;
+}
+
+/** «status DRAFT → ACTIVE, tilgjengelighet → kommer, utgivelsesdato → 15.11.2026, salg uten lager» */
+function describeChanges(c: AvailabilityChanges): string {
+  const parts: string[] = [];
+  if (c.status) parts.push(`status ${c.status.from} → ${c.status.to}`);
+  if (c.tilgjengelighet) parts.push(`tilgjengelighet ${c.tilgjengelighet.from ?? "mangler"} → ${c.tilgjengelighet.to}`);
+  if (c.utgivelsesdato) parts.push(`utgivelsesdato ${c.utgivelsesdato.from ?? "mangler"} → ${c.utgivelsesdato.to}`);
+  if (c.continuePolicy) parts.push("salg uten lager (inventoryPolicy CONTINUE)");
+  return parts.join(", ");
+}
+
+/** Gjør endringene i Shopify. Kaster med Shopifys feilmelding hvis noe feiler. */
+async function applyAvailabilityChanges(
+  product: ShopifyProduct,
+  rule: AvailabilityRule,
+  date: string | null,
+  c: AvailabilityChanges,
+): Promise<void> {
+  const errs = (list: Array<{ message: string }> | undefined) => (list ?? []).map((e) => e.message).join(", ");
+
+  if (c.continuePolicy) {
+    const variantId = product.variants.edges[0].node.id;
+    const { data } = await shopifyGraphQL<{ productVariantsBulkUpdate: { userErrors: Array<{ message: string }> } }>(
+      `mutation variantPolicy($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+        productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+          productVariants { id inventoryPolicy }
+          userErrors { field message }
+        }
+      }`,
+      { productId: product.id, variants: [{ id: variantId, inventoryPolicy: "CONTINUE" }] },
+    );
+    const e = errs(data.productVariantsBulkUpdate?.userErrors);
+    if (e) throw new Error(`inventoryPolicy: ${e}`);
+  }
+
+  if (c.tilgjengelighet || c.utgivelsesdato) {
+    const { data } = await shopifyGraphQL<{ metafieldsSet: { userErrors: Array<{ message: string }> } }>(
+      `mutation availabilityMetafields($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
+          metafields { key value }
+          userErrors { field message }
+        }
+      }`,
+      { metafields: availabilityMetafields(product.id, rule, date) },
+    );
+    const e = errs(data.metafieldsSet?.userErrors);
+    if (e) throw new Error(`metafelt: ${e}`);
+  }
+
+  // Status sist: blir boka ACTIVE, er den da allerede kjøpbar og har metafeltene
+  if (c.status) {
+    const { data } = await shopifyGraphQL<{ productUpdate: { userErrors: Array<{ message: string }> } }>(
+      `mutation productStatus($product: ProductUpdateInput!) {
         productUpdate(product: $product) {
           product { id status }
           userErrors { field message }
         }
       }`,
-      { product: { id: productId, status: newStatus } }
+      { product: { id: product.id, status: rule.status } },
     );
-    return !data.productUpdate?.userErrors?.length;
-  } catch {
-    return false;
+    const e = errs(data.productUpdate?.userErrors);
+    if (e) throw new Error(`status: ${e}`);
   }
 }
 
@@ -285,15 +329,18 @@ async function processBatch(jobId: string) {
           continue;
         }
 
-        const expectedStatus = mapAvailabilityToShopifyStatus(bokbasenAvailability);
-        const statusLabel = availabilityStatusLabel(bokbasenAvailability);
-        const currentStatus = product.status;
+        const rule = availabilityRule(bokbasenAvailability.code);
+        const date = bokbasenAvailability.date;
+        const changes = availabilityChanges(product, rule, date);
 
-        if (currentStatus === expectedStatus) {
+        if (Object.keys(changes).length === 0) {
           skipped++;
           processed++;
           continue;
         }
+
+        // «Kommer 15.11.2026: ACTIVE, kan forhåndsbestilles (status DRAFT → ACTIVE, …)»
+        const what = `${availabilityDescription(rule, date)} (${describeChanges(changes)})`;
 
         if (mode === "analyze") {
           await supabase.from("sync_log").insert({
@@ -301,30 +348,33 @@ async function processBatch(jobId: string) {
             title: product.handle,
             action: "availability_check",
             status: "success",
-            message: `Avvik: Bokbasen kode ${bokbasenAvailability} (${statusLabel}) → bor vaere ${expectedStatus}, na: ${currentStatus || "ukjent"}`,
+            message: `Ville endret: ${what}`,
             shopify_id: product.id,
             job_id: jobId,
             user_id: userId,
           });
           succeeded++;
         } else {
-          const shopifyOk = await updateShopifyProductStatus(userId, product.id, expectedStatus);
+          let error: string | null = null;
+          try {
+            await applyAvailabilityChanges(product, rule, date, changes);
+          } catch (e) {
+            error = e instanceof Error ? e.message : String(e);
+          }
 
           await supabase.from("sync_log").insert({
             isbn,
             title: product.handle,
             action: "availability_update",
-            status: shopifyOk ? "success" : "error",
-            message: shopifyOk
-              ? `Status endret: ${currentStatus || "ukjent"} → ${expectedStatus} (Bokbasen kode ${bokbasenAvailability})`
-              : `Avvik funnet (${currentStatus} → ${expectedStatus}), men Shopify-oppdatering feilet`,
+            status: error ? "error" : "success",
+            message: error ? `Endring feilet: ${what}. ${error}` : `Endret: ${what}`,
             shopify_id: product.id,
             job_id: jobId,
             user_id: userId,
           });
 
-          if (shopifyOk) succeeded++;
-          else failed++;
+          if (error) failed++;
+          else succeeded++;
         }
       } catch (err) {
         failed++;

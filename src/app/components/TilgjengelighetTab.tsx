@@ -240,7 +240,7 @@ export function TilgjengelighetTab() {
         <CardHeader>
           <CardTitle>Tilgjengelighetssjekk</CardTitle>
           <CardDescription>
-            Sjekker Bokbasen-tilgjengelighet og oppdaterer Shopify-produktstatus
+            Sjekker tilgjengelighet i Bokbasen og oppdaterer status, bok.tilgjengelighet og bok.utgivelsesdato i Shopify. Kommende og midlertidig utsolgte bøker er aktive og kan kjøpes
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">

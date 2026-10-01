@@ -1,12 +1,16 @@
 // ONIX List 65 — ProductAvailability
-// Canonical source for all availability code logic in Bokadmin.
-// The edge function (availability-check/index.ts) has its own copy of the
-// mapping functions (Deno can't import from src/), but must stay in sync.
+// Frontend-kopi av regelen i supabase/functions/_shared/availability.ts
+// (Vite-koden importerer ikke fra supabase/). Hold dem like.
+// Full referanse: https://ns.editeur.org/onix/nb/65
+//
+// Regel (pakke C, 2026-10-02): kommende (10–12) og midlertidig utsolgte (30–34)
+// bøker er ACTIVE og kan kjøpes, med bok.tilgjengelighet = kommer /
+// midlertidig_utsolgt. 43, 46, 49 → ARCHIVED. Alt annet → DRAFT.
 
 export type ShopifyStatus = "ACTIVE" | "DRAFT" | "ARCHIVED";
 
-// ── UI groups ────────────────────────────────────────────────────────────────
-// Each group maps to exactly one Shopify status.
+// ── UI groups (importfilteret) ───────────────────────────────────────────────
+// Hver gruppe gir én status i Shopify.
 
 export const AVAILABILITY_OPTIONS = [
   {
@@ -18,28 +22,31 @@ export const AVAILABILITY_OPTIONS = [
   },
   {
     key: "coming",
-    label: "Kommer / Ikke utgitt",
-    shopifyStatus: "DRAFT" as ShopifyStatus,
-    codes: ["01", "09", "10", "11", "12"],
-    defaultOn: false,
+    label: "Kommer (forhåndsbestilling)",
+    shopifyStatus: "ACTIVE" as ShopifyStatus,
+    codes: ["10", "11", "12"],
+    defaultOn: true,
   },
   {
     key: "temporary",
-    label: "Midlertidig utilgjengelig",
+    label: "Midlertidig utsolgt",
+    shopifyStatus: "ACTIVE" as ShopifyStatus,
+    codes: ["30", "31", "32", "33", "34"],
+    defaultOn: true,
+  },
+  {
+    key: "not_available",
+    label: "Ikke tilgjengelig",
     shopifyStatus: "DRAFT" as ShopifyStatus,
-    // 44 = Apply direct (kan bestilles direkte fra forlaget — ikke permanent)
-    // 45 = Not sold separately (selges kun i sett — ikke permanent)
-    // 50 = Not sold as set
-    codes: ["30", "31", "32", "33", "34", "40", "41", "42", "44", "45", "47", "48", "50", "51", "52"],
+    // 01 = vil ikke utkomme, 09 = ikke utkommet (ingen dato), 40–42, 44, 45, 47, 48, 50–52
+    codes: ["01", "09", "40", "41", "42", "44", "45", "47", "48", "50", "51", "52"],
     defaultOn: false,
   },
   {
     key: "permanent",
-    label: "Permanent utilgjengelig",
+    label: "Utgått",
     shopifyStatus: "ARCHIVED" as ShopifyStatus,
-    // 43 = No longer supplied by supplier
-    // 46 = Withdrawn from sale
-    // 49 = Recalled
+    // 43 = ikke lenger distribuert, 46 = trukket fra salg, 49 = tilbakekalt
     codes: ["43", "46", "49"],
     defaultOn: false,
   },
@@ -70,14 +77,13 @@ export function availabilityLabel(code: string | null | undefined): string {
   return group ? group.label : `Kode ${code}`;
 }
 
-/** Maps an ONIX List 65 code to a Shopify product status.
- *  Mirror of mapAvailabilityToShopifyStatus() in availability-check/index.ts — keep in sync.
- *  ARCHIVED = truly permanent: 43 (no longer supplied), 46 (withdrawn), 49 (recalled).
- *  44 (apply direct) and 45 (not sold separately) are NOT permanent → DRAFT. */
+/** ONIX List 65-kode → status i Shopify. Kopi av availabilityRule() i _shared/availability.ts. */
 export function mapAvailabilityToShopifyStatus(code: string | null | undefined): ShopifyStatus {
-  const num = parseInt(code ?? "", 10);
-  if (isNaN(num)) return "DRAFT";
+  const c = String(code ?? "").trim();
+  const num = /^\d{1,2}$/.test(c) ? parseInt(c, 10) : NaN;
   if (num >= 20 && num <= 23) return "ACTIVE";
+  if (num >= 10 && num <= 12) return "ACTIVE";
+  if (num >= 30 && num <= 34) return "ACTIVE";
   if (num === 43 || num === 46 || num === 49) return "ARCHIVED";
   return "DRAFT";
 }
