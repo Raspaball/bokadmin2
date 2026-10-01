@@ -285,7 +285,8 @@ Oppgaven: `oppgaver/pakke-a2-prissikring.md`.
 | 1. Aldri pris 0 | **Ferdig** (1ff7479). `shopify` og `bokbasen` er deployet og testet i Testbutikk (se over). Frontend (Import-siden) er ikke ute ennå: krever push til GitHub |
 | 2. Sperre mot store prishopp | **Ferdig** (3468aea, pushet). `price-update` og `shopify` er deployet, og nettsiden er ute. Migrasjonen `20261001120000_price_guard.sql` er kjørt i 2.0. Testet i Testbutikk (se under) |
 | 3. Egen pris og tilbud | **Ferdig**, deployet og testet (se under) |
-| 4–6 og «Til slutt» | Ikke startet |
+| 4. Tryggere standard og planlegging | **Ferdig**, deployet og testet (se under). Etter eiers valg er **ingen planlagte oppgaver lagt inn** |
+| 5–6 og «Til slutt» | Ikke startet |
 
 Del 2, det som er laget:
 - `_shared/price-guard.ts`: `checkPriceChange(gammel, ny, grense)` gir `same` (avvik under 0,01 kr), `set` (innenfor grensen), `fix` (gammel pris mangler eller er 0: settes) eller `approval` (over grensen: settes ikke). Akkurat på grensen settes. Tester: `scripts/price-guard.test.mjs`.
@@ -317,6 +318,20 @@ Testet i Testbutikk 2026-10-01 (sikkerhetskopi av alle priser før testene, samm
 - Tester: `scripts/price-lock.test.mjs`.
 
 Testet i Testbutikk: Avkledd med `egen_pris` = true og pris 111, Utyske med `compareAtPrice` 499 og pris 400. Prisjobb (oppdatering): begge hoppet over med riktig melding, 0 endret. Push med Bokbasen-pris 449: prisene stod, `priceNote` som over. Satt tilbake (metafeltet slettet, `compareAtPrice` fjernet, 449), og alle 65 produkter er like utgangspunktet.
+
+### Del 4: tryggere standard, sammendrag og planlegging
+
+- `price-update/start` uten `mode` (eller med ukjent verdi) gir `analyze`. Bare `mode: "update"` endrer priser. Det samme gjelder en jobb uten `config.mode`. Nettsiden sender alltid `mode` (`priceJobs.start(mode)` har ikke lenger standardverdi).
+- **Sammendrag** (`_shared/price-summary.ts`): prisjobben teller endret / samme pris / krever godkjenning / hoppet over (egen pris, tilbud, uten ISBN) / manglet godkjent pris (per årsak) / feil. Tallene ligger i `config.counts` mellom pulsene og i `result.counts` + `result.summary` når jobben er ferdig. Oppdatering-siden viser `result.summary` i «Siste oppdateringer» og i meldingen når jobben er ferdig.
+- Rettet: ved feil midt i en puls rulles markøren tilbake til pulsstart, men tallene ble lagret med økningene, så produktene ble telt to ganger. Nå lagres tallene fra pulsstart.
+- **Planlegging** (migrasjon `20261001130000_scheduled_tasks_mode_oslo.sql`, kjørt i 2.0): `run-scheduled-tasks` henter fortsatt URL og nøkkel fra Vault (`project_url`, `anon_key`), og
+  - sender `mode` fra `scheduled_tasks.config.mode` for prisjobber (uten mode: `analyze`). Før ble ingen mode sendt, og alle planlagte prisjobber ble oppdateringer.
+  - regner `next_run_at` i Europe/Oslo (før: UTC, altså 05:00 norsk sommertid).
+  - venter (flytter ikke `next_run_at`) mens en prisjobb for samme bruker er `running`/`paused`/`pending`, og starter høyst én prisjobb per minutt, med oppdatering foran sjekk. Før fikk den andre 409 og forsvant stille.
+- Oppdatering-siden: nye planlagte oppgaver får valget «Sjekk (endrer ingen priser)» / «Oppdater priser i Shopify» (`config.mode`), og lista viser modus og om oppgaven er av. Lista viser bare prisoppgaver.
+- **Ingen planlagte oppgaver er lagt inn** (eiers valg 2026-10-01). Forslaget var «Nattlig prissjekk» `0 3 * * *` `{"mode":"analyze"}` (på) og «Ukentlig prisoppdatering» `0 3 * * 1` `{"mode":"update"}` (av, slås på ved live). Kan legges inn fra Oppdatering-siden. NB: en ny oppgave med `next_run_at = NULL` kjører innen ett minutt.
+
+Testet: cron-løkka kjørt i en transaksjon som ble rullet tilbake, med to midlertidige oppgaver (oppdatering og sjekk, begge forfalt). Bare oppdateringen ble sendt (`{"mode":"update","user_id":…}`), med neste kjøring 2026-10-05 01:00 UTC (mandag 03:00 Oslo). Sjekken ventet. Ingen oppgaver eller HTTP-kall ble igjen. `price-update/start` med `{}`: `mode` = `analyze`, sammendrag «0 ville fått ny pris, 43 samme pris, 0 ville krevd godkjenning, hoppet over 22 (0 egen pris, 0 tilbud, 22 uten ISBN), 0 manglet godkjent pris, 0 feil».
 
 ## Funksjoner testet i 2.0 for første gang (2026-09-30)
 

@@ -716,7 +716,8 @@ export const priceApprovals = {
 };
 
 export const priceJobs = {
-  async start(mode: "analyze" | "update" = "update"): Promise<{ jobId: string }> {
+  // mode sendes alltid eksplisitt. Uten mode gjør serveren bare en sjekk.
+  async start(mode: "analyze" | "update"): Promise<{ jobId: string }> {
     const res = await callEdgeFunction("price-update/start", {
       method: "POST",
       body: JSON.stringify({ mode }),

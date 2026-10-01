@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import { TilgjengelighetTab } from './TilgjengelighetTab';
 import { PrisGodkjenning } from './PrisGodkjenning';
 
+// Tidene er norsk tid (Europe/Oslo), se run-scheduled-tasks i pg_cron.
 const CRON_PRESETS = [
   { label: 'Daglig kl 03:00', value: '0 3 * * *' },
   { label: 'Daglig kl 06:00', value: '0 6 * * *' },
@@ -42,6 +43,7 @@ export function Oppdatering() {
   const [showAddTask, setShowAddTask] = useState(false);
   const [newTaskName, setNewTaskName] = useState('');
   const [newTaskCron, setNewTaskCron] = useState(CRON_PRESETS[0].value);
+  const [newTaskMode, setNewTaskMode] = useState<'analyze' | 'update'>('analyze');
 
   // Job log (per job)
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
@@ -89,7 +91,7 @@ export function Oppdatering() {
   const loadTasks = async () => {
     try {
       const data = await scheduledTasks.getAll();
-      setTasks(data);
+      setTasks(data.filter(t => t.type === 'price_update'));
     } catch {
       // ignore
     }
@@ -167,9 +169,12 @@ export function Oppdatering() {
           pollRef.current = null;
           loadRecentJobs();
           loadLog();
-          const mode = (job.config as { mode?: string })?.mode || 'update';
+          const mode = (job.config as { mode?: string })?.mode || 'analyze';
+          const summary = (job.result as { summary?: string })?.summary;
           if (job.status === 'completed') {
-            if (mode === 'analyze') {
+            if (summary) {
+              toast.success(`${mode === 'analyze' ? 'Analyse' : 'Prisoppdatering'} fullfort: ${summary}`);
+            } else if (mode === 'analyze') {
               toast.success(`Analyse fullfort: ${job.succeeded} avvik funnet, ${job.skipped} uendret`);
             } else {
               toast.success(`Prisoppdatering fullfort: ${job.succeeded} oppdatert, ${job.skipped} uendret`);
@@ -231,6 +236,7 @@ export function Oppdatering() {
         name: newTaskName,
         type: 'price_update',
         cron_expr: newTaskCron,
+        config: { mode: newTaskMode },
         enabled: true,
       });
       toast.success('Planlagt oppgave opprettet');
@@ -264,7 +270,7 @@ export function Oppdatering() {
   const progress = activeJob && activeJob.total_items > 0
     ? Math.min(100, Math.round((activeJob.processed / activeJob.total_items) * 100))
     : 0;
-  const activeMode = activeJob ? ((activeJob.config as { mode?: string })?.mode || 'update') : null;
+  const activeMode = activeJob ? ((activeJob.config as { mode?: string })?.mode || 'analyze') : null;
 
   return (
     <div className="space-y-6">
@@ -411,7 +417,7 @@ export function Oppdatering() {
                 .filter(j => j.status === 'completed' || j.status === 'failed')
                 .slice(0, 5)
                 .map(job => {
-                  const mode = (job.config as { mode?: string })?.mode || 'update';
+                  const mode = (job.config as { mode?: string })?.mode || 'analyze';
                   return (
                   <div key={job.id} className="rounded-lg border">
                     <div className="flex items-center gap-3 p-3">
@@ -434,8 +440,10 @@ export function Oppdatering() {
                         <p className="text-xs text-gray-500">
                           {new Date(job.created_at).toLocaleString('nb-NO')}
                           {' — '}
-                          {job.processed} sjekket, {job.succeeded} {mode === 'analyze' ? 'avvik' : 'endret'}, {job.skipped} uendret
-                          {job.failed > 0 && `, ${job.failed} feilet`}
+                          {job.processed} sjekket
+                          {(job.result as { summary?: string })?.summary
+                            ? `: ${(job.result as { summary?: string }).summary}`
+                            : <>, {job.succeeded} {mode === 'analyze' ? 'avvik' : 'endret'}, {job.skipped} uendret{job.failed > 0 && `, ${job.failed} feilet`}</>}
                         </p>
                       </div>
                       <Button
@@ -530,6 +538,17 @@ export function Oppdatering() {
                   ))}
                 </select>
               </div>
+              <div>
+                <label className="text-sm font-medium">Modus</label>
+                <select
+                  className="mt-1 w-full border rounded-md px-3 py-2 text-sm"
+                  value={newTaskMode}
+                  onChange={e => setNewTaskMode(e.target.value as 'analyze' | 'update')}
+                >
+                  <option value="analyze">Sjekk (endrer ingen priser)</option>
+                  <option value="update">Oppdater priser i Shopify</option>
+                </select>
+              </div>
               <div className="flex gap-2">
                 <Button size="sm" onClick={handleAddTask}>Opprett</Button>
                 <Button size="sm" variant="outline" onClick={() => setShowAddTask(false)}>Avbryt</Button>
@@ -560,6 +579,8 @@ export function Oppdatering() {
                       <p className="text-sm font-medium">{task.name}</p>
                       <p className="text-xs text-gray-500">
                         {CRON_PRESETS.find(p => p.value === task.cron_expr)?.label || task.cron_expr}
+                        {' · '}{(task.config as { mode?: string })?.mode === 'update' ? 'Oppdater priser' : 'Sjekk'}
+                        {!task.enabled && ' · av'}
                         {task.last_run_at && (
                           <span className="ml-2">
                             Siste: {new Date(task.last_run_at).toLocaleString('nb-NO')}

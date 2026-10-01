@@ -9,6 +9,7 @@ import { choosePrice, type PriceChoice } from "../_shared/price.ts";
 import { approvalMessage, checkPriceChange, fixMessage } from "../_shared/price-guard.ts";
 import { getMaxPriceChangePct, recordPendingApproval } from "../_shared/price-approvals.ts";
 import { EGEN_PRIS_FIELD, priceLock, priceLockMessage } from "../_shared/price-lock.ts";
+import { countMissing, loadCounts, summarizeCounts } from "../_shared/price-summary.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 
 const PAGE_SIZE = 250;
@@ -212,13 +213,18 @@ async function processBatch(jobId: string) {
   const cursor: string | null = job.config?.shopify_cursor || null;
   const pageStartIndex: number = job.config?.page_start_index || 0;
   const userId: string | null = job.user_id || null;
-  const mode: string = job.config?.mode || "update";
+  // Uten mode: sjekk. Bare en eksplisitt «update» endrer priser.
+  const mode: "analyze" | "update" = job.config?.mode === "update" ? "update" : "analyze";
   // Sperre mot store prishopp (se _shared/price-guard.ts)
   const maxPct = await getMaxPriceChangePct(userId);
   let succeeded = job.succeeded || 0;
   let failed = job.failed || 0;
   let skipped = job.skipped || 0;
   let processed = job.processed || 0;
+  // Tellinger til jobbsammendraget (se _shared/price-summary.ts). Lagres i
+  // config.counts mellom pulsene; ved feil brukes tallene fra pulsstart.
+  const countsAtStart = loadCounts(job.config?.counts);
+  const counts = loadCounts(job.config?.counts);
 
   try {
     const page = await fetchShopifyProductsPage(userId, cursor);
@@ -244,7 +250,7 @@ async function processBatch(jobId: string) {
           failed,
           skipped,
           current_isbn: null,
-          config: { ...job.config, shopify_cursor: cursor, page_start_index: i },
+          config: { ...job.config, shopify_cursor: cursor, page_start_index: i, counts },
         }).eq("id", jobId);
         return;
       }
@@ -259,6 +265,7 @@ async function processBatch(jobId: string) {
       }).eq("id", jobId);
 
       if (!isbn || !variantId) {
+        counts.skippedNoIsbn++;
         skipped++;
         processed++;
         continue;
@@ -277,6 +284,8 @@ async function processBatch(jobId: string) {
           job_id: jobId,
           user_id: userId,
         });
+        if (lock === "egen pris") counts.skippedOwnPrice++;
+        else counts.skippedOffer++;
         skipped++;
         processed++;
         continue;
@@ -286,6 +295,7 @@ async function processBatch(jobId: string) {
         const { price: bokbasenPrice, reason } = await fetchBokbasenPrice(isbn, userId);
 
         if (bokbasenPrice === null) {
+          countMissing(counts, reason ?? "kunne ikke hente pris fra Bokbasen");
           failed++;
           await supabase.from("sync_log").insert({
             isbn,
@@ -303,6 +313,7 @@ async function processBatch(jobId: string) {
         }
 
         if (bokbasenPrice <= 0) {
+          countMissing(counts, "pris 0 eller lavere");
           failed++;
           await supabase.from("sync_log").insert({
             isbn,
@@ -321,6 +332,7 @@ async function processBatch(jobId: string) {
         const shopifyPrice = currentPrice ? parseFloat(currentPrice) : null;
         const change = checkPriceChange(shopifyPrice, bokbasenPrice, maxPct);
         if (change.action === "same") {
+          counts.same++;
           skipped++;
           processed++;
           continue;
@@ -340,6 +352,8 @@ async function processBatch(jobId: string) {
             job_id: jobId,
             user_id: userId,
           });
+          if (change.action === "approval") counts.approval++;
+          else counts.changed++;
           succeeded++;
         } else if (change.action === "approval") {
           // Over grensen: prisen endres ikke, men legges til godkjenning
@@ -365,6 +379,7 @@ async function processBatch(jobId: string) {
             job_id: jobId,
             user_id: userId,
           });
+          counts.approval++;
           skipped++;
         } else {
           // Update mode: actually change the price in Shopify
@@ -383,10 +398,11 @@ async function processBatch(jobId: string) {
             user_id: userId,
           });
 
-          if (shopifyOk) succeeded++;
-          else failed++;
+          if (shopifyOk) { succeeded++; counts.changed++; }
+          else { failed++; counts.errors++; }
         }
       } catch (err) {
+        counts.errors++;
         failed++;
         console.error(`Error processing ${isbn}:`, err);
       }
@@ -407,11 +423,12 @@ async function processBatch(jobId: string) {
         ...job.config,
         shopify_cursor: page.endCursor,
         page_start_index: 0,
+        counts,
       },
       ...(isComplete ? {
         completed_at: new Date().toISOString(),
         total_items: processed,
-        result: { total: processed, processed, succeeded, failed, skipped },
+        result: { total: processed, processed, succeeded, failed, skipped, counts, summary: summarizeCounts(counts, mode) },
       } : {}),
     }).eq("id", jobId);
 
@@ -424,11 +441,13 @@ async function processBatch(jobId: string) {
     await supabase.from("jobs").update({
       status: isFatal ? "failed" : "paused",
       error_message: errMsg,
-      processed,
-      succeeded,
-      failed,
-      skipped,
-      config: { ...job.config, shopify_cursor: cursor, page_start_index: pageStartIndex },
+      // Markøren rulles tilbake til pulsstart, så tallene gjør det også (ellers
+      // telles produktene i denne pulsen to ganger når den kjøres på nytt)
+      processed: job.processed || 0,
+      succeeded: job.succeeded || 0,
+      failed: job.failed || 0,
+      skipped: job.skipped || 0,
+      config: { ...job.config, shopify_cursor: cursor, page_start_index: pageStartIndex, counts: countsAtStart },
     }).eq("id", jobId);
   }
 }
@@ -534,7 +553,8 @@ serve(async (req) => {
         });
       }
 
-      const mode = (body.mode === "analyze" || body.mode === "update") ? body.mode : "update";
+      // Uten mode (eller ukjent): sjekk. Bare en eksplisitt «update» endrer priser.
+      const mode = body.mode === "update" ? "update" : "analyze";
       const totalProducts = await getShopifyProductCount(userId);
 
       const { data: job, error } = await supabase
