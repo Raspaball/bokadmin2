@@ -146,10 +146,10 @@ Both `price-update` and `availability-check` share the same job pattern:
 **ONIX List 58 → Bokbasen-pris (`choosePrice()` i `_shared/price.ts`, brukt av import og price-update):**
 Full referanse: https://ns.editeur.org/onix/nb/58 | Bokbasen-dok: https://bokbasen.jira.com/wiki/spaces/api/pages/3049947145/Fixed+prices+in+Onix+from+Bokbasen
 Norge har fastprislov for bøker fra 1. januar 2024. Norske bøker har 0% mva, så eks/inkl-beløp er like i praksis.
-Prioritetsrekkefølge i `fetchBokbasenPrice()` (høyest prioritet først):
+Prioritetsrekkefølge i `choosePrice()` (høyest prioritet først, priser med mva før priser uten — endret i pakke A2 del 5):
 - **04** Fastpris inkl. mva. — bunden pris etter fastprisloven (høyest prioritet)
-- **03** Fastpris uten mva.
 - **02** Veiledende utsalgspris inkl. mva.
+- **03** Fastpris uten mva.
 - **01** Veiledende utsalgspris uten mva.
 - Fallback: første pris med beløp uansett type
 - **NB**: Ikke ta første prisblokk i XML-rekkefølge — iterer alle og velg etter prioritet

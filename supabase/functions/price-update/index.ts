@@ -129,7 +129,7 @@ async function getShopifyProductCount(_userId: string | null): Promise<number> {
 // extractIsbn: felles regel i _shared/isbn.js (bok.isbn → strekkode → SKU → ISBN-handle)
 
 // Pris fra Bokbasen etter regelen i _shared/price.ts (NOK, Norge, gyldig i dag,
-// 04 > 03 > 02 > 01 > andre). price = null med årsak når ingen pris godkjennes.
+// 04 > 02 > 03 > 01 > andre). price = null med årsak når ingen pris godkjennes.
 async function fetchBokbasenPrice(isbn: string, userId: string | null): Promise<PriceChoice> {
   const token = await getBokbasenToken(userId);
   const res = await fetch(`${BOKBASEN_ONIX_URL}/${isbn}`, {

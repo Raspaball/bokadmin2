@@ -47,9 +47,14 @@ const priceJob = (xml) => {
 
 const cases = [
   // [navn, xml, forventet pris, forventet årsak]
-  // Prioritet (uendret fra prisjobben i gamle Bokadmin)
+  // Prioritet: 04 > 02 > 03 > 01 > andre (med mva før uten mva)
   ["3: bare 01", onix3([p3("01", "349")]), 349],
   ["3: 02 og 04 med ulike beløp: 04 vinner", onix3([p3("02", "399"), p3("04", "449")]), 449],
+  ["3: 03 og 02: 02 vinner (med mva før uten)", onix3([p3("03", "299"), p3("02", "399")]), 399],
+  ["3: 03 og 04: 04 vinner", onix3([p3("03", "299"), p3("04", "449")]), 449],
+  ["3: 01 og 03: 03 vinner", onix3([p3("01", "349"), p3("03", "299")]), 299],
+  ["3: alle fire: 04", onix3([p3("01", "1"), p3("03", "3"), p3("02", "2"), p3("04", "4")]), 4],
+  ["3: 01 og annen type: 01", onix3([p3("05", "199"), p3("01", "349")]), 349],
   ["3: bare 03", onix3([p3("03", "299")]), 299],
   ["3: ingen type", onix3([p3(null, "199")]), 199],
   ["3: beløp 0 godtas ikke", onix3([p3("04", "0")]), null],

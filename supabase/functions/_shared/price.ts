@@ -3,7 +3,10 @@
 // testene i scripts/ kan importere fila direkte med Node.
 //
 // Bokadmin 2.0 har én prisregel, brukt av både import og prisjobben.
-// Prioriteten er prisjobbens fra gamle Bokadmin (04 > 03 > 02 > 01 > andre).
+// Prioritet: 04 > 02 > 03 > 01 > andre, altså priser med mva før priser uten
+// (04 fastpris inkl. mva, 02 veiledende inkl. mva, 03 fastpris uten mva,
+// 01 veiledende uten mva). For bøker (0 % mva) gir det samme beløp. Gamle
+// Bokadmin brukte 04 > 03 > 02 > 01 (endret i pakke A2 del 5).
 // I tillegg godtas bare priser som (bevisst strengere enn gamle Bokadmin):
 //   - er i NOK: CurrencyCode i Price, ellers DefaultCurrencyCode i headeren
 //     (ONIX 2.1), ellers regnes prisen som NOK. Aldri annen valuta som reserve.
@@ -19,7 +22,7 @@
 // `xml` kan ha navnerom (de fjernes her). Funnene fra rå ONIX som regelen
 // bygger på står i BOKADMIN2_OPPSETT.md («Valuta og gyldighetsdato»).
 
-const PRIORITY: Record<string, number> = { "04": 1, "03": 2, "02": 3, "01": 4 };
+const PRIORITY: Record<string, number> = { "04": 1, "02": 2, "03": 3, "01": 4 };
 
 export type PriceRejectReason = "ingen pris" | "ingen NOK-pris" | "ingen pris for Norge" | "ingen gyldig pris i dag";
 
