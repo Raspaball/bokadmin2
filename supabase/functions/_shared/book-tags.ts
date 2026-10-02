@@ -9,12 +9,13 @@
 //     tittelen (hele eller hovedtittelen før kolon), og
 //   - delene av et navn eller en tittel som ble delt på komma, men bare når alle
 //     delene finnes som tagger (da er det sikkert den gamle push som laget dem).
-// Sammenligningen er uten store/små bokstaver og ekstra mellomrom.
+// Sammenligningen er uten store/små bokstaver, ekstra mellomrom og diakritiske
+// tegn («Sūnzi» = «Sunzi», «Mélissa» = «Melissa»).
 
 import { mainTitle } from "./handle.js";
 import { isProtectedTag } from "./protected.ts";
 
-const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+const norm = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").replace(/\s+/g, " ").trim().toLowerCase();
 
 /** «Nina Brochmann» → «Brochmann, Nina» (siste ord som etternavn). */
 function invertName(name: string): string {

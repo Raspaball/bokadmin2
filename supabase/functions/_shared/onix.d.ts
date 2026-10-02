@@ -9,6 +9,7 @@ export declare function extractPublisher(xml: string): string;
 export declare function decodeXmlText(text: string): string;
 export declare function uninvertName(inverted: string): string;
 export declare function extractContributors(xml: string): { authors: string[]; role: string | null };
+export declare function extractInvertedNames(xml: string): string[];
 export declare function extractAvailabilityCode(xml: string): string | null;
 export declare function extractProductForm(xml: string): { form: string | null; details: string[] };
 export declare function extractPages(xml: string): number | null;

@@ -244,6 +244,26 @@ export function extractContributors(xml) {
 }
 
 /**
+ * Alle bidragsyternavn slik de står i ONIX som «Etternavn, Fornavn»
+ * (PersonNameInverted, ellers KeyNames, NamesBeforeKey). Brukes til å kjenne
+ * igjen gamle forfattertagger med sammensatte etternavn («Hove Christensen, Mia»),
+ * der snuing av «Fornavn Etternavn» gir feil skille.
+ * @param {string} xml
+ * @returns {string[]}
+ */
+export function extractInvertedNames(xml) {
+  const out = [];
+  for (const m of stripNamespaces(xml).matchAll(/<Contributor(?:\s[^>]*)?>[\s\S]*?<\/Contributor>/gi)) {
+    const tag = (t) => decodeXmlText(m[0].match(new RegExp("<" + t + "(?:\\s[^>]*)?>([\\s\\S]*?)</" + t + ">", "i"))?.[1] ?? "").trim();
+    const inverted = tag("PersonNameInverted");
+    const key = tag("KeyNames"), before = tag("NamesBeforeKey");
+    const name = inverted || (key && before ? `${key}, ${before}` : "");
+    if (name && !out.includes(name)) out.push(name);
+  }
+  return out;
+}
+
+/**
  * Tilgjengelighetskoden (ONIX List 65): første <ProductAvailability> i en
  * <SupplyDetail>, eller null. Samme lesing som importen og tilgjengelighets-
  * sjekken har brukt; regelen for koden står i availability.ts.

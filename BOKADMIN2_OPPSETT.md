@@ -411,6 +411,31 @@ Anslag for 11 000 bøker: ONIX ~17 min første gang (deretter fra cache i 7 dage
 - Videresending (`--redirects`) lages først når Eirik har slettet duplikatet.
 - Jobbene (book-update side/bulk, pris, tilgjengelighet, sjangersynk, samlingstagging) skanner katalogen én gang per jobb og hopper over ISBN med flere produkter: 20 produkter (10 × 2) i hver jobb, med «DUPLIKAT» i sammendraget. Push stopper med feilmelding. Handle-migreringen blokkerer som før.
 
+### Del 4: generalprøven, runde 1 (Testbutikk, 442 produkter, 02.10.2026)
+Sikkerhetskopi av alle produkter (alle felt, metafelt, omslag, varianter) og videresendinger før hvert steg: `scripts/out/backup-katalog.mjs` → `scripts/out/generalprove/` (git-ignorert). `--diff` viser hvilke felt hvert steg endret.
+
+| Steg | Tid | Resultat |
+|---|---|---|
+| Duplikater ryddet (3b) | – | 10 slettet av Eirik, 10 videresendinger ISBN → produktet som beholdes, alle kontrollert |
+| 1a. Bokgruppekoder fra Bokbasen | 176 s | 395 funnet, 43 fra cache, 2 uten kode, 0 feil |
+| 1b. bkg-tagger og samlinger | 341 s | 247 tagget, 188 hadde fra før, 6 beskyttet; 78 samlinger laget, 25 fantes. Diff: bare `tags` endret |
+| 2. Handles | 68 s | 369 endret i én bulk-operasjon, 0 feil, ingen suffiks. Alle 369 har riktig 301 (kontrollert alle, ikke stikkprøver). 67 egendefinerte og 6 beskyttede hoppet over. 21 uten forfatter i handle: ingen av dem har A01 i ONIX (8 uten bidragsytere, 13 bare redaktør o.l.) |
+| 3a. Bokdata, sjekk (bulk) | 11 s | 436 ville blitt endret, 6 beskyttet; 83 beskrivelser, 13 metabeskrivelser og 1 SEO-tittel endret manuelt og ikke overskrevet |
+| 3b. Bokdata, oppdatering (bulk) | 219 s | 436 endret, 0 feil, 2 bulk-operasjoner. Diff: bare feltene jobben eier; handle, tittel, status og pris uendret. Ny sjekk etterpå: 0 å endre. 20 tilfeldige bøker kontrollert felt for felt: ingen avvik |
+| 3c. Rettelse av taggregelen | 22 s | 4 bøker hadde igjen forfatterbiter (sammensatte etternavn, diakritiske tegn). Rettet i `cleanBookTags` + `extractInvertedNames()`; 3 ryddet. «Sūnzi» står igjen i Testbutikk (ONIX: «Sun, Zi»; i live fanges den av gammel productType) |
+| 4a. Tilgjengelighet, sjekk | 194 s | 435 ville endret |
+| 4b. Tilgjengelighet, oppdatering | 336 s | 435 endret, 0 feil: 372 tilgjengelig, 35 kommer, 17 midlertidig utsolgt, 11 ikke tilgjengelig. **11 statusendringer:** 10 ACTIVE → DRAFT (7 engelske bøker med kode 40, bl.a. Steve Jobs, Freakonomics, Mindset) og 1 ARCHIVED → DRAFT |
+| 5. Pris, sjekk | 125 s | 1 ville fått ny pris (Prizon UZ 399 → 299, −25 %), 1 krever godkjenning (testproduktet T6), 433 samme pris, 1 uten pris i Bokbasen, 6 beskyttet. **Ikke oppdatert** |
+| 6. Tagger | – | 367 har bare bkg-*, 68 har egne merker (sakpr, Faglitteratur, skjoenn …), 1 uten tagger. 1 forfattertagg igjen (se 3c) |
+
+Beskyttede produkter: alle 6 like i alle felt (også `updatedAt`) fra start til slutt. Produktet med `oppgaver` (T6) ble behandlet som vanlig. Ingen feil i noen jobb.
+
+**Må avgjøres før live:**
+- Engelske bøker med kode 40 i Bokbasen blir utkast. Butikken kjøper dem trolig andre steder. Unntak (f.eks. tagg eller bare norske ISBN-er), eller godta?
+- Arkiverte produkter blir utkast når koden ikke er 43/46/49. Skal jobben la ARCHIVED stå?
+- 68 produkter med egendefinert handle (bl.a. de 10 som ble beholdt etter duplikatene) får ikke ny handle.
+- Appen trenger `read_orders` og `read_all_orders` for duplikatregelen i live.
+
 ## Pakke C: kommende og midlertidig utsolgte bøker (2026-10-02)
 
 Oppgaven: `oppgaver/pakke-c-tilgjengelighet.md`. Beslutning (Eirik): kommende og midlertidig utsolgte bøker skal være synlige og kunne kjøpes, ikke utkast (utkast gir 404, og Google mister siden akkurat når kommende bøker gir søketrafikk). Prisregelen (List 58) er ikke endret.

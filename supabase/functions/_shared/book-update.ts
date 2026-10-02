@@ -6,7 +6,7 @@
 //
 // Endrer aldri pris, status, tilgjengelighet, handle eller produkttittel.
 
-import { extractDescription, extractPublisher, extractTitle } from "./onix.js";
+import { extractDescription, extractInvertedNames, extractPublisher, extractTitle } from "./onix.js";
 import { bookDescription, bookFieldsFromOnix, bookMetafields, canReplaceDescription, sameMetafieldValue } from "./book-standard.ts";
 import { bookSeo, decideSeo, legacySeo, parseSeoAuto, seoMetafields } from "./book-seo.ts";
 import { coverAlt, coverChanges, coverFilename, fileNameFromUrl, type CoverChange } from "./book-cover.ts";
@@ -147,7 +147,10 @@ export function planBookUpdate(product: ShopifyBookProduct, xml: string): BookUp
   }
 
   // Tagger (del 7): fjern forfatter og tittel, rør ikke andre
-  const tags = cleanBookTags(product.tags ?? [], { title, authors: f.authors });
+  // authorTexts: navnene slik ONIX skriver dem («Hove Christensen, Mia») og gammel
+  // productType (live hadde forfatteren der), så sammensatte etternavn også kjennes igjen
+  const oldType = product.productType && !["Bok", "Lydbok", "E-bok"].includes(product.productType) ? [product.productType] : [];
+  const tags = cleanBookTags(product.tags ?? [], { title, authors: f.authors, authorTexts: [...extractInvertedNames(xml), ...oldType] });
   if (tags.removed.length) {
     productInput.tags = tags.tags;
     changes.push({ field: "tags", from: tags.removed.join(", "), to: "(fjernet)" });
