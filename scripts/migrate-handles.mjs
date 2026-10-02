@@ -36,7 +36,7 @@ import {
   SAFE_STORES, MIGRATION_PRODUCTS_QUERY, HANDLE_UPDATE_MUTATION,
   planHandleMigration, isBlockedRow, handleUpdateInput,
 } from "../supabase/functions/_shared/handle-migration.js";
-import { protectedMessage, protectedTag } from "../supabase/functions/_shared/protected.ts";
+import { loadProtectedMembers, protectedProduct, protectedProductMessage, setProtectedMembers } from "../supabase/functions/_shared/protected.ts";
 
 const API_VERSION = "2026-07"; // samme som supabase/functions/_shared/shopify.ts
 const PLAN_MAX_AGE_HOURS = 24;
@@ -254,10 +254,10 @@ async function execute() {
   // og at de ikke har fått en beskyttet tagg siden planen ble laget (protected.ts)
   const products = await fetchAllProducts();
   const current = new Map(products.map((p) => [p.id, p.handle]));
-  const protectedNow = new Map(products.filter((p) => protectedTag(p.tags)).map((p) => [p.id, p.tags]));
+  const protectedNow = new Map(products.filter((p) => protectedProduct(p)).map((p) => [p.id, p]));
   for (const r of plan.filter((r) => protectedNow.has(r.id))) {
-    console.log(`  ${r.oldHandle}: ${protectedMessage(protectedNow.get(r.id))}`);
-    log({ mode: "execute", id: r.id, skipped: protectedMessage(protectedNow.get(r.id)) });
+    console.log(`  ${r.oldHandle}: ${protectedProductMessage(protectedNow.get(r.id))}`);
+    log({ mode: "execute", id: r.id, skipped: protectedProductMessage(protectedNow.get(r.id)) });
   }
   const skippedProtected = plan.filter((r) => protectedNow.has(r.id)).length;
   const rows = plan
@@ -301,11 +301,11 @@ async function rollback() {
   if (!existsSync(doneFile)) fail("Ingen utførte endringer å angre.");
   const all = JSON.parse(readFileSync(doneFile, "utf8"));
   // Beskyttede produkter (protected.ts): verken handle eller videresending røres
-  const tagsById = new Map((await fetchAllProducts()).map((p) => [p.id, p.tags]));
-  const done = all.filter((d) => !protectedTag(tagsById.get(d.id)));
-  for (const d of all.filter((d) => protectedTag(tagsById.get(d.id)))) {
-    console.log(`  ${d.newHandle}: ${protectedMessage(tagsById.get(d.id))}`);
-    log({ mode: "rollback", id: d.id, skipped: protectedMessage(tagsById.get(d.id)) });
+  const byId = new Map((await fetchAllProducts()).map((p) => [p.id, p]));
+  const done = all.filter((d) => !protectedProduct(byId.get(d.id)));
+  for (const d of all.filter((d) => protectedProduct(byId.get(d.id)))) {
+    console.log(`  ${d.newHandle}: ${protectedProductMessage(byId.get(d.id))}`);
+    log({ mode: "rollback", id: d.id, skipped: protectedProductMessage(byId.get(d.id)) });
   }
   console.log(`\nSetter tilbake ${done.length} handles i ${SHOP}\n`);
   // Fjern videresendingen fra gammel adresse først, ellers kan ikke produktet få adressen tilbake
@@ -327,5 +327,9 @@ async function rollback() {
 }
 
 // ── Start ──────────────────────────────────────────────────────────────────
+// Produktene i de beskyttede samlingene (wrendale). Mangler samlingen, stopper skriptet.
+// Tørrkjøring fra fil (--input) vet ikke om samlingene: bare tagg og leverandør sjekkes
+if (INPUT_FILE) setProtectedMembers([]);
+else await loadProtectedMembers(gql).catch((e) => fail(e.message));
 const run = { "dry-run": dryRun, execute, verify, rollback }[MODE];
 run().catch((e) => { log({ mode: MODE, fatal: String(e) }); fail(e.message); });

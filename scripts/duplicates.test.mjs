@@ -1,5 +1,8 @@
 // node --test scripts/*.test.mjs
 // Duplikater: samme ISBN på flere produkter (pakke D del 3b, _shared/duplicates.ts).
+import { setProtectedMembers } from "../supabase/functions/_shared/protected.ts";
+// Ingen produkter i beskyttede samlinger her (medlemskap testes i protected.test.mjs)
+setProtectedMembers([]);
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {

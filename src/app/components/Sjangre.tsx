@@ -5,6 +5,7 @@ import { Tags, ChevronDown, ChevronRight, Loader2, CheckCircle2, RefreshCw, Menu
 import { Input } from './ui/input';
 import { shopify, sjangreSync, syncLog, type Job, type SjangreSyncJobResult, type SyncLogEntry } from '../utils/api';
 import { toast } from 'sonner';
+import { JobHealth, JobLogCsvButton } from './JobHealth';
 
 // ── Forleggerforeningen bokgruppekode lookup ──────────────────────────────────
 // Komplett mapping basert på offisiell tosifret/tresifret bokgruppeinndeling.
@@ -301,6 +302,8 @@ export function Sjangre() {
   const [progress, setProgress] = useState(0);
   const [phaseLabel, setPhaseLabel] = useState('');
   const [syncJobId, setSyncJobId] = useState<string | null>(null);
+  // Jobbraden (livstegn og logg, pakke F del 3); står igjen etter at jobben er ferdig
+  const [syncJob, setSyncJob] = useState<Job | null>(null);
   const [pipelineResult, setPipelineResult] = useState<PipelineResult | null>(null);
 
   // Menu state
@@ -350,6 +353,7 @@ export function Sjangre() {
     const poll = async () => {
       try {
         const job = await sjangreSync.getStatus(syncJobId);
+        setSyncJob(job as Job);
         const mode: 'analyze' | 'update' = (job.config as { mode?: string })?.mode === 'analyze' ? 'analyze' : 'update';
         const { label, pct } = jobPhaseLabel(job);
         setProgress(job.status === 'completed' ? 96 : pct);
@@ -566,6 +570,7 @@ export function Sjangre() {
                   style={{ width: `${progress}%`, background: '#3b82f6' }}
                 />
               </div>
+              {syncJob && <JobHealth job={syncJob} />}
             </div>
           )}
 
@@ -634,6 +639,9 @@ export function Sjangre() {
               {/* Pipeline result */}
               {pipelineResult && (
                 <div className="mb-4 p-3 rounded-md border bg-gray-50 text-sm space-y-2">
+                  {syncJob && (syncJob.status === 'completed' || syncJob.status === 'failed') && (
+                    <div className="flex justify-end"><JobLogCsvButton job={syncJob} /></div>
+                  )}
                   {pipelineResult.sync && (
                     <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
                       <span className="text-xs font-medium text-gray-500 uppercase tracking-wide w-full">{pipelineResult.mode === 'analyze' ? 'Sjekk (ingenting endret)' : 'Shopify-synk'}</span>

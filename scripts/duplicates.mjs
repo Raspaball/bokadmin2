@@ -22,7 +22,7 @@ import { join } from "node:path";
 import {
   ORDERS_BY_PRODUCT_BULK_QUERY, OrderCounter, decideDuplicate, groupDuplicates, orderAccess, orderAccessWarning, tagsToMerge,
 } from "../supabase/functions/_shared/duplicates.ts";
-import { protectedMessage, protectedTag } from "../supabase/functions/_shared/protected.ts";
+import { loadProtectedMembers, protectedProduct, protectedProductMessage, setProtectedMembers } from "../supabase/functions/_shared/protected.ts";
 
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(`--${n}`);
@@ -62,7 +62,7 @@ function productsFromCsv(file) {
     if (!byHandle.has(r.Handle)) {
       byHandle.set(r.Handle, {
         id: `csv:${r.Handle}`, handle: r.Handle, title: r.Title, status: (r.Status || "").toUpperCase(), createdAt: null,
-        productType: r.Type, tags: (r.Tags || "").split(",").map((t) => t.trim()).filter(Boolean), forfatter: [], orders: null,
+        productType: r.Type, vendor: r.Vendor, tags: (r.Tags || "").split(",").map((t) => t.trim()).filter(Boolean), forfatter: [], orders: null,
         variants: { nodes: [{ barcode: r["Variant Barcode"] ?? r["Variant Barcodes"] ?? null, sku: r["Variant SKU"] || null }] },
       });
     }
@@ -70,7 +70,7 @@ function productsFromCsv(file) {
   return [...byHandle.values()];
 }
 
-const PRODUCT_FIELDS = `id handle title status createdAt productType tags
+const PRODUCT_FIELDS = `id handle title status createdAt productType vendor tags
   forfatter: metafield(namespace: "bok", key: "forfatter") { value }
   bokIsbn: metafield(namespace: "bok", key: "isbn") { value }
   variants(first: 1) { nodes { barcode sku } }`;
@@ -157,6 +157,8 @@ function writeReport(r, name) {
 
 // ── Kjøring ────────────────────────────────────────────────────────────────
 if (MODE === "report" && CSV) {
+  // Eksporten sier ikke hvilke manuelle samlinger produktene står i: bare tagg og leverandør sjekkes
+  setProtectedMembers([]);
   const r = buildReport(productsFromCsv(CSV), `CSV ${CSV}`);
   printReport(r);
   writeReport(r, "csv");
@@ -165,6 +167,8 @@ if (MODE === "report" && CSV) {
 
 const { shopifyGql, testShop, fail, sleep } = await import("./lib/clients.mjs");
 const SHOP = testShop();
+// Produktene i de beskyttede samlingene (wrendale). Mangler samlingen, stopper skriptet
+await loadProtectedMembers(shopifyGql).catch((e) => fail(e.message));
 const reportFile = join(process.cwd(), "scripts", "out", `duplikater-${SHOP.replace(".myshopify.com", "")}.json`);
 
 if (MODE === "report") {
@@ -185,9 +189,9 @@ if (MODE === "report") {
       const want = [...new Set(g.products.flatMap((p) => p.mergeTags))];
       if (!want.length) continue;
       // Nåværende tagger rett før skriving (protected.ts)
-      const cur = (await shopifyGql(`query ($id: ID!) { product(id: $id) { handle tags } }`, { id: g.keepId })).product;
+      const cur = (await shopifyGql(`query ($id: ID!) { product(id: $id) { id handle tags vendor } }`, { id: g.keepId })).product;
       if (!cur) { console.log(`  ${g.isbn}: produktet som beholdes finnes ikke`); continue; }
-      if (protectedTag(cur.tags)) { console.log(`  ${cur.handle}: ${protectedMessage(cur.tags)}`); continue; }
+      if (protectedProduct(cur)) { console.log(`  ${cur.handle}: ${protectedProductMessage(cur)}`); continue; }
       const missing = want.filter((t) => !cur.tags.some((c) => c.toLowerCase() === t.toLowerCase()));
       if (!missing.length) { console.log(`  ${cur.handle}: har allerede ${want.join(", ")}`); continue; }
       console.log(`  ${cur.handle}: ${EXECUTE ? "legger til" : "ville lagt til"} ${missing.join(", ")}`);

@@ -25,8 +25,11 @@ import {
   bulkCoverLine, bulkUpdateLine, parseBulkResult, toJsonl,
 } from "../_shared/book-bulk.ts";
 import { BULK_ACTIVE, fetchBulkText, startBulkMutation, startBulkQuery, streamJsonlLines, waitForBulkOperation } from "../_shared/shopify-bulk.ts";
-import { freshOnixIsbns, insertLogs, loadOnixXml } from "../_shared/bulk-job.ts";
-import { protectedMessage, protectedTag } from "../_shared/protected.ts";
+import { clearChunkLogs, freshOnixIsbns, insertLogs, loadOnixXml } from "../_shared/bulk-job.ts";
+import { isFatalJobError, protectedProduct, protectedProductMessage } from "../_shared/protected.ts";
+import { ensureProtectedMembers } from "../_shared/protected-load.ts";
+import { notBookSkip, NOT_IN_BOKBASEN_MESSAGE } from "../_shared/book-format.ts";
+import { changedRow, errorRow, NO_ISBN_MESSAGE, skipRow, unchangedRow, type JobLogRow, type LogBase } from "../_shared/job-log.ts";
 import { ensureDuplicates } from "../_shared/duplicate-scan.ts";
 import { duplicateCounts, duplicateMessage } from "../_shared/duplicates.ts";
 import {
@@ -130,6 +133,28 @@ async function applyPlan(productId: string, plan: BookUpdatePlan): Promise<void>
 
 // ── Jobben ──────────────────────────────────────────────────────────────────
 
+// deno-lint-ignore no-explicit-any
+type Supabase = any;
+
+/** Produktene i de beskyttede samlingene (wrendale), hentet hver puls. Mangler samlingen: jobben stopper (false). */
+async function loadProtectedOrFail(supabase: Supabase, jobId: string): Promise<boolean> {
+  try {
+    await ensureProtectedMembers(0);
+    return true;
+  } catch (err) {
+    await supabase.from("jobs").update({ status: "failed", error_message: String(err), completed_at: new Date().toISOString() }).eq("id", jobId);
+    return false;
+  }
+}
+
+/** Loggraden for et produkt med plan: endret (feltene), eller uendret med merknadene. */
+function bookUpdatePlanRow(base: LogBase, plan: BookUpdatePlan, verb: string): JobLogRow {
+  const notes = plan.notes.length ? ` (${plan.notes.join("; ")})` : "";
+  if (!plan.changes.length) return unchangedRow(base, `Uendret${notes}`);
+  const what = plan.changes.map((c) => `${c.field}: ${c.from || "(tom)"} → ${c.to}`).join("; ");
+  return changedRow(base, `${verb}: ${what}${notes}`, plan.changes.map((c) => c.field));
+}
+
 async function processBatch(jobId: string) {
   const supabase = getSupabase();
   // Bulk-modus har egen løkke (se processBulk)
@@ -141,6 +166,7 @@ async function processBatch(jobId: string) {
   if (!job || (job.status !== "running" && job.status !== "paused")) return;
 
   await supabase.from("jobs").update({ status: "running", started_at: job.started_at || new Date().toISOString() }).eq("id", jobId);
+  if (!await loadProtectedOrFail(supabase, jobId)) return;
 
   // ISBN med flere produkter (pakke D del 3b): skannes én gang per jobb, så hoppes de over
   const duplicates = await ensureDuplicates(supabase, job, startTime + 30_000);
@@ -158,7 +184,7 @@ async function processBatch(jobId: string) {
   const save = (extra: Record<string, unknown>) => supabase.from("jobs").update({
     processed,
     succeeded: counts.changed,
-    skipped: counts.unchanged + counts.skippedNoIsbn + counts.skippedNoOnix + counts.skippedProtected + counts.skippedDuplicate,
+    skipped: counts.unchanged + counts.skippedNoIsbn + counts.skippedNoOnix + counts.skippedNotBook + counts.skippedProtected + counts.skippedDuplicate,
     failed: counts.errors,
     ...extra,
   }).eq("id", jobId);
@@ -180,22 +206,19 @@ async function processBatch(jobId: string) {
       const isbn = extractIsbn(product);
       if (only && (!isbn || !only.includes(isbn))) continue; // ikke valgt i denne kjøringen
       processed++;
-      // Beskyttet (tagg gave/lokal/lokalhistorie/lokallitteratur): aldri rørt, ikke engang ONIX-oppslag
-      if (protectedTag(product.tags)) {
+      // Én loggrad per produkt (pakke F del 3.1)
+      const base: LogBase = { isbn, title: product.handle, action: "book_update", shopify_id: product.id, job_id: jobId, user_id: userId };
+      const log = (row: JobLogRow) => supabase.from("sync_log").insert(row);
+      // Beskyttet (tagg, leverandør Wrendale eller samling wrendale): aldri rørt, ikke engang ONIX-oppslag
+      if (protectedProduct(product)) {
         counts.skippedProtected++;
-        await supabase.from("sync_log").insert({
-          isbn, title: product.handle, action: "book_update", status: "info",
-          message: protectedMessage(product.tags), shopify_id: product.id, job_id: jobId, user_id: userId,
-        });
+        await log(skipRow(base, "beskyttet", protectedProductMessage(product)));
         continue;
       }
-      if (!isbn) { counts.skippedNoIsbn++; continue; }
+      if (!isbn) { counts.skippedNoIsbn++; await log(skipRow(base, "ingen_isbn", NO_ISBN_MESSAGE)); continue; }
       if (duplicates[isbn]) {
         counts.skippedDuplicate++;
-        await supabase.from("sync_log").insert({
-          isbn, title: product.handle, action: "book_update", status: "info",
-          message: duplicateMessage(duplicates[isbn]), shopify_id: product.id, job_id: jobId, user_id: userId,
-        });
+        await log(skipRow(base, "duplikat", duplicateMessage(duplicates[isbn])));
         continue;
       }
 
@@ -205,41 +228,23 @@ async function processBatch(jobId: string) {
         const onix = await getOnixCached(isbn, userId);
         if (!onix.xml) {
           counts.skippedNoOnix++;
-          await supabase.from("sync_log").insert({
-            isbn, title: product.handle, action: "book_update", status: "info",
-            message: "Hoppet over: fant ikke boka i Bokbasen", shopify_id: product.id, job_id: jobId, user_id: userId,
-          });
+          await log(skipRow(base, "ikke_i_bokbasen", NOT_IN_BOKBASEN_MESSAGE));
+          continue;
+        }
+        const notBook = notBookSkip(onix.xml);
+        if (notBook) {
+          counts.skippedNotBook++;
+          await log(skipRow(base, "ikke_bok", notBook));
           continue;
         }
 
         const plan = planBookUpdate(product, onix.xml);
-        const what = plan.changes.map((c) => `${c.field}: ${c.from || "(tom)"} → ${c.to}`).join("; ");
-        const notes = plan.notes.length ? ` (${plan.notes.join("; ")})` : "";
-
-        if (!plan.changes.length) {
-          countPlan(counts, product.handle, plan);
-          if (plan.notes.length) {
-            await supabase.from("sync_log").insert({
-              isbn, title: product.handle, action: "book_update", status: "info",
-              message: `Uendret${notes}`, shopify_id: product.id, job_id: jobId, user_id: userId,
-            });
-          }
-          continue;
-        }
-
-        if (mode === "update") await applyPlan(product.id, plan);
+        if (plan.changes.length && mode === "update") await applyPlan(product.id, plan);
         countPlan(counts, product.handle, plan);
-        await supabase.from("sync_log").insert({
-          isbn, title: product.handle, action: "book_update", status: "success",
-          message: `${mode === "update" ? "Endret" : "Ville endret"}: ${what}${notes}`,
-          shopify_id: product.id, job_id: jobId, user_id: userId,
-        });
+        await log(bookUpdatePlanRow(base, plan, mode === "update" ? "Endret" : "Ville endret"));
       } catch (err) {
         counts.errors++;
-        await supabase.from("sync_log").insert({
-          isbn, title: product.handle, action: "book_update", status: "error",
-          message: `Feil: ${err instanceof Error ? err.message : String(err)}`, shopify_id: product.id, job_id: jobId, user_id: userId,
-        });
+        await log(errorRow(base, `Feil: ${err instanceof Error ? err.message : String(err)}`));
       }
     }
 
@@ -257,7 +262,7 @@ async function processBatch(jobId: string) {
   } catch (err) {
     console.error("book-update:", err);
     const msg = String(err);
-    const fatal = msg.includes("HTTP 401") || msg.includes("HTTP 403");
+    const fatal = isFatalJobError(msg);
     // Markøren rulles tilbake til pulsstart, og tallene med den
     await supabase.from("jobs").update({
       status: fatal ? "failed" : "paused",
@@ -317,6 +322,7 @@ async function processBulk(jobId: string) {
   const { data: job } = await supabase.from("jobs").select("*").eq("id", jobId).single();
   if (!job || (job.status !== "running" && job.status !== "paused")) return;
   await supabase.from("jobs").update({ status: "running", started_at: job.started_at || new Date().toISOString() }).eq("id", jobId);
+  if (!await loadProtectedOrFail(supabase, jobId)) return;
 
   const mode: "analyze" | "update" = job.config?.mode === "update" ? "update" : "analyze";
   const only: Set<string> | null = Array.isArray(job.config?.isbns) && job.config.isbns.length ? new Set(job.config.isbns) : null;
@@ -331,7 +337,7 @@ async function processBulk(jobId: string) {
   const save = (extra: Record<string, unknown> = {}) => supabase.from("jobs").update({
     processed,
     succeeded: counts.changed,
-    skipped: counts.unchanged + counts.skippedNoIsbn + counts.skippedNoOnix + counts.skippedProtected + counts.skippedDuplicate,
+    skipped: counts.unchanged + counts.skippedNoIsbn + counts.skippedNoOnix + counts.skippedNotBook + counts.skippedProtected + counts.skippedDuplicate,
     failed: counts.errors,
     config: { ...job.config, counts, bulk: state },
     ...extra,
@@ -378,7 +384,7 @@ async function processBulk(jobId: string) {
           for (const p of a.products) {
             const isbn = extractIsbn(p);
             if (isbn) perIsbn[isbn] = (perIsbn[isbn] ?? 0) + 1;
-            if (isbn && !protectedTag(p.tags) && (!only || only.has(isbn))) isbns.push(isbn);
+            if (isbn && !protectedProduct(p) && (!only || only.has(isbn))) isbns.push(isbn);
           }
           state.duplicates = duplicateCounts(perIsbn);
           const unique = [...new Set(isbns)].filter((i) => !state.duplicates![i]);
@@ -390,8 +396,11 @@ async function processBulk(jobId: string) {
           await save();
           continue;
         }
+        let lastBeat = Date.now();
         while (state.onixTodo.length && Date.now() < deadline) {
           const batch = state.onixTodo.slice(0, ONIX_CONCURRENCY);
+          // Livstegn (pakke F del 3.2): siste ISBN og hvor mange som gjenstår, minst hvert 20. s
+          if (Date.now() - lastBeat > 20_000) { lastBeat = Date.now(); await save({ current_isbn: batch[0] }); }
           const t0 = Date.now();
           const results = await Promise.all(batch.map((isbn) => getOnixCached(isbn, userId)));
           state.stats.onixMs += Date.now() - t0;
@@ -433,40 +442,42 @@ async function processBulk(jobId: string) {
           if (only && (!isbn || !only.has(isbn))) continue;
           processed++;
           const base = { isbn, title: product.handle, action: "book_update", shopify_id: product.id, job_id: jobId, user_id: userId };
-          if (protectedTag(product.tags)) {
+          // Én loggrad per produkt (pakke F del 3.1)
+          if (protectedProduct(product)) {
             counts.skippedProtected++;
-            logs.push({ ...base, status: "info", message: protectedMessage(product.tags) });
+            logs.push(skipRow(base, "beskyttet", protectedProductMessage(product)));
             continue;
           }
-          if (!isbn) { counts.skippedNoIsbn++; continue; }
+          if (!isbn) { counts.skippedNoIsbn++; logs.push(skipRow(base, "ingen_isbn", NO_ISBN_MESSAGE)); continue; }
           const dup = state.duplicates?.[isbn];
           if (dup) {
             counts.skippedDuplicate++;
-            logs.push({ ...base, status: "info", message: duplicateMessage(dup) });
+            logs.push(skipRow(base, "duplikat", duplicateMessage(dup)));
             continue;
           }
           const xml = xmlByIsbn.get(isbn);
           if (!xml) {
             counts.skippedNoOnix++;
-            logs.push({ ...base, status: "info", message: "Hoppet over: fant ikke boka i Bokbasen" });
+            logs.push(skipRow(base, "ikke_i_bokbasen", NOT_IN_BOKBASEN_MESSAGE));
+            continue;
+          }
+          const notBook = notBookSkip(xml);
+          if (notBook) {
+            counts.skippedNotBook++;
+            logs.push(skipRow(base, "ikke_bok", notBook));
             continue;
           }
           const plan = planBookUpdate(product, xml);
           countPlan(counts, product.handle, plan);
-          const notes = plan.notes.length ? ` (${plan.notes.join("; ")})` : "";
-          if (!plan.changes.length) {
-            if (plan.notes.length) logs.push({ ...base, status: "info", message: `Uendret${notes}` });
-            continue;
-          }
-          const what = plan.changes.map((c) => `${c.field}: ${c.from || "(tom)"} → ${c.to}`).join("; ");
-          logs.push({ ...base, status: "success", message: `${mode === "update" ? "Sendt i bulk" : "Ville endret"}: ${what}${notes}` });
-          if (mode !== "update") continue;
+          logs.push(bookUpdatePlanRow(base, plan, mode === "update" ? "Sendt i bulk" : "Ville endret"));
+          if (!plan.changes.length || mode !== "update") continue;
           const ref = { id: product.id, isbn, handle: product.handle };
           const pl = bulkUpdateLine(product, plan);
           if (pl) { productLines.push(pl); productRefs.push(ref); }
           const cl = bulkCoverLine(product, plan);
           if (cl) { coverLines.push(cl); coverRefs.push(ref); }
         }
+        await clearChunkLogs(supabase, jobId, a.products.map((p) => p.id));
         await insertLogs(supabase, logs);
         state.planIndex = to;
 
@@ -504,8 +515,8 @@ async function processBulk(jobId: string) {
           const err = errByLine.get(line) ?? `mangler i resultatet (operasjonen endte med ${op.status}${op.errorCode ? `, ${op.errorCode}` : ""})`;
           counts.errors++;
           if (ap.kind === "product") counts.changed = Math.max(0, counts.changed - 1);
-          logs.push({ isbn: ref.isbn, title: ref.handle, action: "book_update", status: "error",
-            message: `Feil i bulk (${ap.kind === "product" ? "produkt/metafelt" : "omslag"}): ${err}`, shopify_id: ref.id, job_id: jobId, user_id: userId });
+          logs.push(errorRow({ isbn: ref.isbn, title: ref.handle, action: "book_update", shopify_id: ref.id, job_id: jobId, user_id: userId },
+            `Feil i bulk (${ap.kind === "product" ? "produkt/metafelt" : "omslag"}): ${err}`));
         });
         await insertLogs(supabase, logs);
 
@@ -527,7 +538,7 @@ async function processBulk(jobId: string) {
   } catch (err) {
     console.error("book-update (bulk):", err);
     const msg = String(err);
-    const fatal = msg.includes("HTTP 401") || msg.includes("HTTP 403");
+    const fatal = isFatalJobError(msg);
     // Tilstanden fra pulsstart, men en startet operasjon beholdes (ellers sendes den på nytt)
     const keep: BulkState = state.apply && !stateAtStart.apply ? state : stateAtStart;
     await supabase.from("jobs").update({

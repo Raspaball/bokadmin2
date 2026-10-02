@@ -11,7 +11,7 @@
 // Beskyttede produkter (_shared/protected.ts) gir aldri en linje.
 
 import { BOOK_METAFIELD_KEYS, type BookUpdatePlan, type ShopifyBookProduct } from "./book-update.ts";
-import { protectedTag } from "./protected.ts";
+import { protectedProduct, type ProtectableProduct } from "./protected.ts";
 
 /**
  * Bulk-spørring med de samme feltene som BOOK_UPDATE_PRODUCT_FIELDS + ISBN-feltene.
@@ -20,7 +20,7 @@ import { protectedTag } from "./protected.ts";
 export const BULK_PRODUCTS_QUERY = `{
   products(query: "status:active OR status:draft OR status:archived") {
     edges { node {
-      __typename id handle title productType tags descriptionHtml
+      __typename id handle title vendor productType tags descriptionHtml
       category { id }
       ${BOOK_METAFIELD_KEYS.map((k) => `mf_${k}: metafield(namespace: "bok", key: "${k}") { value }`).join("\n      ")}
       bokIsbn: metafield(namespace: "bok", key: "isbn") { value }
@@ -60,14 +60,14 @@ export class BulkProductAssembler {
   private readonly byId = new Map<string, BulkProduct>();
   /**
    * @param keep hvilke produkter (indeks) som tas vare på
-   * @param slim behold bare id, handle, tagger og ISBN-feltene (for ONIX-fasen),
+   * @param slim behold bare id, handle, tagger, leverandør og ISBN-feltene (for ONIX-fasen),
    *             eller bare feltene i listen (variantene tas alltid med)
    */
   private readonly keep: (index: number) => boolean;
   private readonly slim: readonly string[] | null;
   constructor(keep: (index: number) => boolean = () => true, slim: boolean | readonly string[] = false) {
     this.keep = keep;
-    this.slim = slim === true ? ["id", "handle", "tags", "bokIsbn"] : slim === false ? null : slim;
+    this.slim = slim === true ? ["id", "handle", "tags", "vendor", "bokIsbn"] : slim === false ? null : slim;
   }
 
   add(line: string): void {
@@ -108,16 +108,16 @@ export function assembleBulkProducts(text: string, keep?: (index: number) => boo
  * bokadmin.seo_auto) i ett kall. null når planen ikke endrer noe på produktet,
  * eller produktet er beskyttet.
  */
-export function bulkUpdateLine(product: { id: string; tags?: readonly string[] | null }, plan: BookUpdatePlan): { product: Record<string, unknown> } | null {
-  if (protectedTag(product.tags)) return null;
+export function bulkUpdateLine(product: ProtectableProduct & { id: string }, plan: BookUpdatePlan): { product: Record<string, unknown> } | null {
+  if (protectedProduct(product)) return null;
   const metafields = plan.metafields.map(({ ownerId: _o, ...m }) => m);
   if (!Object.keys(plan.product).length && !metafields.length) return null;
   return { product: { id: product.id, ...plan.product, ...(metafields.length ? { metafields } : {}) } };
 }
 
 /** JSONL-linje til fileUpdate (alt-tekst/filnavn på omslaget), eller null. */
-export function bulkCoverLine(product: { tags?: readonly string[] | null }, plan: BookUpdatePlan): { files: Array<Record<string, unknown>> } | null {
-  if (protectedTag(product.tags) || !plan.cover) return null;
+export function bulkCoverLine(product: ProtectableProduct, plan: BookUpdatePlan): { files: Array<Record<string, unknown>> } | null {
+  if (protectedProduct(product) || !plan.cover) return null;
   return { files: [{ id: plan.cover.mediaId, ...plan.cover.change }] };
 }
 

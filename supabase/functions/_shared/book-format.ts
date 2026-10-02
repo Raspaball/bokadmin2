@@ -17,6 +17,8 @@
 //   Kart       C*
 //   Annet      alt annet (E* uten e-bokformat får productType E-bok)
 
+import { extractProductForm } from "./onix.js";
+
 export const FORMAT_VALUES = [
   "Innbundet", "Heftet", "Pocket", "Kartonert", "Spiral", "Pappbok", "Lydbok", "E-bok", "Kart", "Annet",
 ] as const;
@@ -65,3 +67,29 @@ export function bookFormat(form: string | null | undefined, details: readonly st
   }
   return info("Annet", "Bok");
 }
+
+// ── Bare bøker (pakke F del 2.2) ─────────────────────────────────────────────
+// Bokadmin behandler bare produkter med ISBN, treff i Bokbasen og bokformat:
+// ProductForm B* (trykt bok), A* (lydbok) eller E* (e-bok). Alt annet (kalendere,
+// spill, notatbøker, plakater, kart C* osv.) hoppes over og telles.
+
+export const BOOK_FORM_PREFIXES: readonly string[] = Object.freeze(["B", "A", "E"]);
+
+export function isBookForm(form: string | null | undefined): boolean {
+  const f = String(form ?? "").trim().toUpperCase();
+  return BOOK_FORM_PREFIXES.some((p) => f.startsWith(p));
+}
+
+/** «Hoppet over: ikke bok (ProductForm PC)» */
+export function notBookMessage(form: string | null | undefined): string {
+  return `Hoppet over: ikke bok (ProductForm ${String(form ?? "").trim() || "mangler"})`;
+}
+
+/** Loggteksten når ONIX-posten ikke er en bok, ellers null. Uten ONIX: se NOT_IN_BOKBASEN_MESSAGE. */
+export function notBookSkip(xml: string | null | undefined): string | null {
+  if (!xml) return null;
+  const { form } = extractProductForm(xml);
+  return isBookForm(form) ? null : notBookMessage(form);
+}
+
+export const NOT_IN_BOKBASEN_MESSAGE = "Hoppet over: fant ikke boka i Bokbasen";

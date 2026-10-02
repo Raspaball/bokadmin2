@@ -11,14 +11,14 @@ import { bookDescription, bookFieldsFromOnix, bookMetafields, canReplaceDescript
 import { bookSeo, decideSeo, legacySeo, parseSeoAuto, seoMetafields } from "./book-seo.ts";
 import { coverAlt, coverChanges, coverFilename, fileNameFromUrl, type CoverChange } from "./book-cover.ts";
 import { cleanBookTags } from "./book-tags.ts";
-import { protectedMessage, protectedTag } from "./protected.ts";
+import { protectedProduct, protectedProductMessage } from "./protected.ts";
 
 /** Metafeltnøklene i bok som jobben setter (aliasene i produktspørringen er mf_<nøkkel>). */
-export const BOOK_METAFIELD_KEYS = ["forfatter", "format", "sider", "utgivelsesaar", "spraak", "serie", "alder", "thema"] as const;
+export const BOOK_METAFIELD_KEYS = ["forfatter", "format", "sider", "utgivelsesaar", "spraak", "serie", "alder", "thema", "bokgruppe"] as const;
 
 /** GraphQL-felt jobben trenger på hvert produkt (i tillegg til ISBN-feltene). */
 export const BOOK_UPDATE_PRODUCT_FIELDS = `
-  id handle title productType tags descriptionHtml
+  id handle title vendor productType tags descriptionHtml
   category { id }
   ${BOOK_METAFIELD_KEYS.map((k) => `mf_${k}: metafield(namespace: "bok", key: "${k}") { value }`).join("\n  ")}
   seoTitleMf: metafield(namespace: "global", key: "title_tag") { value }
@@ -31,6 +31,7 @@ export interface ShopifyBookProduct {
   id: string;
   handle: string;
   title: string;
+  vendor?: string | null;
   productType?: string | null;
   tags?: string[];
   descriptionHtml?: string | null;
@@ -74,9 +75,9 @@ const short = (s: string | null | undefined, n = 60) => {
  * Hva som må endres på produktet. `xml` er rå ONIX for boka.
  */
 export function planBookUpdate(product: ShopifyBookProduct, xml: string): BookUpdatePlan {
-  // Beskyttet produkt: ingen endringer, uansett hva ONIX sier (kallerne sjekker også selv)
-  if (protectedTag(product.tags)) {
-    return { product: {}, metafields: [], cover: null, changes: [], notes: [protectedMessage(product.tags)] };
+  // Beskyttet produkt (tagg, leverandør, samling): ingen endringer, uansett hva ONIX sier (kallerne sjekker også selv)
+  if (protectedProduct(product)) {
+    return { product: {}, metafields: [], cover: null, changes: [], notes: [protectedProductMessage(product)] };
   }
   const f = bookFieldsFromOnix(xml);
   const onixTitle = extractTitle(xml);
@@ -166,6 +167,8 @@ export interface BookUpdateCounts {
   unchanged: number;
   skippedNoIsbn: number;
   skippedNoOnix: number;
+  /** ONIX-posten er ikke en bok (ProductForm, pakke F del 2.2) */
+  skippedNotBook: number;
   /** Beskyttet tagg (_shared/protected.ts): aldri rørt */
   skippedProtected: number;
   /** Samme ISBN på flere produkter (_shared/duplicates.ts): hoppes over til de er ryddet */
@@ -178,14 +181,14 @@ export interface BookUpdateCounts {
 }
 
 export function emptyBookUpdateCounts(): BookUpdateCounts {
-  return { changed: 0, unchanged: 0, skippedNoIsbn: 0, skippedNoOnix: 0, skippedProtected: 0, skippedDuplicate: 0, errors: 0, fields: {}, notes: {} };
+  return { changed: 0, unchanged: 0, skippedNoIsbn: 0, skippedNoOnix: 0, skippedNotBook: 0, skippedProtected: 0, skippedDuplicate: 0, errors: 0, fields: {}, notes: {} };
 }
 
 export function loadBookUpdateCounts(v: unknown): BookUpdateCounts {
   const c = emptyBookUpdateCounts();
   if (!v || typeof v !== "object") return c;
   const o = v as Partial<BookUpdateCounts>;
-  for (const k of ["changed", "unchanged", "skippedNoIsbn", "skippedNoOnix", "skippedProtected", "skippedDuplicate", "errors"] as const) {
+  for (const k of ["changed", "unchanged", "skippedNoIsbn", "skippedNoOnix", "skippedNotBook", "skippedProtected", "skippedDuplicate", "errors"] as const) {
     if (typeof o[k] === "number") c[k] = o[k] as number;
   }
   if (o.fields && typeof o.fields === "object") c.fields = JSON.parse(JSON.stringify(o.fields));
@@ -210,6 +213,6 @@ export function summarizeBookUpdate(c: BookUpdateCounts, mode: "analyze" | "upda
   const fields = Object.entries(c.fields).sort((a, b) => b[1].count - a[1].count).map(([k, v]) => `${k} ${v.count}`).join(", ");
   const notes = Object.entries(c.notes).map(([k, v]) => `${k}: ${v}`).join("; ");
   return `${c.changed} ${mode === "analyze" ? "ville blitt endret" : "endret"}, ${c.unchanged} uendret, ` +
-    `hoppet over ${c.skippedNoIsbn + c.skippedNoOnix + c.skippedProtected + c.skippedDuplicate} (${c.skippedNoIsbn} uten ISBN, ${c.skippedNoOnix} uten ONIX, ${c.skippedProtected} beskyttet, ${c.skippedDuplicate} DUPLIKAT), ${c.errors} feil` +
+    `hoppet over ${c.skippedNoIsbn + c.skippedNoOnix + c.skippedNotBook + c.skippedProtected + c.skippedDuplicate} (${c.skippedNoIsbn} uten ISBN, ${c.skippedNoOnix} uten ONIX, ${c.skippedNotBook} ikke bok, ${c.skippedProtected} beskyttet, ${c.skippedDuplicate} DUPLIKAT), ${c.errors} feil` +
     (fields ? `. Felt: ${fields}` : "") + (notes ? `. ${notes}` : "");
 }

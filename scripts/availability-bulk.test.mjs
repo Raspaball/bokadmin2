@@ -1,5 +1,8 @@
 // node --test scripts/*.test.mjs
 // Bulk-modus for tilgjengelighetssjekken (pakke E del 5): _shared/availability-bulk.ts.
+import { setProtectedMembers } from "../supabase/functions/_shared/protected.ts";
+// Ingen produkter i beskyttede samlinger her (medlemskap testes i protected.test.mjs)
+setProtectedMembers([]);
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AVAILABILITY_BULK_QUERY, availabilityBulkLines } from "../supabase/functions/_shared/availability-bulk.ts";

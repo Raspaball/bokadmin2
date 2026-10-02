@@ -64,6 +64,11 @@ export interface SyncLogEntry {
   message: string;
   shopify_id: string | null;
   job_id: string | null;
+  /** Utfall per produkt (pakke F del 3.1): endret | uendret | hoppet_over | feil. Eldre rader: null */
+  outcome?: string | null;
+  /** Årsak når produktet ble hoppet over (se utils/jobLog.ts) */
+  reason?: string | null;
+  fields?: string[] | null;
   created_at: string;
 }
 
@@ -77,6 +82,10 @@ export interface Job {
   failed: number;
   skipped: number;
   current_isbn: string | null;
+  /** Livstegn (pakke F del 3.2): settes av en trigger ved hver oppdatering av raden */
+  heartbeat_at?: string | null;
+  /** Siste ISBN jobben jobbet med (current_isbn tømmes når jobben pauses) */
+  last_isbn?: string | null;
   error_message: string | null;
   config: Record<string, unknown>;
   result: Record<string, unknown>;
@@ -353,6 +362,23 @@ export const syncLog = {
     return data;
   },
 
+  /** Alle rader i jobben som ble hoppet over eller feilet (for CSV), 1000 om gangen. */
+  async getJobProblems(jobId: string): Promise<SyncLogEntry[]> {
+    const all: SyncLogEntry[] = [];
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await supabase
+        .from("sync_log")
+        .select("*")
+        .eq("job_id", jobId)
+        .or("outcome.in.(hoppet_over,feil),status.eq.error")
+        .order("created_at", { ascending: true })
+        .range(from, from + 999);
+      if (error) throw error;
+      all.push(...(data ?? []));
+      if (!data || data.length < 1000) return all;
+    }
+  },
+
   async getByActions(actions: SyncLogEntry['action'][], limit = 30): Promise<SyncLogEntry[]> {
     const { data, error } = await supabase
       .from("sync_log")
@@ -502,7 +528,7 @@ export const bokbasen = {
 
 export const shopify = {
   // Push one book to Shopify
-  async pushBook(book: BokbasenSearchResult | Book): Promise<{ shopifyId: string; handle: string; variantId?: string; created?: boolean; warning?: string; priceNote?: string; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string; tagNote?: string; protectedNote?: string }> {
+  async pushBook(book: BokbasenSearchResult | Book): Promise<{ shopifyId: string; handle: string; variantId?: string; created?: boolean; warning?: string; priceNote?: string; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string; tagNote?: string; protectedNote?: string; skipNote?: string }> {
     const res = await callEdgeFunction("shopify/push", {
       method: "POST",
       body: JSON.stringify({ book }),
@@ -511,7 +537,7 @@ export const shopify = {
   },
 
   // Push multiple books to Shopify
-  async pushBooks(bookList: (BokbasenSearchResult | Book)[]): Promise<Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string; tagNote?: string; protectedNote?: string }>> {
+  async pushBooks(bookList: (BokbasenSearchResult | Book)[]): Promise<Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string; tagNote?: string; protectedNote?: string; skipNote?: string }>> {
     const res = await callEdgeFunction("shopify/push-bulk", {
       method: "POST",
       body: JSON.stringify({ books: bookList }),

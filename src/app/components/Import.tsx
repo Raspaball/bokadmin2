@@ -144,6 +144,7 @@ function ImportResultLog({
 // Loggmelding for push: handle, prisnotat (pakke A2) og tilgjengelighet (pakke C),
 // f.eks. «Pushet til Shopify som avkledd-…. Kommer 15.11.2026: ACTIVE, kan forhåndsbestilles»
 // Beskyttet produkt (tagg gave/lokal/…): «Hoppet over: beskyttet (tagg: Lokalhistorie)», ingenting endret.
+// Ikke bok (ProductForm, pakke F): «Hoppet over: ikke bok (ProductForm PC)», ingenting pushet.
 function pushLogMessage(r: { handle?: string; priceNote?: string; availabilityNote?: string; seoNote?: string; descriptionNote?: string; tagNote?: string; protectedNote?: string }): string {
   if (r.protectedNote) return `${r.protectedNote}: ${r.handle} er ikke endret`;
   return [`Pushet til Shopify som ${r.handle}`, r.priceNote, r.availabilityNote, r.seoNote, r.descriptionNote, r.tagNote].filter(Boolean).join('. ');
@@ -349,6 +350,7 @@ export function Import() {
     let failCount = 0;
     let priceNoteCount = 0;
     let protectedCount = 0;
+    let skippedCount = 0;
 
     for (let i = 0; i < toPush.length; i += 10) {
       if (cancelBatchRef.current) break;
@@ -359,7 +361,7 @@ export function Import() {
         chunk.find(c => c.id === b.id) ? { ...b, pushing: true } : b
       ));
 
-      let results: Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string; availabilityNote?: string; seoNote?: string; descriptionNote?: string; tagNote?: string; protectedNote?: string }>;
+      let results: Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string; availabilityNote?: string; seoNote?: string; descriptionNote?: string; tagNote?: string; protectedNote?: string; skipNote?: string }>;
       try {
         results = await shopify.pushBooks(chunk);
       } catch (e) {
@@ -370,7 +372,15 @@ export function Import() {
         const book = chunk.find(c => c.isbn === res.isbn);
         if (!book) continue;
 
-        if (res.success && res.shopifyId) {
+        if (res.success && res.skipNote) {
+          // Ikke bok: ingenting er pushet, boka står i lista med årsaken
+          await syncLog.add({
+            isbn: book.isbn, title: book.title, action: 'push', status: 'info',
+            message: `${res.skipNote}: ingenting pushet`, shopify_id: res.shopifyId || null, job_id: null,
+          });
+          setAddedBooks(prev => prev.map(b => b.id === book.id ? { ...b, pushing: false, pushError: res.skipNote } : b));
+          skippedCount++;
+        } else if (res.success && res.shopifyId) {
           await books.update(book.id, {
             shopify_id: res.shopifyId,
             shopify_handle: res.handle,
@@ -414,7 +424,8 @@ export function Import() {
     const wasCancelled = cancelBatchRef.current;
     if (successCount > 0) toast.success(`${successCount} bøker eksportert til Shopify${wasCancelled ? ' (avbrutt)' : ''}`);
     if (failCount > 0) toast.error(`${failCount} bøker feilet`);
-    if (protectedCount > 0) toast.info(`${protectedCount} bøker hoppet over: beskyttet (gave/lokal), ikke endret`);
+    if (protectedCount > 0) toast.info(`${protectedCount} bøker hoppet over: beskyttet (tagg, Wrendale), ikke endret`);
+    if (skippedCount > 0) toast.info(`${skippedCount} hoppet over: ikke bok (ProductForm), ingenting pushet`);
     if (priceNoteCount > 0) toast.warning(`${priceNoteCount} bøker mangler pris — se «Mangler pris»`);
     if (wasCancelled) toast.info('Eksport avbrutt');
     setIsBatchPushing(false);
@@ -437,6 +448,16 @@ export function Import() {
 
     try {
       const result = await shopify.pushBook(book);
+      if (result.skipNote) {
+        // Ikke bok (ProductForm): ingenting pushet
+        await syncLog.add({
+          isbn: book.isbn, title: book.title, action: 'push', status: 'info',
+          message: `${result.skipNote}: ingenting pushet`, shopify_id: result.shopifyId || null, job_id: null,
+        });
+        setAddedBooks(prev => prev.map(b => b.id === bookId ? { ...b, pushing: false, pushError: result.skipNote } : b));
+        toast.info(`"${book.title}": ${result.skipNote}. Ingenting er pushet til Shopify`);
+        return;
+      }
       await books.update(book.id, {
         shopify_id: result.shopifyId,
         shopify_handle: result.handle,

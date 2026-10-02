@@ -10,7 +10,7 @@
 
 import { extractIsbn } from "./isbn.js";
 import { cleanBookTags } from "./book-tags.ts";
-import { protectedTag } from "./protected.ts";
+import { protectedProduct, protectedTag } from "./protected.ts";
 
 /** Felt skanningen trenger per produkt (id, handle og ISBN-feltene). */
 export const DUPLICATE_SCAN_FIELDS = `id handle bokIsbn: metafield(namespace: "bok", key: "isbn") { value } variants(first: 1) { nodes { barcode sku } }`;
@@ -72,6 +72,7 @@ export interface DuplicateProduct {
   status: string;
   createdAt: string | null;
   productType?: string | null;
+  vendor?: string | null;
   tags: string[];
   forfatter?: string[];
   /** Antall ordrer, eller null når appen ikke kan lese ordrer */
@@ -116,11 +117,12 @@ export function decideDuplicate(products: DuplicateProduct[], access: OrderAcces
   const flags: string[] = [];
   // Bare de siste 60 dagene: «ingen ordrer» betyr ikke at produktet aldri er solgt
   if (access === "60 dager") flags.push("ordrer bare siste 60 dager");
-  const prot = products.filter((p) => protectedTag(p.tags));
+  // Beskyttet med tagg, leverandør (Wrendale) eller samling (wrendale)
+  const prot = products.filter((p) => protectedProduct(p));
   if (prot.length) {
     return {
       keepId: null, deleteIds: [], automatic: false,
-      reason: `beskyttet (tagg: ${protectedTag(prot[0].tags)}): Eirik avgjør`,
+      reason: `beskyttet (${protectedProduct(prot[0])}): Eirik avgjør`,
       flags: ["beskyttet"],
     };
   }

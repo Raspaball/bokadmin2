@@ -10,7 +10,7 @@
 
 import { buildBookHandle } from "./handle.js";
 import { BOK_ISBN_FIELD, extractIsbn } from "./isbn.js";
-import { protectedTag } from "./protected.ts";
+import { protectedProduct } from "./protected.ts";
 
 /** Butikker migreringen alltid kan kjøres mot. Andre krever eksplisitt samtykke. */
 export const SAFE_STORES = ["testbutikk-9434.myshopify.com"];
@@ -21,7 +21,7 @@ query Products($cursor: String) {
   products(first: 250, after: $cursor, query: "status:active OR status:draft OR status:archived") {
     pageInfo { hasNextPage endCursor }
     nodes {
-      id handle title productType status tags
+      id handle title vendor productType status tags
       forfatter: metafield(namespace: "bok", key: "forfatter") { value }
       ${BOK_ISBN_FIELD}
       variants(first: 1) { nodes { barcode sku } }
@@ -89,9 +89,9 @@ export function planHandleMigration(products, { includeCustom = false, limit = I
 
   for (const p of products) {
     if (plan.length >= limit) break;
-    // Beskyttet (tagg gave/lokal/lokalhistorie/lokallitteratur, protected.ts): aldri ny handle.
+    // Beskyttet (tagg, leverandør Wrendale eller samling wrendale, protected.ts): aldri ny handle.
     // Handlen teller fortsatt med i kollisjonssjekken (existing).
-    if (protectedTag(p.tags)) { skipped.beskyttet++; continue; }
+    if (protectedProduct(p)) { skipped.beskyttet++; continue; }
     const isbn = isbnById.get(p.id);
     if (!isbn) { skipped.ingenIsbn++; continue; }
     const authors = p.forfatter?.value || p.productType;

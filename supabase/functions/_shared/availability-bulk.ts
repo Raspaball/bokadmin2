@@ -9,12 +9,12 @@
 
 import { ALL_PRODUCT_STATUSES } from "./shopify.ts";
 import { availabilityMetafields, type AvailabilityPlan, type AvailabilityRule } from "./availability.ts";
-import { protectedTag } from "./protected.ts";
+import { protectedProduct, type ProtectableProduct } from "./protected.ts";
 
 export const AVAILABILITY_BULK_QUERY = `{
   products(query: "${ALL_PRODUCT_STATUSES}") {
     edges { node {
-      __typename id title handle status tags
+      __typename id title handle status tags vendor totalInventory
       bokIsbn: metafield(namespace: "bok", key: "isbn") { value }
       tilgjengelighet: metafield(namespace: "bok", key: "tilgjengelighet") { value }
       utgivelsesdato: metafield(namespace: "bok", key: "utgivelsesdato") { value }
@@ -24,8 +24,8 @@ export const AVAILABILITY_BULK_QUERY = `{
   }
 }`;
 
-/** Feltene ONIX-fasen trenger (ISBN, beskyttet, arkivert) */
-export const AVAILABILITY_SLIM_FIELDS = ["id", "handle", "status", "tags", "bokIsbn"] as const;
+/** Feltene ONIX-fasen trenger (ISBN, beskyttet med tagg/leverandør/samling, arkivert) */
+export const AVAILABILITY_SLIM_FIELDS = ["id", "handle", "status", "tags", "vendor", "bokIsbn"] as const;
 
 export const AVAILABILITY_BULK_PRODUCT_MUTATION = `mutation availabilityBulkProduct($product: ProductUpdateInput!) {
   productUpdate(product: $product) { product { id } userErrors { field message } }
@@ -47,13 +47,13 @@ export interface AvailabilityBulkLines {
  * tilgjengelighet er det bare utgivelsesdatoen). Beskyttet → ingen linjer.
  */
 export function availabilityBulkLines(
-  product: { id: string; tags?: readonly string[] | null; variants?: { nodes: Array<{ id?: string }> } },
+  product: ProtectableProduct & { id: string; variants?: { nodes: Array<{ id?: string }> } },
   rule: AvailabilityRule,
   date: string | null,
   plan: AvailabilityPlan,
 ): AvailabilityBulkLines {
   const none = { variant: null, product: null };
-  if (protectedTag(product.tags)) return none;
+  if (protectedProduct(product)) return none;
   const c = plan.changes;
   const variantId = product.variants?.nodes?.[0]?.id;
   const variant = c.continuePolicy && variantId

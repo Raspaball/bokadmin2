@@ -4,6 +4,17 @@
 // bkg-4, bkg-41 og bkg-417, og samlingene bkg-4, bkg-41 og bkg-417.
 // Ren TypeScript uten Deno-API-er (testes i scripts/bokgruppe.test.mjs).
 
+/**
+ * Metafeltet bok.bokgruppe (pakke F del 2.4): bokgruppekoden ved siden av
+ * bkg-taggene, så samlingene senere kan bytte regel fra tagg til metafelt.
+ * Settes av push og «Oppdater eksisterende bøker» (bookMetafields) og sjangersynken.
+ * Definisjonen lages med scripts/bokgruppe-definisjon.mjs.
+ */
+export const BOKGRUPPE_METAFIELD = Object.freeze({ namespace: "bok", key: "bokgruppe", type: "single_line_text_field" });
+
+/** GraphQL-felt på produktet */
+export const BOKGRUPPE_FIELD = `bokgruppe: metafield(namespace: "bok", key: "bokgruppe") { value }`;
+
 /** «417» → ["bkg-4", "bkg-41", "bkg-417"] */
 export function bokgruppeTagsForKode(kode: string): string[] {
   const k = String(kode ?? "").trim();

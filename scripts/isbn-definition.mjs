@@ -25,7 +25,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { normalizeIsbn } from "../supabase/functions/_shared/handle.js";
 import { shopifyGql, testShop, ensureOutDir, fail } from "./lib/clients.mjs";
-import { protectedMessage, protectedTag } from "../supabase/functions/_shared/protected.ts";
+import { loadProtectedMembers, protectedProduct, protectedProductMessage } from "../supabase/functions/_shared/protected.ts";
 
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(`--${name}`);
@@ -60,7 +60,7 @@ query bokIsbnProducts($cursor: String) {
   products(first: 250, after: $cursor, query: "status:active OR status:draft OR status:archived") {
     pageInfo { hasNextPage endCursor }
     nodes {
-      id handle title status tags
+      id handle title status tags vendor
       bokIsbn: metafield(namespace: "bok", key: "isbn") { id value type }
       variants(first: 1) { nodes { barcode sku } }
     }
@@ -189,8 +189,8 @@ async function recreate() {
 
   // Sletting av definisjonen sletter også verdiene på beskyttede produkter (protected.ts): ikke lov
   if (current) {
-    const hit = (await fetchAllProducts()).filter((p) => p.bokIsbn && protectedTag(p.tags));
-    if (hit.length) fail(`${hit.length} beskyttede produkter har bok.isbn, og verdien ville blitt slettet: ${hit.slice(0, 10).map((p) => `${p.handle} (${protectedMessage(p.tags)})`).join(", ")}`);
+    const hit = (await fetchAllProducts()).filter((p) => p.bokIsbn && protectedProduct(p));
+    if (hit.length) fail(`${hit.length} beskyttede produkter har bok.isbn, og verdien ville blitt slettet: ${hit.slice(0, 10).map((p) => `${p.handle} (${protectedProductMessage(p)})`).join(", ")}`);
   }
 
   if (current) {
@@ -243,7 +243,7 @@ async function restore() {
   const seen = new Map();
   for (const p of products) {
     const before = backedUp.get(p.id) ?? null;
-    if (protectedTag(p.tags)) { skipped.push({ handle: p.handle, before, note: protectedMessage(p.tags) }); continue; }
+    if (protectedProduct(p)) { skipped.push({ handle: p.handle, before, note: protectedProductMessage(p) }); continue; }
     const { isbn, source, note } = isbnFromVariant(p);
     if (!isbn) {
       if (before || note) skipped.push({ handle: p.handle, before, note: note ?? "ingen eksakt ISBN-13 i strekkode/SKU" });
@@ -288,4 +288,6 @@ async function verify() {
   console.log();
 }
 
+// Produktene i de beskyttede samlingene (wrendale). Mangler samlingen, stopper skriptet
+await loadProtectedMembers(shopifyGql).catch((e) => fail(e.message));
 await { status, recreate, restore, verify }[MODE]();

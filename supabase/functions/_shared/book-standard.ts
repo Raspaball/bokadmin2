@@ -8,10 +8,11 @@
 // hjemme her og settes aldri av denne modulen.
 
 import {
-  extractAudienceAge, extractContributors, extractLanguage, extractPages, extractProductForm,
+  extractAudienceAge, extractBokgruppekode, extractContributors, extractLanguage, extractPages, extractProductForm,
   extractPublicationYear, extractSeries, extractThema,
 } from "./onix.js";
 import { bookFormat, type BookFormat, type BookProductType } from "./book-format.ts";
+import { BOKGRUPPE_METAFIELD } from "./bokgruppe.ts";
 
 /** Feltene fra ONIX som standarden bygger på. */
 export interface BookFields {
@@ -27,6 +28,8 @@ export interface BookFields {
   series: string | null;
   age: string | null;
   thema: string[];
+  /** Bokgruppekode (ONIX skjema 37), også som metafelt bok.bokgruppe (pakke F del 2.4) */
+  bokgruppe: string | null;
 }
 
 export function bookFieldsFromOnix(xml: string): BookFields {
@@ -45,6 +48,7 @@ export function bookFieldsFromOnix(xml: string): BookFields {
     series: extractSeries(xml),
     age: extractAudienceAge(xml),
     thema: extractThema(xml),
+    bokgruppe: extractBokgruppekode(xml) || null,
   };
 }
 
@@ -72,6 +76,8 @@ export function bookMetafields(f: BookFields): BookMetafield[] {
   add("serie", "single_line_text_field", f.series);
   add("alder", "single_line_text_field", f.age);
   add("thema", "list.single_line_text_field", f.thema.length ? JSON.stringify(f.thema) : null);
+  // Samme kode som bkg-taggene, så samlingene senere kan bytte regel fra tagg til metafelt
+  add(BOKGRUPPE_METAFIELD.key, BOKGRUPPE_METAFIELD.type, f.bokgruppe);
   return out;
 }
 

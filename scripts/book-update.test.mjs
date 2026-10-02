@@ -1,5 +1,8 @@
 // node --test scripts/*.test.mjs
 // Jobben «Oppdater eksisterende bøker» (pakke B del 8, _shared/book-update.ts).
+import { setProtectedMembers } from "../supabase/functions/_shared/protected.ts";
+// Ingen produkter i beskyttede samlinger her (medlemskap testes i protected.test.mjs)
+setProtectedMembers([]);
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { countPlan, emptyBookUpdateCounts, loadBookUpdateCounts, planBookUpdate, summarizeBookUpdate } from "../supabase/functions/_shared/book-update.ts";
@@ -82,5 +85,5 @@ test("sammendrag og tellinger over pulser", () => {
   assert.equal(reloaded.fields.productType.count, 1);
   assert.equal(reloaded.fields.productType.examples[0], "a: (tom) → Bok");
   const s = summarizeBookUpdate(reloaded, "analyze");
-  assert.ok(s.startsWith("1 ville blitt endret, 0 uendret, hoppet over 22 (22 uten ISBN, 0 uten ONIX, 0 beskyttet, 0 DUPLIKAT), 0 feil. Felt:"), s);
+  assert.ok(s.startsWith("1 ville blitt endret, 0 uendret, hoppet over 22 (22 uten ISBN, 0 uten ONIX, 0 ikke bok, 0 beskyttet, 0 DUPLIKAT), 0 feil. Felt:"), s);
 });

@@ -8,12 +8,15 @@ import { getCaller } from "../_shared/auth.ts";
 import { BOKBASEN_ONIX_URL, clearBokbasenToken, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { extractBokgruppekode } from "../_shared/onix.js";
-import { protectedMessage, protectedTag } from "../_shared/protected.ts";
+import { isFatalJobError, isProtectedCollection, protectedProduct, protectedProductMessage } from "../_shared/protected.ts";
+import { ensureProtectedMembers } from "../_shared/protected-load.ts";
+import { notBookSkip, NOT_IN_BOKBASEN_MESSAGE } from "../_shared/book-format.ts";
+import { changedRow, errorRow, NO_ISBN_MESSAGE, skipRow, unchangedRow } from "../_shared/job-log.ts";
 import { ensureDuplicates } from "../_shared/duplicate-scan.ts";
 import { duplicateMessage } from "../_shared/duplicates.ts";
 import { bkgCollectionPlan, type BkgCollectionPlan, COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, tagSources } from "../_shared/collections.ts";
 import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
-import { bokgruppeCollectionCodes, missingBokgruppeTags } from "../_shared/bokgruppe.ts";
+import { BOKGRUPPE_FIELD, BOKGRUPPE_METAFIELD, bokgruppeCollectionCodes, missingBokgruppeTags } from "../_shared/bokgruppe.ts";
 import { emptyBulkJobState, runBulkJob, summarizeBulkStats, type BulkJobContext, type BulkJobSpec, type BulkRef } from "../_shared/bulk-job.ts";
 
 // Felt extractIsbn trenger (bok.isbn, strekkode, SKU) — handle er ikke lenger ISBN
@@ -203,6 +206,13 @@ async function processSyncBatch(jobId: string) {
   }).eq("id", jobId);
 
   const userId: string | null = job.user_id || null;
+  // Produktene i de beskyttede samlingene (wrendale). Mangler samlingen: jobben stopper
+  try {
+    await ensureProtectedMembers(0);
+  } catch (err) {
+    await supabase.from("jobs").update({ status: "failed", error_message: String(err), completed_at: new Date().toISOString() }).eq("id", jobId);
+    return;
+  }
   const config: SyncJobConfig = job.config || {
     phase: "tagging", cursor: null, total_products: 0,
     koder_found: [], tagged: 0, already_tagged: 0, no_kode: 0, tag_errors: 0, processed: 0,
@@ -231,13 +241,13 @@ async function processSyncBatch(jobId: string) {
         query($first: Int!, $after: String) {
           products(first: $first, after: $after, query: "${ALL_PRODUCT_STATUSES}") {
             pageInfo { hasNextPage endCursor }
-            edges { node { id handle tags ${PRODUCT_ISBN_FIELDS} } }
+            edges { node { id handle tags vendor ${PRODUCT_ISBN_FIELDS} } }
           }
         }`, vars);
 
       const productsData = (r.data as Record<string, unknown>)?.products as {
         pageInfo: { hasNextPage: boolean; endCursor: string };
-        edges: Array<{ node: { id: string; handle: string; tags: string[] } }>;
+        edges: Array<{ node: { id: string; handle: string; tags: string[]; vendor?: string | null } }>;
       } | null;
 
       // ISBN hentes fra bok.isbn / strekkode / SKU — handle er ikke lenger ISBN
@@ -264,23 +274,23 @@ async function processSyncBatch(jobId: string) {
 
         const kode = product.isbn ? kodeMap.get(product.isbn) : undefined;
 
-        // Beskyttet (tagg gave/lokal/lokalhistorie/lokallitteratur): får aldri nye tagger
-        if (protectedTag(product.tags)) {
+        // Beskyttet (tagg, leverandør Wrendale eller samling wrendale): får aldri nye tagger
+        if (protectedProduct(product)) {
           config.skipped_protected = (config.skipped_protected ?? 0) + 1;
-          await supabase.from("sync_log").insert({
-            isbn: product.isbn, title: product.handle, action: "sjangre_sync", status: "info",
-            message: protectedMessage(product.tags), shopify_id: product.id, job_id: jobId, user_id: userId,
-          });
+          await supabase.from("sync_log").insert(skipRow(
+            { isbn: product.isbn, title: product.handle, action: "sjangre_sync", shopify_id: product.id, job_id: jobId, user_id: userId },
+            "beskyttet", protectedProductMessage(product),
+          ));
           config.processed++;
           continue;
         }
 
         if (product.isbn && duplicates[product.isbn]) {
           config.skipped_duplicate = (config.skipped_duplicate ?? 0) + 1;
-          await supabase.from("sync_log").insert({
-            isbn: product.isbn, title: product.handle, action: "sjangre_sync", status: "info",
-            message: duplicateMessage(duplicates[product.isbn]), shopify_id: product.id, job_id: jobId, user_id: userId,
-          });
+          await supabase.from("sync_log").insert(skipRow(
+            { isbn: product.isbn, title: product.handle, action: "sjangre_sync", shopify_id: product.id, job_id: jobId, user_id: userId },
+            "duplikat", duplicateMessage(duplicates[product.isbn]),
+          ));
           config.processed++;
           continue;
         }
@@ -322,15 +332,18 @@ async function processSyncBatch(jobId: string) {
       await runCollectionsPhase(jobId, config, supabase);
     }
   } catch (err) {
-    await supabase.from("jobs").update({ status: "paused", error_message: String(err), config }).eq("id", jobId);
+    await supabase.from("jobs").update({ status: isFatalJobError(String(err)) ? "failed" : "paused", error_message: String(err), config }).eq("id", jobId);
   }
 }
 
-// ══ BULK-MODUS (pakke E del 5) ════════════════════════════════════════════════
-// Bokgruppekoder, bkg-tagger og samlinger i én jobb over hele katalogen, med
-// samme regler som før: koden fra bokgruppe_cache/books, ellers fra ONIX
-// (onix_cache, hentet i forkant), manglende bkg-tagger legges til med tagsAdd
-// (andre tagger røres ikke), og samlingene lages/får riktig navn til slutt.
+// ══ BULK-MODUS (pakke E del 5, pakke F) ════════════════════════════════════════
+// Bokgruppekoder, bkg-tagger, metafeltet bok.bokgruppe og samlinger i én jobb over
+// hele katalogen: koden fra bokgruppe_cache/books, ellers fra ONIX (onix_cache,
+// hentet i forkant), manglende bkg-tagger legges til med tagsAdd (andre tagger
+// røres ikke), bok.bokgruppe settes med productUpdate (bare metafeltet), og
+// samlingene lages/får riktig navn til slutt.
+// Bare bøker (pakke F del 2.2): ONIX hentes for alle ISBN, og produkter uten treff
+// i Bokbasen eller uten bokformat hoppes over. Én loggrad per produkt (del 3.1).
 // Sjekkmodus (standard) skriver ingenting til Shopify; koder fra Bokbasen
 // lagres i bokgruppe_cache i begge moduser (det er en kopi av Bokbasen-data).
 // Driveren er runBulkJob() i _shared/bulk-job.ts. Beskyttede og duplikater
@@ -339,8 +352,9 @@ async function processSyncBatch(jobId: string) {
 const SJANGRE_BULK_QUERY = `{
   products(query: "${ALL_PRODUCT_STATUSES}") {
     edges { node {
-      __typename id handle tags
+      __typename id handle tags vendor
       bokIsbn: metafield(namespace: "bok", key: "isbn") { value }
+      ${BOKGRUPPE_FIELD}
       variants(first: 1) { edges { node { __typename barcode sku } } }
     } }
   }
@@ -350,9 +364,14 @@ const SJANGRE_BULK_TAGS_MUTATION = `mutation sjangreBulkTags($id: ID!, $tags: [S
   tagsAdd(id: $id, tags: $tags) { node { id } userErrors { field message } }
 }`;
 
+const SJANGRE_BULK_METAFIELD_MUTATION = `mutation sjangreBulkBokgruppe($product: ProductUpdateInput!) {
+  productUpdate(product: $product) { product { id } userErrors { field message } }
+}`;
+
 interface SjangreCounts {
   tagged: number; alreadyTagged: number; noKode: number; tagErrors: number;
   skippedNoIsbn: number; skippedProtected: number; skippedDuplicate: number;
+  skippedNoOnix: number; skippedNotBook: number; metafieldSet: number;
   kodeFromCache: number; kodeFromOnix: number;
 }
 
@@ -362,6 +381,7 @@ function loadSjangreCounts(raw: unknown): SjangreCounts {
   return {
     tagged: n("tagged"), alreadyTagged: n("alreadyTagged"), noKode: n("noKode"), tagErrors: n("tagErrors"),
     skippedNoIsbn: n("skippedNoIsbn"), skippedProtected: n("skippedProtected"), skippedDuplicate: n("skippedDuplicate"),
+    skippedNoOnix: n("skippedNoOnix"), skippedNotBook: n("skippedNotBook"), metafieldSet: n("metafieldSet"),
     kodeFromCache: n("kodeFromCache"), kodeFromOnix: n("kodeFromOnix"),
   };
 }
@@ -386,11 +406,14 @@ async function kodeFromOnix(supabase: SupabaseClient, xmlByIsbn: Map<string, str
   return found;
 }
 
-/** «12 ville fått bkg-tagger, 400 hadde dem, 5 uten kode, hoppet over …; samlinger: 3 lages, 1 nytt navn» */
+/** «12 ville fått bkg-tagger, 400 hadde dem, 5 uten kode, 30 bok.bokgruppe, hoppet over …; samlinger: 3 lages, 1 nytt navn» */
 function summarizeSjangre(c: SjangreCounts, mode: "analyze" | "update", col: CollectionSyncResult | undefined): string {
+  const skipped = c.skippedProtected + c.skippedDuplicate + c.skippedNoIsbn + c.skippedNoOnix + c.skippedNotBook;
   const tags = `${c.tagged} ${mode === "update" ? "fikk" : "ville fått"} bkg-tagger, ${c.alreadyTagged} hadde dem, ${c.noKode} uten bokgruppekode, ` +
-    `hoppet over ${c.skippedProtected + c.skippedDuplicate + c.skippedNoIsbn} (${c.skippedProtected} beskyttet, ${c.skippedDuplicate} DUPLIKAT, ` +
-    `${c.skippedNoIsbn} uten ISBN), ${c.tagErrors} feil. Koder: ${c.kodeFromCache} fra cache, ${c.kodeFromOnix} fra Bokbasen`;
+    `${c.metafieldSet} ${mode === "update" ? "fikk" : "ville fått"} bok.bokgruppe, ` +
+    `hoppet over ${skipped} (${c.skippedProtected} beskyttet, ${c.skippedDuplicate} DUPLIKAT, ` +
+    `${c.skippedNoIsbn} uten ISBN, ${c.skippedNoOnix} fant ikke boka i Bokbasen, ${c.skippedNotBook} ikke bok), ${c.tagErrors} feil. ` +
+    `Koder: ${c.kodeFromCache} fra cache, ${c.kodeFromOnix} fra Bokbasen`;
   if (!col) return tags;
   const colText = mode === "update"
     ? `${col.created} laget, ${col.renamed} nytt navn, ${col.existing} fantes, ${col.errors} feil`
@@ -401,64 +424,90 @@ function summarizeSjangre(c: SjangreCounts, mode: "analyze" | "update", col: Col
 const SJANGRE_BULK_SPEC: BulkJobSpec<SjangreCounts> = {
   name: "sjangre-sync (bulk)",
   query: SJANGRE_BULK_QUERY,
-  slimFields: ["id", "handle", "tags", "bokIsbn"],
+  slimFields: ["id", "handle", "tags", "vendor", "bokIsbn"],
 
-  // ONIX bare for ISBN uten kode i bokgruppe_cache/books
-  async onixIsbns(products, ctx) {
-    const isbns = products.filter((p) => !protectedTag(p.tags)).map((p) => extractIsbn(p)).filter((i): i is string => !!i);
-    const known = await loadKodeMap(ctx.supabase, isbns);
-    return isbns.filter((i) => !known.has(i));
+  // ONIX for alle ISBN (bare bøker med treff i Bokbasen behandles); ferske treff i cachen hentes ikke på nytt
+  onixIsbns(products) {
+    return products.filter((p) => !protectedProduct(p)).map((p) => extractIsbn(p)).filter((i): i is string => !!i);
   },
 
   async planChunk(products, ctx) {
     const c = ctx.counts;
+    const update = ctx.mode === "update";
     const koder: string[] = (ctx.state.extra.koder ??= []);
-    const isbns = products.filter((p) => !protectedTag(p.tags)).map((p) => extractIsbn(p))
+    const isbns = products.filter((p) => !protectedProduct(p)).map((p) => extractIsbn(p))
       .filter((i): i is string => !!i && !ctx.state.duplicates?.[i]);
+    const xmlByIsbn = await ctx.loadXml(isbns);
     const kodeMap = await loadKodeMap(ctx.supabase, isbns);
-    const missing = isbns.filter((i) => !kodeMap.has(i));
-    const fromOnix = missing.length ? await kodeFromOnix(ctx.supabase, await ctx.loadXml(missing)) : new Map<string, string>();
-    c.kodeFromCache += kodeMap.size;
-    c.kodeFromOnix += fromOnix.size;
+    const missing = new Map([...xmlByIsbn].filter(([i]) => !kodeMap.has(i)));
+    const fromOnix = missing.size ? await kodeFromOnix(ctx.supabase, missing) : new Map<string, string>();
 
     const logs: Record<string, unknown>[] = [];
-    const lines: unknown[] = [];
-    const refs: BulkRef[] = [];
+    const tagLines: unknown[] = [], tagRefs: BulkRef[] = [];
+    const mfLines: unknown[] = [], mfRefs: BulkRef[] = [];
+    // Én loggrad per produkt (pakke F del 3.1)
     for (const product of products) {
+      // deno-lint-ignore no-explicit-any
+      const p = product as any;
       const isbn = extractIsbn(product);
       const base = { isbn, title: product.handle, action: "sjangre_sync", shopify_id: product.id, job_id: ctx.jobId, user_id: ctx.userId };
-      // Beskyttet (tagg gave/lokal/lokalhistorie/lokallitteratur): får aldri nye tagger
-      if (protectedTag(product.tags)) {
+      // Beskyttet (tagg, leverandør Wrendale eller samling wrendale): får aldri nye tagger eller metafelt
+      if (protectedProduct(product)) {
         c.skippedProtected++;
-        logs.push({ ...base, status: "info", message: protectedMessage(product.tags) });
+        logs.push(skipRow(base, "beskyttet", protectedProductMessage(product)));
         continue;
       }
-      if (!isbn) { c.skippedNoIsbn++; continue; }
+      if (!isbn) { c.skippedNoIsbn++; logs.push(skipRow(base, "ingen_isbn", NO_ISBN_MESSAGE)); continue; }
       const dup = ctx.state.duplicates?.[isbn];
       if (dup) {
         c.skippedDuplicate++;
-        logs.push({ ...base, status: "info", message: duplicateMessage(dup) });
+        logs.push(skipRow(base, "duplikat", duplicateMessage(dup)));
         continue;
       }
+      const xml = xmlByIsbn.get(isbn);
+      if (!xml) { c.skippedNoOnix++; logs.push(skipRow(base, "ikke_i_bokbasen", NOT_IN_BOKBASEN_MESSAGE)); continue; }
+      const notBook = notBookSkip(xml);
+      if (notBook) { c.skippedNotBook++; logs.push(skipRow(base, "ikke_bok", notBook)); continue; }
       const kode = kodeMap.get(isbn) ?? fromOnix.get(isbn);
-      if (!kode) { c.noKode++; continue; }
+      if (kodeMap.has(isbn)) c.kodeFromCache++;
+      else if (kode) c.kodeFromOnix++;
+      if (!kode) { c.noKode++; logs.push(unchangedRow(base, "Uendret: ingen bokgruppekode i Bokbasen")); continue; }
       if (!koder.includes(kode)) koder.push(kode);
+
       const add = missingBokgruppeTags(product.tags, kode);
-      if (!add.length) { c.alreadyTagged++; continue; }
-      c.tagged++;
-      logs.push({ ...base, status: "success", message: `${ctx.mode === "update" ? "La til" : "Ville lagt til"} ${add.join(", ")} (bokgruppe ${kode})` });
-      if (ctx.mode === "update") {
-        lines.push({ id: product.id, tags: add });
-        refs.push({ id: product.id, isbn, handle: product.handle });
+      const setMf = (p.bokgruppe?.value ?? null) !== kode;
+      if (!add.length && !setMf) {
+        c.alreadyTagged++;
+        logs.push(unchangedRow(base, `Uendret: bokgruppe ${kode}`));
+        continue;
       }
+      if (add.length) c.tagged++; else c.alreadyTagged++;
+      if (setMf) c.metafieldSet++;
+      const what = [...(add.length ? [add.join(", ")] : []), ...(setMf ? [`bok.bokgruppe ${p.bokgruppe?.value ?? "mangler"} → ${kode}`] : [])];
+      logs.push(changedRow(base, `${update ? "La til" : "Ville lagt til"} ${what.join(" og ")} (bokgruppe ${kode})`,
+        [...(add.length ? ["tags"] : []), ...(setMf ? ["bok.bokgruppe"] : [])]));
+      if (!update) continue;
+      const ref = { id: product.id, isbn, handle: product.handle };
+      if (add.length) { tagLines.push({ id: product.id, tags: add }); tagRefs.push(ref); }
+      if (setMf) { mfLines.push({ product: { id: product.id, metafields: [{ ...BOKGRUPPE_METAFIELD, value: kode }] } }); mfRefs.push(ref); }
     }
-    return { logs, ops: [{ kind: "tags", mutation: SJANGRE_BULK_TAGS_MUTATION, field: "tagsAdd", lines, refs, filename: "sjangre-tags.jsonl" }] };
+    return {
+      logs,
+      ops: [
+        { kind: "tags", mutation: SJANGRE_BULK_TAGS_MUTATION, field: "tagsAdd", lines: tagLines, refs: tagRefs, filename: "sjangre-tags.jsonl" },
+        { kind: "bokgruppe", mutation: SJANGRE_BULK_METAFIELD_MUTATION, field: "productUpdate", lines: mfLines, refs: mfRefs, filename: "sjangre-bokgruppe.jsonl" },
+      ],
+    };
   },
 
-  onLineError(ctx, _kind, ref, error) {
+  onLineError(ctx, kind, ref, error) {
     ctx.counts.tagErrors++;
-    ctx.counts.tagged = Math.max(0, ctx.counts.tagged - 1);
-    return { isbn: ref.isbn, title: ref.handle, action: "sjangre_sync", status: "error", message: `Feil i bulk (tagger): ${error}`, shopify_id: ref.id, job_id: ctx.jobId, user_id: ctx.userId };
+    if (kind === "tags") ctx.counts.tagged = Math.max(0, ctx.counts.tagged - 1);
+    else ctx.counts.metafieldSet = Math.max(0, ctx.counts.metafieldSet - 1);
+    return errorRow(
+      { isbn: ref.isbn, title: ref.handle, action: "sjangre_sync", shopify_id: ref.id, job_id: ctx.jobId, user_id: ctx.userId },
+      `Feil i bulk (${kind === "tags" ? "tagger" : "bok.bokgruppe"}): ${error}`,
+    );
   },
 
   // Samlinger: planen lages én gang; i oppdateringsmodus lages/rettes de til tiden er ute
@@ -488,7 +537,7 @@ const SJANGRE_BULK_SPEC: BulkJobSpec<SjangreCounts> = {
 
   totals(ctx: BulkJobContext<SjangreCounts>) {
     const c = ctx.counts;
-    return { succeeded: c.tagged, skipped: c.alreadyTagged + c.noKode + c.skippedNoIsbn, failed: c.tagErrors };
+    return { succeeded: c.tagged, skipped: c.alreadyTagged + c.noKode + c.skippedNoIsbn + c.skippedNoOnix + c.skippedNotBook, failed: c.tagErrors };
   },
 
   result(ctx) {
@@ -502,6 +551,7 @@ const SJANGRE_BULK_SPEC: BulkJobSpec<SjangreCounts> = {
       },
       collections: col,
       skippedProtected: c.skippedProtected, skippedDuplicate: c.skippedDuplicate,
+      skippedNotBook: c.skippedNotBook, skippedNoOnix: c.skippedNoOnix, metafieldSet: c.metafieldSet,
       summary: `${summarizeSjangre(c, ctx.mode, col)}. ${summarizeBulkStats(ctx.state.stats)}`,
     };
   },
@@ -659,7 +709,7 @@ async function processEnrichBatch(jobId: string) {
       await supabase.from("jobs").update({ status: "paused", processed: config.processed, config }).eq("id", jobId);
     }
   } catch (err) {
-    await supabase.from("jobs").update({ status: "paused", error_message: String(err), config }).eq("id", jobId);
+    await supabase.from("jobs").update({ status: isFatalJobError(String(err)) ? "failed" : "paused", error_message: String(err), config }).eq("id", jobId);
   }
 }
 
@@ -900,6 +950,7 @@ serve(async (req) => {
                   id
                   handle
                   productsCount { count }
+                  ruleSet { rules { column relation condition } }
                 }
               }
             }
@@ -907,10 +958,11 @@ serve(async (req) => {
         `, vars);
         const cols = (result.data as Record<string, unknown>)?.collections as {
           pageInfo: { hasNextPage: boolean; endCursor: string };
-          edges: Array<{ node: { id: string; handle: string; productsCount: { count: number } } }>;
+          edges: Array<{ node: { id: string; handle: string; productsCount: { count: number }; ruleSet?: { rules: Array<{ column: string; relation: string; condition: string }> } | null } }>;
         } | undefined;
         for (const { node } of cols?.edges ?? []) {
-          if (node.handle.startsWith("bkg-")) {
+          // Bare bkg-samlinger, og aldri en beskyttet samling (_shared/protected.ts)
+          if (node.handle.startsWith("bkg-") && !isProtectedCollection(node)) {
             checked++;
             if ((node.productsCount?.count ?? 0) === 0) {
               toDelete.push({ id: node.id, handle: node.handle });

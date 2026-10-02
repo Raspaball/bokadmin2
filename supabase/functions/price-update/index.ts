@@ -5,14 +5,17 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
 import { getCaller, scheduledUserId } from "../_shared/auth.ts";
-import { BOKBASEN_ONIX_URL, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { choosePrice, type PriceChoice } from "../_shared/price.ts";
 import { approvalMessage, checkPriceChange, fixMessage } from "../_shared/price-guard.ts";
 import { getMaxPriceChangePct, recordPendingApproval } from "../_shared/price-approvals.ts";
 import { EGEN_PRIS_FIELD, priceLock, priceLockMessage } from "../_shared/price-lock.ts";
 import { countMissing, loadCounts, summarizeCounts } from "../_shared/price-summary.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
-import { protectedMessage, protectedTag } from "../_shared/protected.ts";
+import { isFatalJobError, protectedProduct, protectedProductMessage } from "../_shared/protected.ts";
+import { ensureProtectedMembers } from "../_shared/protected-load.ts";
+import { getOnixCached } from "../_shared/onix-cache.ts";
+import { notBookSkip, NOT_IN_BOKBASEN_MESSAGE } from "../_shared/book-format.ts";
+import { changedRow, errorRow, NO_ISBN_MESSAGE, skipRow, unchangedRow, type JobLogRow, type LogBase } from "../_shared/job-log.ts";
 import { ensureDuplicates } from "../_shared/duplicate-scan.ts";
 import { duplicateMessage } from "../_shared/duplicates.ts";
 
@@ -38,6 +41,7 @@ interface ShopifyProduct {
   status: string;
   handle: string;
   tags: string[];
+  vendor?: string | null;
   bokIsbn?: { value: string } | null;
   egenPris?: { value: string } | null;
   variants: {
@@ -79,6 +83,7 @@ async function fetchShopifyProductsPage(
             status
             handle
             tags
+            vendor
             ${BOK_ISBN_FIELD}
             ${EGEN_PRIS_FIELD}
             variants(first: 1) {
@@ -127,28 +132,28 @@ async function getShopifyProductCount(_userId: string | null): Promise<number> {
 
 // Pris fra Bokbasen etter regelen i _shared/price.ts (NOK, Norge, gyldig i dag,
 // 04 > 02 > 03 > 01 > andre). price = null med årsak når ingen pris godkjennes.
-async function fetchBokbasenPrice(isbn: string, userId: string | null): Promise<PriceChoice> {
-  const token = await getBokbasenToken(userId);
-  const res = await fetch(`${BOKBASEN_ONIX_URL}/${isbn}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) return { price: null };
-  return choosePrice(await res.text());
+// ONIX fra onix_cache når den er under 2 timer gammel (som tilgjengelighetsjobben),
+// ellers fra Bokbasen. `notBook` = loggteksten når posten ikke er en bok (pakke F del 2.2).
+const PRICE_ONIX_MAX_AGE_DAYS = 2 / 24;
+async function fetchBokbasenPrice(isbn: string, userId: string | null): Promise<PriceChoice & { found: boolean; notBook: string | null }> {
+  const { xml } = await getOnixCached(isbn, userId, PRICE_ONIX_MAX_AGE_DAYS);
+  if (!xml) return { price: null, found: false, notBook: null };
+  return { ...choosePrice(xml), found: true, notBook: notBookSkip(xml) };
 }
 
 // Nåværende pris på varianten (tall eller null) og om den er låst (egen pris/tilbud).
 // undefined når varianten ikke finnes.
-async function getVariantPrice(variantId: string): Promise<{ price: number | null; lock: ReturnType<typeof priceLock>; tags: string[] } | undefined> {
+async function getVariantPrice(variantId: string): Promise<{ price: number | null; lock: ReturnType<typeof priceLock>; product: { id: string; tags: string[]; vendor: string | null } } | undefined> {
   const { data } = await shopifyGraphQL<{
-    productVariant: { price: string | null; compareAtPrice: string | null; product: { tags: string[]; egenPris: { value: string } | null } } | null;
+    productVariant: { price: string | null; compareAtPrice: string | null; product: { id: string; tags: string[]; vendor: string | null; egenPris: { value: string } | null } } | null;
   }>(
-    `query variantPrice($id: ID!) { productVariant(id: $id) { price compareAtPrice product { tags ${EGEN_PRIS_FIELD} } } }`,
+    `query variantPrice($id: ID!) { productVariant(id: $id) { price compareAtPrice product { id tags vendor ${EGEN_PRIS_FIELD} } } }`,
     { id: variantId },
   );
   const v = data.productVariant;
   if (!v) return undefined;
   const p = parseFloat(v.price ?? "");
-  return { price: Number.isFinite(p) ? p : null, lock: priceLock(v.product?.egenPris, v.compareAtPrice), tags: v.product?.tags ?? [] };
+  return { price: Number.isFinite(p) ? p : null, lock: priceLock(v.product?.egenPris, v.compareAtPrice), product: v.product };
 }
 
 
@@ -198,6 +203,14 @@ async function processBatch(jobId: string) {
     status: "running",
     started_at: job.started_at || new Date().toISOString(),
   }).eq("id", jobId);
+
+  // Produktene i de beskyttede samlingene (wrendale), hentet hver puls. Mangler samlingen: jobben stopper
+  try {
+    await ensureProtectedMembers(0);
+  } catch (err) {
+    await supabase.from("jobs").update({ status: "failed", error_message: String(err), completed_at: new Date().toISOString() }).eq("id", jobId);
+    return;
+  }
 
   // ISBN med flere produkter (pakke D del 3b): skannes én gang per jobb, så hoppes de over
   const duplicates = await ensureDuplicates(supabase, job, startTime + 30_000);
@@ -257,12 +270,13 @@ async function processBatch(jobId: string) {
         processed,
       }).eq("id", jobId);
 
-      // Beskyttet (tagg gave/lokal/lokalhistorie/lokallitteratur): prisen røres aldri
-      if (protectedTag(product.tags)) {
-        await supabase.from("sync_log").insert({
-          isbn, title: product.handle, action: "update", status: "info",
-          message: protectedMessage(product.tags), shopify_id: product.id, job_id: jobId, user_id: userId,
-        });
+      // Én loggrad per produkt (pakke F del 3.1)
+      const base: LogBase = { isbn, title: product.handle, action: "update", shopify_id: product.id, job_id: jobId, user_id: userId };
+      const log = (row: JobLogRow) => supabase.from("sync_log").insert(row);
+
+      // Beskyttet (tagg, leverandør Wrendale eller samling wrendale): prisen røres aldri
+      if (protectedProduct(product)) {
+        await log(skipRow(base, "beskyttet", protectedProductMessage(product)));
         counts.skippedProtected++;
         skipped++;
         processed++;
@@ -270,6 +284,7 @@ async function processBatch(jobId: string) {
       }
 
       if (!isbn || !variantId) {
+        await log(skipRow(base, "ingen_isbn", NO_ISBN_MESSAGE));
         counts.skippedNoIsbn++;
         skipped++;
         processed++;
@@ -277,10 +292,7 @@ async function processBatch(jobId: string) {
       }
 
       if (duplicates[isbn]) {
-        await supabase.from("sync_log").insert({
-          isbn, title: product.handle, action: "update", status: "info",
-          message: duplicateMessage(duplicates[isbn]), shopify_id: product.id, job_id: jobId, user_id: userId,
-        });
+        await log(skipRow(base, "duplikat", duplicateMessage(duplicates[isbn])));
         counts.skippedDuplicate++;
         skipped++;
         processed++;
@@ -290,16 +302,7 @@ async function processBatch(jobId: string) {
       // Egen pris (bok.egen_pris) eller tilbud (compareAtPrice): prisen røres ikke
       const lock = priceLock(product.egenPris, product.variants?.edges?.[0]?.node?.compareAtPrice);
       if (lock) {
-        await supabase.from("sync_log").insert({
-          isbn,
-          title: product.handle,
-          action: "update",
-          status: "info",
-          message: priceLockMessage(lock),
-          shopify_id: product.id,
-          job_id: jobId,
-          user_id: userId,
-        });
+        await log(skipRow(base, "egen_pris", priceLockMessage(lock)));
         if (lock === "egen pris") counts.skippedOwnPrice++;
         else counts.skippedOffer++;
         skipped++;
@@ -308,22 +311,29 @@ async function processBatch(jobId: string) {
       }
 
       try {
-        const { price: bokbasenPrice, reason } = await fetchBokbasenPrice(isbn, userId);
+        const { price: bokbasenPrice, reason, found, notBook } = await fetchBokbasenPrice(isbn, userId);
+
+        if (!found) {
+          countMissing(counts, "fant ikke boka i Bokbasen");
+          skipped++;
+          await log(skipRow(base, "ikke_i_bokbasen", NOT_IN_BOKBASEN_MESSAGE));
+          processed++;
+          continue;
+        }
+        // Bare bøker (pakke F del 2.2)
+        if (notBook) {
+          countMissing(counts, "ikke bok");
+          skipped++;
+          await log(skipRow(base, "ikke_bok", notBook));
+          processed++;
+          continue;
+        }
 
         if (bokbasenPrice === null) {
           countMissing(counts, reason ?? "kunne ikke hente pris fra Bokbasen");
           failed++;
-          await supabase.from("sync_log").insert({
-            isbn,
-            title: product.handle,
-            action: "update",
-            status: "error",
-            // Ingen godkjent pris: prisen endres ikke («ingen NOK-pris», «ingen gyldig pris i dag» …)
-            message: reason ? `Ingen endring: ${reason}` : "Kunne ikke hente pris fra Bokbasen",
-            shopify_id: product.id,
-            job_id: jobId,
-            user_id: userId,
-          });
+          // Ingen godkjent pris: prisen endres ikke («ingen NOK-pris», «ingen gyldig pris i dag» …)
+          await log(errorRow(base, reason ? `Ingen endring: ${reason}` : "Kunne ikke hente pris fra Bokbasen"));
           processed++;
           continue;
         }
@@ -331,16 +341,7 @@ async function processBatch(jobId: string) {
         if (bokbasenPrice <= 0) {
           countMissing(counts, "pris 0 eller lavere");
           failed++;
-          await supabase.from("sync_log").insert({
-            isbn,
-            title: product.handle,
-            action: "update",
-            status: "error",
-            message: `Avvist: Bokbasen returnerte ugyldig pris (${bokbasenPrice} kr) — ingen endring gjort`,
-            shopify_id: product.id,
-            job_id: jobId,
-            user_id: userId,
-          });
+          await log(errorRow(base, `Avvist: Bokbasen returnerte ugyldig pris (${bokbasenPrice} kr) — ingen endring gjort`));
           processed++;
           continue;
         }
@@ -348,6 +349,7 @@ async function processBatch(jobId: string) {
         const shopifyPrice = currentPrice ? parseFloat(currentPrice) : null;
         const change = checkPriceChange(shopifyPrice, bokbasenPrice, maxPct);
         if (change.action === "same") {
+          await log(unchangedRow(base, `Uendret: ${bokbasenPrice} kr`));
           counts.same++;
           skipped++;
           processed++;
@@ -356,18 +358,9 @@ async function processBatch(jobId: string) {
 
         if (mode === "analyze") {
           // Analyze mode: log discrepancy without updating Shopify
-          await supabase.from("sync_log").insert({
-            isbn,
-            title: product.handle,
-            action: "update",
-            status: "success",
-            message: change.action === "approval"
-              ? `Avvik: ${shopifyPrice ?? "mangler"} → ${bokbasenPrice} kr (ikke oppdatert; ${approvalMessage(shopifyPrice, bokbasenPrice, change.pct!).toLowerCase()})`
-              : `Avvik: ${shopifyPrice ?? "mangler"} → ${bokbasenPrice} kr (ikke oppdatert)`,
-            shopify_id: product.id,
-            job_id: jobId,
-            user_id: userId,
-          });
+          await log(changedRow(base, change.action === "approval"
+            ? `Avvik: ${shopifyPrice ?? "mangler"} → ${bokbasenPrice} kr (ikke oppdatert; ${approvalMessage(shopifyPrice, bokbasenPrice, change.pct!).toLowerCase()})`
+            : `Avvik: ${shopifyPrice ?? "mangler"} → ${bokbasenPrice} kr (ikke oppdatert)`, ["price"]));
           if (change.action === "approval") counts.approval++;
           else counts.changed++;
           succeeded++;
@@ -385,34 +378,15 @@ async function processBatch(jobId: string) {
             job_id: jobId,
             user_id: userId,
           });
-          await supabase.from("sync_log").insert({
-            isbn,
-            title: product.handle,
-            action: "update",
-            status: "info",
-            message: approvalMessage(shopifyPrice, bokbasenPrice, change.pct!),
-            shopify_id: product.id,
-            job_id: jobId,
-            user_id: userId,
-          });
+          await log(unchangedRow(base, approvalMessage(shopifyPrice, bokbasenPrice, change.pct!)));
           counts.approval++;
           skipped++;
         } else {
           // Update mode: actually change the price in Shopify
           const shopifyOk = await updateShopifyPrice(userId, product.id, variantId, bokbasenPrice);
-
-          await supabase.from("sync_log").insert({
-            isbn,
-            title: product.handle,
-            action: "update",
-            status: shopifyOk ? "success" : "error",
-            message: shopifyOk
-              ? (change.action === "fix" ? fixMessage(shopifyPrice, bokbasenPrice) : `Pris endret: ${shopifyPrice} → ${bokbasenPrice} kr`)
-              : `Pris endret (${shopifyPrice} → ${bokbasenPrice}), men Shopify-oppdatering feilet`,
-            shopify_id: product.id,
-            job_id: jobId,
-            user_id: userId,
-          });
+          await log(shopifyOk
+            ? changedRow(base, change.action === "fix" ? fixMessage(shopifyPrice, bokbasenPrice) : `Pris endret: ${shopifyPrice} → ${bokbasenPrice} kr`, ["price"])
+            : errorRow(base, `Pris endret (${shopifyPrice} → ${bokbasenPrice}), men Shopify-oppdatering feilet`));
 
           if (shopifyOk) { succeeded++; counts.changed++; }
           else { failed++; counts.errors++; }
@@ -421,6 +395,7 @@ async function processBatch(jobId: string) {
         counts.errors++;
         failed++;
         console.error(`Error processing ${isbn}:`, err);
+        await log(errorRow(base, err instanceof Error ? err.message : String(err)));
       }
 
       processed++;
@@ -453,7 +428,7 @@ async function processBatch(jobId: string) {
     const errMsg = String(err);
     // Fatal auth/config errors → fail permanently to avoid infinite retry loop.
     // Transient errors (network, throttle) → stay paused so pg_cron retries.
-    const isFatal = errMsg.includes("HTTP 401") || errMsg.includes("HTTP 403");
+    const isFatal = isFatalJobError(errMsg);
     await supabase.from("jobs").update({
       status: isFatal ? "failed" : "paused",
       error_message: errMsg,
@@ -507,7 +482,8 @@ serve(async (req) => {
             // Bare hvis Shopify-prisen fortsatt er den gamle — ellers er den endret siden
             const variant = await getVariantPrice(row.shopify_variant_id);
             if (variant === undefined) throw new Error("Varianten finnes ikke lenger i Shopify");
-            if (protectedTag(variant.tags)) throw new Error(`Produktet er beskyttet (tagg: ${protectedTag(variant.tags)}). Prisen endres aldri; avvis endringen`);
+            await ensureProtectedMembers(60_000);
+            if (protectedProduct(variant.product)) throw new Error(`Produktet er beskyttet (${protectedProduct(variant.product)}). Prisen endres aldri; avvis endringen`);
             if (variant.lock) throw new Error(`Prisen er låst i Shopify (${variant.lock}). Avvis endringen, eller fjern låsen først`);
             const current = variant.price;
             const old = row.old_price === null ? null : Number(row.old_price);

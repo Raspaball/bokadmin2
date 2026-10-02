@@ -6,6 +6,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/
 import { Loader2, Search, RefreshCw, CheckCircle2, AlertCircle, FileText, Upload, Pause, Plus, Trash2, Play, X, Download, ExternalLink } from 'lucide-react';
 import { availabilityJobs, scheduledTasks, syncLog, type Job, type ScheduledTask, type SyncLogEntry } from '../utils/api';
 import { shopifyAdminUrl, sortStatusChanges, statusChangesCsv, statusLabel, type StatusChangeRow } from '../utils/statusReport';
+import { downloadCsv } from '../utils/download';
+import { JobHealth, JobLogCsvButton } from './JobHealth';
 import { toast } from 'sonner';
 
 const CRON_PRESETS = [
@@ -34,15 +36,6 @@ function bulkPhase(job: Job): string | null {
 function statusReportOf(job: Job | undefined): { rows: StatusChangeRow[]; shopDomain: string | null } | null {
   const r = job?.result as { statusChanges?: StatusChangeRow[]; shopDomain?: string | null } | null | undefined;
   return r?.statusChanges ? { rows: r.statusChanges, shopDomain: r.shopDomain ?? null } : null;
-}
-
-function downloadCsv(filename: string, text: string) {
-  const url = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }));
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 function formatDuration(start: string, end: string): string {
@@ -266,6 +259,8 @@ export function TilgjengelighetTab() {
   const activeMode = activeJob ? ((activeJob.config as { mode?: string })?.mode || 'analyze') : null;
   const reportJob = recentJobs.find(j => j.status === 'completed' && statusReportOf(j));
   const report = statusReportOf(reportJob);
+  // Sjekken: «ville fått ny status». Oppdateringen: «fikk ny status»
+  const reportIsAnalyze = ((reportJob?.config as { mode?: string } | undefined)?.mode || 'analyze') === 'analyze';
 
   return (
     <>
@@ -327,6 +322,8 @@ export function TilgjengelighetTab() {
                 </div>
               </div>
 
+              <JobHealth job={activeJob} />
+
               <div className="flex items-center justify-between">
                 <p className="text-xs text-gray-400">
                   Du kan lukke denne fanen — sjekken fortsetter i bakgrunnen.
@@ -379,8 +376,8 @@ export function TilgjengelighetTab() {
               <div>
                 <CardTitle>Statusendringer</CardTitle>
                 <CardDescription>
-                  Fra {((reportJob.config as { mode?: string })?.mode || 'analyze') === 'analyze' ? 'sjekken' : 'oppdateringen'} {new Date(reportJob.created_at).toLocaleString('nb-NO')}:
-                  {' '}{report.rows.filter(r => !r.own).length} ville fått ny status, {report.rows.filter(r => r.own).length} har egen tilgjengelighet.
+                  Fra {reportIsAnalyze ? 'sjekken' : 'oppdateringen'} {new Date(reportJob.created_at).toLocaleString('nb-NO')}:
+                  {' '}{report.rows.filter(r => !r.own).length} {reportIsAnalyze ? 'ville fått' : 'fikk'} ny status, {report.rows.filter(r => r.own).length} har egen tilgjengelighet.
                   Kryss av «Egen tilgjengelighet» på produktet i Shopify der statusen skal stå
                 </CardDescription>
               </div>
@@ -397,7 +394,7 @@ export function TilgjengelighetTab() {
           </CardHeader>
           <CardContent>
             {report.rows.length === 0 ? (
-              <p className="text-sm text-gray-500 text-center py-3">Ingen produkter ville fått ny status</p>
+              <p className="text-sm text-gray-500 text-center py-3">Ingen produkter {reportIsAnalyze ? 'ville fått' : 'fikk'} ny status</p>
             ) : (
               <div className="max-h-[400px] overflow-y-auto border rounded-lg">
                 <table className="w-full text-sm">
@@ -481,6 +478,7 @@ export function TilgjengelighetTab() {
                             <p className="text-xs text-gray-400">{(job.result as { summary?: string }).summary}</p>
                           )}
                         </div>
+                        <JobLogCsvButton job={job} label="CSV" />
                         <Button
                           variant="outline"
                           size="sm"

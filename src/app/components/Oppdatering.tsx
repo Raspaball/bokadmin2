@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import { TilgjengelighetTab } from './TilgjengelighetTab';
 import { PrisGodkjenning } from './PrisGodkjenning';
 import { BokOppdatering } from './BokOppdatering';
+import { JobHealth, JobLogCsvButton } from './JobHealth';
 
 // Tidene er norsk tid (Europe/Oslo), se run-scheduled-tasks i pg_cron.
 const CRON_PRESETS = [
@@ -374,6 +375,8 @@ export function Oppdatering() {
                 </div>
               </div>
 
+              <JobHealth job={activeJob} />
+
               <div className="flex items-center justify-between">
                 <p className="text-xs text-gray-400">
                   Du kan lukke denne fanen — jobben fortsetter i bakgrunnen.
@@ -458,6 +461,7 @@ export function Oppdatering() {
                             : <>, {job.succeeded} {mode === 'analyze' ? 'avvik' : 'endret'}, {job.skipped} uendret{job.failed > 0 && `, ${job.failed} feilet`}</>}
                         </p>
                       </div>
+                      <JobLogCsvButton job={job} label="CSV" />
                       <Button
                         variant="outline"
                         size="sm"

@@ -154,6 +154,8 @@ export interface AvailabilityProduct {
   tilgjengelighet?: { value: string } | null;
   utgivelsesdato?: { value: string } | null;
   egenTilgjengelighet?: { value: string } | null;
+  /** Shopify totalInventory: beholdning på alle lokasjoner (sporede varianter) */
+  totalInventory?: number | null;
   variant?: { inventoryPolicy?: string | null; inventoryItem?: { tracked?: boolean | null } | null } | null;
 }
 
@@ -163,6 +165,10 @@ export interface AvailabilityPlan {
   /** Egen tilgjengelighet: det regelen ville endret, men som står (tomt = ingenting holdt tilbake) */
   heldBack: AvailabilityChanges;
   ownAvailability: boolean;
+  /** På lager (pakke F del 2.1): det regelen ville endret, men som står fordi boka har beholdning */
+  stockKept: AvailabilityChanges;
+  /** Beholdningen når stockKept ikke er tom, ellers 0 */
+  inStock: number;
 }
 
 /**
@@ -202,9 +208,25 @@ export function planAvailability(product: AvailabilityProduct, rule: Availabilit
   if (needsContinuePolicy(rule, product.variant)) all.continuePolicy = true;
 
   const own = ownAvailability(product.egenTilgjengelighet);
-  if (!own) return { changes: all, heldBack: {}, ownAvailability: false };
-  const { utgivelsesdato, ...heldBack } = all;
-  return { changes: utgivelsesdato ? { utgivelsesdato } : {}, heldBack, ownAvailability: true };
+  if (own) {
+    const { utgivelsesdato, ...heldBack } = all;
+    return { changes: utgivelsesdato ? { utgivelsesdato } : {}, heldBack, ownAvailability: true, stockKept: {}, inStock: 0 };
+  }
+  // Lagerbeholdning går foran Bokbasen: aldri utkast/arkivert og ingen endring av
+  // inventoryPolicy når boka har fysisk lager. bok.tilgjengelighet settes som før.
+  const stock = Number(product.totalInventory ?? 0);
+  const stockKept: AvailabilityChanges = {};
+  if (stock > 0) {
+    if (all.status && all.status.to !== "ACTIVE") { stockKept.status = all.status; delete all.status; }
+    if (all.continuePolicy) { stockKept.continuePolicy = true; delete all.continuePolicy; }
+  }
+  const kept = Object.keys(stockKept).length > 0;
+  return { changes: all, heldBack: {}, ownAvailability: false, stockKept, inStock: kept ? stock : 0 };
+}
+
+/** «Status beholdt: på lager (3)» */
+export function inStockMessage(stock: number): string {
+  return `Status beholdt: på lager (${stock})`;
 }
 
 /** «status DRAFT → ACTIVE, tilgjengelighet → kommer, utgivelsesdato → 2026-11-15, salg uten lager» */
@@ -222,6 +244,7 @@ export function describeAvailabilityChanges(c: AvailabilityChanges): string {
  *   «Ville endret: Kommer 15.11.2026: ACTIVE, kan forhåndsbestilles (status DRAFT → ACTIVE)»
  *   «Hoppet over: egen tilgjengelighet (regelen: Ikke tilgjengelig (kode 40): DRAFT; ville endret status ACTIVE → DRAFT)»
  *   «Endret: utgivelsesdato … → …. Hoppet over: egen tilgjengelighet (…)»
+ *   «Endret: … (tilgjengelighet … → ikke_tilgjengelig). Status beholdt: på lager (3) (regelen: …; ville endret status ACTIVE → DRAFT)»
  */
 export function availabilityLogMessage(
   plan: AvailabilityPlan,
@@ -236,6 +259,9 @@ export function availabilityLogMessage(
   }
   if (Object.keys(plan.heldBack).length) {
     parts.push(`${OWN_AVAILABILITY_MESSAGE} (regelen: ${availabilityDescription(rule, date)}; ville endret ${describeAvailabilityChanges(plan.heldBack)})`);
+  }
+  if (Object.keys(plan.stockKept ?? {}).length) {
+    parts.push(`${inStockMessage(plan.inStock)} (regelen: ${availabilityDescription(rule, date)}; ville endret ${describeAvailabilityChanges(plan.stockKept)})`);
   }
   return parts.length ? parts.join(". ") : null;
 }

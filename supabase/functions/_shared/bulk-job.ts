@@ -22,6 +22,8 @@ import { BULK_ACTIVE, fetchBulkText, startBulkMutation, startBulkQuery, streamJs
 import { getOnixCached, ONIX_CACHE_MAX_AGE_DAYS } from "./onix-cache.ts";
 import { extractIsbn } from "./isbn.js";
 import { duplicateCounts } from "./duplicates.ts";
+import { isFatalJobError } from "./protected.ts";
+import { ensureProtectedMembers } from "./protected-load.ts";
 
 export const BULK_CHUNK = 1000;
 export const ONIX_CONCURRENCY = 4;
@@ -119,6 +121,16 @@ export async function insertLogs(supabase: Supabase, rows: Record<string, unknow
   for (let i = 0; i < rows.length; i += 500) await supabase.from("sync_log").insert(rows.slice(i, i + 500));
 }
 
+/**
+ * Sletter jobbens loggrader for disse produktene (planfasen kjøres på nytt etter et
+ * avbrudd): da får hvert produkt fortsatt bare én rad per jobb (pakke F del 3.1).
+ */
+export async function clearChunkLogs(supabase: Supabase, jobId: string, productIds: string[]) {
+  for (let i = 0; i < productIds.length; i += 100) {
+    await supabase.from("sync_log").delete().eq("job_id", jobId).in("shopify_id", productIds.slice(i, i + 100));
+  }
+}
+
 /** ISBN-ene som har fersk ONIX i cachen (bare ISBN, ikke XML). */
 export async function freshOnixIsbns(supabase: Supabase, isbns: string[], maxAgeDays = ONIX_CACHE_MAX_AGE_DAYS): Promise<Set<string>> {
   const since = new Date(Date.now() - maxAgeDays * 86_400_000).toISOString();
@@ -158,6 +170,14 @@ export async function runBulkJob<C>(
   const { data: job } = await supabase.from("jobs").select("*").eq("id", jobId).single();
   if (!job || (job.status !== "running" && job.status !== "paused")) return;
   await supabase.from("jobs").update({ status: "running", started_at: job.started_at || new Date().toISOString() }).eq("id", jobId);
+  // Produktene i de beskyttede samlingene (wrendale), hentet på nytt hver puls.
+  // Mangler samlingen, stopper jobben (fatal, se catch nederst).
+  try {
+    await ensureProtectedMembers(0);
+  } catch (err) {
+    await supabase.from("jobs").update({ status: "failed", error_message: String(err), completed_at: new Date().toISOString() }).eq("id", jobId);
+    return;
+  }
 
   const countsAtStart = loadCounts(job.config?.counts);
   const stateAtStart: BulkJobState = { ...emptyBulkJobState(), ...(job.config?.bulk ?? {}) };
@@ -220,8 +240,14 @@ export async function runBulkJob<C>(
           await save();
           continue;
         }
+        let lastBeat = Date.now();
         while (state.onixTodo.length && Date.now() < deadline) {
           const batch = state.onixTodo.slice(0, ONIX_CONCURRENCY);
+          // Livstegn (pakke F del 3.2): siste ISBN og hvor mange som gjenstår, minst hvert 20. s
+          if (Date.now() - lastBeat > 20_000) {
+            lastBeat = Date.now();
+            await supabase.from("jobs").update({ current_isbn: batch[0], config: { ...job.config, counts: ctx.counts, bulk: state } }).eq("id", jobId);
+          }
           const t0 = Date.now();
           // maxAge 0: cachen er allerede sjekket over, så dette henter alltid fra Bokbasen
           const results = await Promise.all(batch.map((isbn) => getOnixCached(isbn, ctx.userId, 0)));
@@ -253,6 +279,7 @@ export async function runBulkJob<C>(
         await streamJsonlLines(state.productsUrl!, (line) => a.add(line));
         const { logs, ops } = await spec.planChunk(a.products, ctx);
         processed += a.products.length;
+        await clearChunkLogs(supabase, jobId, a.products.map((p) => p.id));
         await insertLogs(supabase, logs);
         state.planIndex = to;
         const pending = ops.filter((o) => o.lines.length).map((o) => ({
@@ -262,7 +289,8 @@ export async function runBulkJob<C>(
           state.pending = pending;
           state.phase = "apply";
         }
-        await save({ current_isbn: null });
+        const last = a.products[a.products.length - 1];
+        await save({ current_isbn: last ? extractIsbn(last) ?? last.handle : null });
         continue;
       }
 
@@ -320,7 +348,7 @@ export async function runBulkJob<C>(
   } catch (err) {
     console.error(`${spec.name}:`, err);
     const msg = String(err);
-    const fatal = msg.includes("HTTP 401") || msg.includes("HTTP 403");
+    const fatal = isFatalJobError(msg);
     // Tilstanden fra pulsstart, men en startet operasjon beholdes (ellers sendes den på nytt)
     const keep = state.opId && state.opId !== stateAtStart.opId ? state : stateAtStart;
     await supabase.from("jobs").update({

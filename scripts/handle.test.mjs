@@ -1,4 +1,7 @@
 // Tester for handle-regelen. Kjør: node --test scripts/handle.test.mjs
+import { setProtectedMembers } from "../supabase/functions/_shared/protected.ts";
+// Ingen produkter i beskyttede samlinger her (medlemskap testes i protected.test.mjs)
+setProtectedMembers([]);
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildBookHandle, firstAuthor, normalizeIsbn, slugify } from "../supabase/functions/_shared/handle.js";

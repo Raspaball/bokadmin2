@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/
 import { AlertCircle, CheckCircle2, FileText, Loader2, RefreshCw, Search, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { bookUpdateJobs, syncLog, type BookUpdateCounts, type Job, type SyncLogEntry } from '../utils/api';
+import { JobHealth, JobLogCsvButton } from './JobHealth';
 
 // Jobben «Oppdater eksisterende bøker» (pakke B del 8): retter metafelt, kategori,
 // productType, SEO, omslag, beskrivelse og tagger etter standarden. Endrer aldri
@@ -155,6 +156,7 @@ export function BokOppdatering() {
                 <div className="bg-blue-600 rounded-full h-3 transition-all duration-500" style={{ width: `${progress}%` }} />
               </div>
               {activeCounts && <FieldSummary counts={activeCounts} />}
+              <JobHealth job={activeJob} />
               <Button variant="ghost" size="sm" className="text-red-500" onClick={() => bookUpdateJobs.cancel(activeJob.id).then(() => { setActiveJob(null); loadRecent(); })}>
                 <X className="size-4 mr-1" /> Avbryt
               </Button>
@@ -193,6 +195,7 @@ export function BokOppdatering() {
                       {bulkSummary(job) && <p className="text-xs text-gray-500">{bulkSummary(job)}</p>}
                       <p className="text-xs text-gray-500">{new Date(job.created_at).toLocaleString('nb-NO')}{job.error_message ? ` — ${job.error_message}` : ''}</p>
                     </div>
+                    <JobLogCsvButton job={job} label="CSV" />
                     <Button variant="outline" size="sm" onClick={() => toggleLog(job.id)}>
                       <FileText className="size-4 mr-1" /> {expanded === job.id ? 'Skjul logg' : 'Vis logg'}
                     </Button>

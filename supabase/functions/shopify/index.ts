@@ -10,7 +10,7 @@ import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { extractAvailabilityCode, extractBokgruppekode, extractDescription, extractPublishingDate } from "../_shared/onix.js";
 import {
   availabilityDescription, availabilityMetafields, availabilityRule, EGEN_TILGJENGELIGHET_FIELD, needsContinuePolicy,
-  OWN_AVAILABILITY_MESSAGE, ownAvailability, type AvailabilityRule,
+  inStockMessage, OWN_AVAILABILITY_MESSAGE, ownAvailability, type AvailabilityRule,
 } from "../_shared/availability.ts";
 import { chooseValidPrice } from "../_shared/price.ts";
 import { csvPriceAndStatus, decidePushPrice, validPrice, type PushPriceDecision } from "../_shared/push-price.ts";
@@ -21,11 +21,12 @@ import { bokgruppeTagsForKode } from "../_shared/bokgruppe.ts";
 import { COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, collectionTitleFix, tagSources } from "../_shared/collections.ts";
 import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
 import { bookDescription, bookFieldsFromOnix, bookMetafields, type BookFields } from "../_shared/book-standard.ts";
-import { CATEGORY_IDS, CATEGORY_NAMES } from "../_shared/book-format.ts";
+import { CATEGORY_IDS, CATEGORY_NAMES, notBookSkip } from "../_shared/book-format.ts";
 import { bookSeo, decideSeo, legacySeo, parseSeoAuto, seoMetafields } from "../_shared/book-seo.ts";
 import { coverAlt, coverChanges, coverFilename, type CoverChange } from "../_shared/book-cover.ts";
 import { cleanBookTags } from "../_shared/book-tags.ts";
-import { protectedMessage, protectedTag } from "../_shared/protected.ts";
+import { isProtectedCollection, protectedProduct, protectedProductMessage } from "../_shared/protected.ts";
+import { ensureProtectedMembers } from "../_shared/protected-load.ts";
 import { BULK_ACTIVE, startBulkMutation } from "../_shared/shopify-bulk.ts";
 import { duplicateCounts, duplicateMessage } from "../_shared/duplicates.ts";
 import { getOnixCached } from "../_shared/onix-cache.ts";
@@ -101,7 +102,7 @@ interface BookMetadata {
 
 // Felt pushOneBook trenger fra et eksisterende produkt
 const PUSH_PRODUCT_FIELDS = `
-  id title handle tags
+  id title handle tags vendor status totalInventory
   ${EGEN_PRIS_FIELD}
   ${EGEN_TILGJENGELIGHET_FIELD}
   variants(first: 1) { edges { node { id sku price compareAtPrice inventoryPolicy inventoryItem { tracked } } } }
@@ -129,7 +130,7 @@ const PRODUCTS_BY_ISBN_SEARCH_QUERY = `
   query productsByIsbn($q: String!) {
     products(first: 5, query: $q) {
       nodes {
-        id title handle tags
+        id title handle tags vendor status totalInventory
         ${BOK_ISBN_FIELD}
         ${EGEN_PRIS_FIELD}
         ${EGEN_TILGJENGELIGHET_FIELD}
@@ -282,7 +283,7 @@ const ALL_PRODUCTS_QUERY = `
     products(first: $first, after: $after, query: "${ALL_PRODUCT_STATUSES}") {
       edges {
         cursor
-        node { id handle tags ${PRODUCT_ISBN_FIELDS} }
+        node { id handle tags vendor ${PRODUCT_ISBN_FIELDS} }
       }
       pageInfo { hasNextPage }
     }
@@ -455,7 +456,7 @@ async function pushOneBook(
   book: BookMetadata,
   bokbasenCredentials: BokbasenCredentials | null = null,
   userId: string | null = null,
-): Promise<{ shopifyId: string; handle: string; variantId?: string; created: boolean; warning?: string; priceNote?: string; approvalRequired?: boolean; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string; tagNote?: string; protectedNote?: string }> {
+): Promise<{ shopifyId: string; handle: string; variantId?: string; created: boolean; warning?: string; priceNote?: string; approvalRequired?: boolean; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string; tagNote?: string; protectedNote?: string; skipNote?: string }> {
   // Tagger: bare bokgruppekode-hierarkiet (bkg-N, bkg-NN, bkg-NNN). Forfatter og
   // tittel er ikke lenger tagger (pakke B del 7, _shared/book-tags.ts).
   const bkgTags = book.bokgruppekode ? bokgruppeTagsForKode(book.bokgruppekode) : [];
@@ -478,12 +479,19 @@ async function pushOneBook(
   // Step 1: Finn eksisterende produkt (se findExistingProduct), ellers opprett.
   // Handle settes bare ved opprettelse — eksisterende produkter beholder sin.
   const existing = await findExistingProduct(book, isbn);
-  // Beskyttet (tagg gave/lokal/lokalhistorie/lokallitteratur, _shared/protected.ts):
+  // Beskyttet (tagg, leverandør Wrendale eller samling wrendale, _shared/protected.ts):
   // ingenting skrives, verken produkt, pris, metafelt, bilde eller publisering.
-  if (existing && protectedTag(existing.tags as string[] | undefined)) {
-    const protectedNote = protectedMessage(existing.tags as string[]);
+  await ensureProtectedMembers(60_000);
+  if (existing && protectedProduct(existing)) {
+    const protectedNote = protectedProductMessage(existing);
     console.warn(`[push ${isbn}] ${protectedNote}`);
     return { shopifyId: existing.id as string, handle: existing.handle as string, created: false, protectedNote };
+  }
+  // Bare bøker (pakke F del 2.2): ONIX-posten må ha bokformat (ProductForm B*, A*, E*)
+  const notBook = notBookSkip(onixXml);
+  if (notBook) {
+    console.warn(`[push ${isbn}] ${notBook}`);
+    return { shopifyId: (existing?.id as string) ?? "", handle: (existing?.handle as string) ?? isbn, created: false, skipNote: notBook };
   }
   let product: Record<string, unknown> | null = existing;
   const isUpdate = !!existing;
@@ -545,8 +553,14 @@ async function pushOneBook(
   // Egen tilgjengelighet (bok.egen_tilgjengelighet) på en eksisterende bok: status,
   // inventoryPolicy og bok.tilgjengelighet står. Alt annet oppdateres som før.
   const ownAvail = isUpdate && ownAvailability(existing?.egenTilgjengelighet);
+  // Lagerbeholdning går foran Bokbasen (pakke F del 2.1): en eksisterende bok med
+  // lager blir aldri utkast/arkivert av push, og inventoryPolicy endres ikke.
+  const stock = isUpdate ? Number(existing?.totalInventory ?? 0) : 0;
+  const keepForStock = stock > 0 && !!availRule && availRule.status !== "ACTIVE";
   const availabilityNote = ownAvail
     ? `${OWN_AVAILABILITY_MESSAGE}${availRule ? ` (regelen: ${availabilityDescription(availRule, pubDate)})` : ""}`
+    : keepForStock
+    ? `${inStockMessage(stock)} (regelen: ${availabilityDescription(availRule!, pubDate)})`
     : availRule
     ? availabilityDescription(availRule, pubDate)
     : (isUpdate ? "Tilgjengelighet ukjent (Bokbasen svarte ikke): status ikke endret" : "Tilgjengelighet ukjent (Bokbasen svarte ikke): opprettet som utkast");
@@ -554,7 +568,7 @@ async function pushOneBook(
   // Status: ny bok uten godkjent pris → alltid utkast (pakke A2). Ellers etter
   // regelen. Ukjent tilgjengelighet eller egen tilgjengelighet: eksisterende bok
   // beholder statusen, ny blir utkast.
-  const status = priceDecision.draft ? "DRAFT" : ownAvail ? null : availRule ? availRule.status : (isUpdate ? null : "DRAFT");
+  const status = priceDecision.draft ? "DRAFT" : ownAvail || keepForStock ? null : availRule ? availRule.status : (isUpdate ? null : "DRAFT");
 
   // Beskrivelse: forlagsteksten med avsnitt (<p>), ellers reservebeskrivelse fra
   // feltene (_shared/book-standard.ts). Forlagsteksten fra ONIX går foran boka vi fikk.
@@ -625,7 +639,7 @@ async function pushOneBook(
         // Uten godkjent pris sendes ikke pris: eksisterende pris blir stående
         ...(priceDecision.price !== null ? { price: priceDecision.price } : {}),
         // Kjøpbar uansett lager: sporet lager med DENY får CONTINUE (beholdningen røres ikke)
-        ...(availRule && !ownAvail && needsContinuePolicy(availRule, existingVariantNode as Parameters<typeof needsContinuePolicy>[1])
+        ...(availRule && !ownAvail && stock <= 0 && needsContinuePolicy(availRule, existingVariantNode as Parameters<typeof needsContinuePolicy>[1])
           ? { inventoryPolicy: "CONTINUE" } : {}),
         taxable: false,
       }],
@@ -984,7 +998,7 @@ async function fullSyncCollections(
     if (after) variables.after = after;
 
     const result = await shopifyGraphQL(ALL_PRODUCTS_QUERY, variables);
-    const edges: Array<{ cursor: string; node: { id: string; handle: string; tags: string[] } }> =
+    const edges: Array<{ cursor: string; node: { id: string; handle: string; tags: string[]; vendor?: string | null } }> =
       result.data?.products?.edges ?? [];
     const pageInfo: { hasNextPage: boolean } = result.data?.products?.pageInfo ?? {};
 
@@ -1002,8 +1016,9 @@ async function fullSyncCollections(
   // Otherwise look it up from Bokbasen by ISBN (bok.isbn / strekkode / SKU / ISBN-handle).
   const productToKode = new Map<string, string>(); // product.id → kode
   const needsLookup: Array<{ id: string; isbn: string }> = [];
-  // Beskyttede produkter (tagg gave/lokal/lokalhistorie/lokallitteratur) får aldri nye tagger
-  const isProtectedProduct = (p: { tags: string[] }) => protectedTag(p.tags) !== null;
+  // Beskyttede produkter (tagg, leverandør Wrendale eller samling wrendale) får aldri nye tagger
+  await ensureProtectedMembers(0);
+  const isProtectedProduct = (p: { id: string; tags: string[]; vendor?: string | null }) => protectedProduct(p) !== null;
   const skippedProtected = allProducts.filter(isProtectedProduct).length;
   // ISBN med flere produkter (pakke D del 3b) tagges ikke før de er ryddet
   const perIsbn: Record<string, number> = {};
@@ -1046,7 +1061,7 @@ async function fullSyncCollections(
 
   for (const product of allProducts) {
     if (isProtectedProduct(product)) {
-      console.warn(`[sync-collections ${product.handle}] ${protectedMessage(product.tags)}`);
+      console.warn(`[sync-collections ${product.handle}] ${protectedProductMessage(product)}`);
       continue;
     }
     if (isDuplicate(product)) {
@@ -1496,11 +1511,20 @@ const COLLECTION_REORDER_MUTATION = `
   }
 `;
 
+// Beskyttede samlinger (wrendale, _shared/protected.ts) vises ikke og kan ikke
+// endres herfra. Unntaket for strømmer gjelder ikke dem.
+async function assertFeedEditable(collectionId: string) {
+  const r = await shopifyGraphQL(`query ($id: ID!) { collection(id: $id) { handle ruleSet { rules { column relation condition } } } }`, { id: collectionId });
+  const col = r.data?.collection;
+  if (!col) throw new Error("Collection not found");
+  if (isProtectedCollection(col)) throw new Error(`Samlingen «${col.handle}» er beskyttet og kan ikke endres fra Bokadmin`);
+}
+
 async function feedsList() {
   const result = await shopifyGraphQL(FEEDS_LIST_QUERY, { first: 100, query: "collection_type:custom" });
   const edges = result.data?.collections?.edges ?? [];
   return edges
-    .filter((e: any) => !e.node.handle?.startsWith('bkg-'))
+    .filter((e: any) => !e.node.handle?.startsWith('bkg-') && !isProtectedCollection(e.node))
     .map((e: any) => ({
       id: e.node.id,
       title: e.node.title,
@@ -1515,6 +1539,7 @@ async function feedsList() {
 }
 
 async function feedGet(collectionId: string) {
+  await assertFeedEditable(collectionId);
   const result = await shopifyGraphQL(FEED_GET_QUERY, { id: collectionId, first: 250 });
   const col = result.data?.collection;
   if (!col) throw new Error("Collection not found");
@@ -1553,6 +1578,7 @@ async function feedCreate(title: string) {
 }
 
 async function feedDelete(collectionId: string) {
+  await assertFeedEditable(collectionId);
   const result = await shopifyGraphQL(COLLECTION_DELETE_MUTATION, {
     input: { id: collectionId },
   });
@@ -1561,6 +1587,7 @@ async function feedDelete(collectionId: string) {
 }
 
 async function feedAddProducts(collectionId: string, productIds: string[]) {
+  await assertFeedEditable(collectionId);
   const result = await shopifyGraphQL(COLLECTION_ADD_PRODUCTS_MUTATION, {
     id: collectionId,
     productIds,
@@ -1570,6 +1597,7 @@ async function feedAddProducts(collectionId: string, productIds: string[]) {
 }
 
 async function feedRemoveProducts(collectionId: string, productIds: string[]) {
+  await assertFeedEditable(collectionId);
   const result = await shopifyGraphQL(COLLECTION_REMOVE_PRODUCTS_MUTATION, {
     id: collectionId,
     productIds,
@@ -1579,6 +1607,7 @@ async function feedRemoveProducts(collectionId: string, productIds: string[]) {
 }
 
 async function feedUpdate(collectionId: string, updates: { sortOrder?: string }) {
+  await assertFeedEditable(collectionId);
   const collection: Record<string, unknown> = { id: collectionId };
   if (updates.sortOrder) collection.sortOrder = updates.sortOrder;
   const result = await shopifyGraphQL(COLLECTION_UPDATE_MUTATION, { collection });
@@ -1587,6 +1616,7 @@ async function feedUpdate(collectionId: string, updates: { sortOrder?: string })
 }
 
 async function feedReorderProducts(collectionId: string, moves: Array<{ id: string; newPosition: string }>) {
+  await assertFeedEditable(collectionId);
   const result = await shopifyGraphQL(COLLECTION_REORDER_MUTATION, {
     id: collectionId,
     moves,
@@ -1629,6 +1659,8 @@ function requireHandleMigrationAllowed(): void {
 }
 
 async function fetchMigrationProducts(): Promise<unknown[]> {
+  // planHandleMigration hopper over beskyttede produkter, også de i samlingen wrendale
+  await ensureProtectedMembers(0);
   const all: unknown[] = [];
   let cursor: string | null = null;
   do {
@@ -1879,15 +1911,15 @@ async function rollbackHandleJob(jobId: string | null, userId: string | null) {
     if (Date.now() - started > HANDLE_PULSE_MS) { timedOut = true; break; }
     const path = `/products/${c.oldHandle}`;
     try {
-      const cur = await shopifyGraphQL(`query ($id: ID!) { product(id: $id) { handle tags } }`, { id: c.id });
+      const cur = await shopifyGraphQL(`query ($id: ID!) { product(id: $id) { id handle tags vendor } }`, { id: c.id });
       const handle = cur.data?.product?.handle;
       if (!handle) throw new Error("produktet finnes ikke lenger");
-      // Beskyttet nå (tagg gave/lokal/…): verken handle eller videresending røres.
+      // Beskyttet nå (tagg, leverandør eller samling): verken handle eller videresending røres.
       // Logges som info, så endringen står som aktiv i sync_log.
-      if (protectedTag(cur.data.product.tags)) {
+      if (protectedProduct(cur.data.product)) {
         skippedProtected++;
-        protectedKept.push({ id: c.id, title: c.title, isbn: c.isbn, handle: c.newHandle, oldHandle: c.oldHandle, tag: protectedTag(cur.data.product.tags)! });
-        log.push({ isbn: c.isbn, title: c.title, action: HANDLE_LOG_ROLLBACK, status: "info", message: `${c.newHandle}: ${protectedMessage(cur.data.product.tags)}`, shopify_id: c.id, job_id: job.id, user_id: userId });
+        protectedKept.push({ id: c.id, title: c.title, isbn: c.isbn, handle: c.newHandle, oldHandle: c.oldHandle, tag: protectedProduct(cur.data.product)! });
+        log.push({ isbn: c.isbn, title: c.title, action: HANDLE_LOG_ROLLBACK, status: "info", message: `${c.newHandle}: ${protectedProductMessage(cur.data.product)}`, shopify_id: c.id, job_id: job.id, user_id: userId });
         continue;
       }
       if (handle !== c.oldHandle) {
@@ -2046,7 +2078,7 @@ serve(async (req: Request) => {
       for (const book of books) {
         try {
           const result = await pushOneBook(book, bokbasen, userId);
-          results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle, created: result.created, warning: result.warning, priceNote: result.priceNote, approvalRequired: result.approvalRequired, availabilityNote: result.availabilityNote, status: result.status, seoNote: result.seoNote, descriptionNote: result.descriptionNote, tagNote: result.tagNote, protectedNote: result.protectedNote });
+          results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle, created: result.created, warning: result.warning, priceNote: result.priceNote, approvalRequired: result.approvalRequired, availabilityNote: result.availabilityNote, status: result.status, seoNote: result.seoNote, descriptionNote: result.descriptionNote, tagNote: result.tagNote, protectedNote: result.protectedNote, skipNote: result.skipNote });
         } catch (e) {
           results.push({ isbn: book.isbn, success: false, error: String(e) });
         }
@@ -2175,10 +2207,11 @@ serve(async (req: Request) => {
         try {
           const { productId, title, productType, vendor, variantId, price } = change;
 
-          // Beskyttet (tagg gave/lokal/lokalhistorie/lokallitteratur): heller ikke manuell redigering herfra
-          const cur = await shopifyGraphQL(`query ($id: ID!) { product(id: $id) { tags } }`, { id: productId });
+          // Beskyttet (tagg, leverandør Wrendale eller samling wrendale): heller ikke manuell redigering herfra
+          await ensureProtectedMembers(60_000);
+          const cur = await shopifyGraphQL(`query ($id: ID!) { product(id: $id) { id tags vendor } }`, { id: productId });
           if (!cur.data?.product) throw new Error("Produktet finnes ikke");
-          if (protectedTag(cur.data.product.tags)) throw new Error(`${protectedMessage(cur.data.product.tags)}. Rediger i Shopify admin`);
+          if (protectedProduct(cur.data.product)) throw new Error(`${protectedProductMessage(cur.data.product)}. Rediger i Shopify admin`);
 
           // Update title / productType / vendor if provided
           if (title !== undefined || productType !== undefined || vendor !== undefined) {
@@ -2222,17 +2255,18 @@ serve(async (req: Request) => {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
       // Shopify-importen overskriver produktet med samme handle. Bøker der handlen
-      // tilhører et beskyttet produkt (tagg gave/lokal/…) tas ikke med i fila.
+      // tilhører et beskyttet produkt (tagg, leverandør eller samling) tas ikke med i fila.
+      await ensureProtectedMembers(0);
       const allowed: BookMetadata[] = [];
       let protectedSkipped = 0;
       for (const book of books) {
         const isbn = normalizeIsbn(book.isbn);
         const handle = isbn ? newBookHandle(book, isbn) : book.isbn;
-        const r = await shopifyGraphQL(`query ($handle: String!) { productByIdentifier(identifier: { handle: $handle }) { tags } }`, { handle });
-        const tags = r.data?.productByIdentifier?.tags;
-        if (tags && protectedTag(tags)) {
+        const r = await shopifyGraphQL(`query ($handle: String!) { productByIdentifier(identifier: { handle: $handle }) { id tags vendor } }`, { handle });
+        const existing = r.data?.productByIdentifier;
+        if (existing && protectedProduct(existing)) {
           protectedSkipped++;
-          console.warn(`[export-csv ${handle}] ${protectedMessage(tags)}`);
+          console.warn(`[export-csv ${handle}] ${protectedProductMessage(existing)}`);
         } else {
           allowed.push(book);
         }

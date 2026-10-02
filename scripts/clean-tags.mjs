@@ -19,7 +19,7 @@ import path from "path";
 import readline from "readline";
 import { fileURLToPath, pathToFileURL } from "url";
 import cliProgress from "cli-progress";
-import { isProtectedTag, protectedMessage, protectedTag } from "../supabase/functions/_shared/protected.ts";
+import { isProtectedTag, loadProtectedMembers, protectedProduct, protectedProductMessage, protectedTag } from "../supabase/functions/_shared/protected.ts";
 
 // ── Konfigurasjon ─────────────────────────────────────────────────────────────
 
@@ -49,10 +49,11 @@ export function shouldKeepTag(tag) {
 
 /**
  * Hva taggryddingen gjør med ett produkt. Beskyttet produkt: ingenting.
+ * Med `product` ({ id, vendor }) sjekkes også leverandør og beskyttet samling (protected.ts).
  * @returns {{ protected: string | null, kept: string[], removed: string[] }}
  */
-export function planTagCleanup(tags) {
-  const hit = protectedTag(tags);
+export function planTagCleanup(tags, product = null) {
+  const hit = product ? protectedProduct({ ...product, tags }) : protectedTag(tags);
   if (hit) return { protected: hit, kept: [...tags], removed: [] };
   return { protected: null, kept: tags.filter(shouldKeepTag), removed: tags.filter((t) => !shouldKeepTag(t)) };
 }
@@ -180,6 +181,8 @@ async function main() {
   let shopDomain, accessToken;
   try {
     ({ shopDomain, accessToken } = await loadCredentials());
+    // Produktene i de beskyttede samlingene (wrendale). Mangler samlingen, stopper skriptet
+    await loadProtectedMembers(async (q, v) => (await shopifyGql(shopDomain, accessToken, q, v)));
   } catch (e) {
     console.error("FEIL:", e.message);
     process.exit(1);
@@ -250,7 +253,7 @@ async function main() {
         query($first: Int!, $after: String) {
           products(first: $first, after: $after, query: "status:active OR status:draft OR status:archived") {
             pageInfo { hasNextPage endCursor }
-            edges { node { id handle tags } }
+            edges { node { id handle tags vendor } }
           }
         }
       `, { first: PAGE_SIZE, after: cursor });
@@ -268,7 +271,7 @@ async function main() {
 
     // Behandle hvert produkt på siden
     for (const product of products) {
-      const cleanup = planTagCleanup(product.tags);
+      const cleanup = planTagCleanup(product.tags, product);
       const keptTags = cleanup.kept;
       const removedTags = cleanup.removed;
       const needsUpdate = removedTags.length > 0;
@@ -286,7 +289,7 @@ async function main() {
       if (cleanup.protected) {
         state.skipped++;
         state.protected = (state.protected ?? 0) + 1;
-        logEntry.result = protectedMessage(product.tags);
+        logEntry.result = protectedProductMessage(product);
       } else if (!needsUpdate) {
         state.skipped++;
         logEntry.result = "no-change";

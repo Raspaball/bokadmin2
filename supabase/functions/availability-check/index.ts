@@ -8,7 +8,13 @@ import { getCaller, scheduledUserId } from "../_shared/auth.ts";
 import { BOKBASEN_ONIX_URL, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { extractAvailabilityCode, extractPublishingDate } from "../_shared/onix.js";
-import { protectedMessage, protectedTag } from "../_shared/protected.ts";
+import { isFatalJobError, protectedProduct, protectedProductMessage } from "../_shared/protected.ts";
+import { ensureProtectedMembers } from "../_shared/protected-load.ts";
+import { extractProductForm } from "../_shared/onix.js";
+import { isBookForm, notBookMessage, notBookSkip, NOT_IN_BOKBASEN_MESSAGE } from "../_shared/book-format.ts";
+import {
+  changedRow, errorRow, NO_ISBN_MESSAGE, skipRow, unchangedRow, type JobLogRow, type LogBase,
+} from "../_shared/job-log.ts";
 import { ensureDuplicates } from "../_shared/duplicate-scan.ts";
 import { duplicateMessage } from "../_shared/duplicates.ts";
 import { emptyBulkJobState, runBulkJob, summarizeBulkStats, type BulkJobContext, type BulkJobSpec, type BulkRef } from "../_shared/bulk-job.ts";
@@ -17,9 +23,9 @@ import {
   availabilityBulkLines,
 } from "../_shared/availability-bulk.ts";
 import {
-  ARCHIVED_MESSAGE, availabilityLogMessage, availabilityMetafields, availabilityRule, availabilitySkip,
+  ARCHIVED_MESSAGE, availabilityDescription, availabilityLogMessage, availabilityMetafields, availabilityRule, availabilitySkip,
   EGEN_TILGJENGELIGHET_FIELD, planAvailability,
-  type AvailabilityChanges, type AvailabilityRule, type StatusChangeRow,
+  type AvailabilityChanges, type AvailabilityPlan, type AvailabilityRule, type StatusChangeRow,
 } from "../_shared/availability.ts";
 
 const PAGE_SIZE = 250;
@@ -45,6 +51,8 @@ interface ShopifyProduct {
   status: string;
   handle: string;
   tags: string[];
+  vendor?: string | null;
+  totalInventory?: number | null;
   bokIsbn?: { value: string } | null;
   tilgjengelighet?: { value: string } | null;
   utgivelsesdato?: { value: string } | null;
@@ -89,6 +97,8 @@ async function fetchShopifyProductsPage(
             status
             handle
             tags
+            vendor
+            totalInventory
             ${BOK_ISBN_FIELD}
             tilgjengelighet: metafield(namespace: "bok", key: "tilgjengelighet") { value }
             utgivelsesdato: metafield(namespace: "bok", key: "utgivelsesdato") { value }
@@ -142,6 +152,8 @@ async function getShopifyProductCount(_userId: string | null): Promise<number> {
 // CSV-eksporten. Koden og datoen leses med _shared/onix.js.
 
 interface OnixAvailability {
+  /** ProductForm (List 150): bare bøker behandles (B*, A*, E*) */
+  form: string | null;
   code: string | null;
   /** Utgivelsesdato som YYYY-MM-DD, eller null */
   date: string | null;
@@ -155,7 +167,7 @@ async function fetchBokbasenAvailability(isbn: string, userId: string | null): P
   });
   if (!res.ok) return null;
   const xml = await res.text();
-  return { code: extractAvailabilityCode(xml), date: extractPublishingDate(xml) };
+  return { form: extractProductForm(xml).form, code: extractAvailabilityCode(xml), date: extractPublishingDate(xml) };
 }
 
 // Hva som skal endres (også egen tilgjengelighet): planAvailability() i
@@ -243,6 +255,14 @@ async function processBatch(jobId: string) {
     started_at: job.started_at || new Date().toISOString(),
   }).eq("id", jobId);
 
+  // Produktene i de beskyttede samlingene (wrendale), hentet på nytt hver puls. Mangler samlingen: jobben stopper
+  try {
+    await ensureProtectedMembers(0);
+  } catch (err) {
+    await supabase.from("jobs").update({ status: "failed", error_message: String(err), completed_at: new Date().toISOString() }).eq("id", jobId);
+    return;
+  }
+
   // ISBN med flere produkter (pakke D del 3b): skannes én gang per jobb, så hoppes de over
   const duplicates = await ensureDuplicates(supabase, job, startTime + 30_000);
   if (!duplicates) return; // skanningen fortsetter i neste puls
@@ -305,12 +325,13 @@ async function processBatch(jobId: string) {
         processed,
       }).eq("id", jobId);
 
-      // Beskyttet (tagg gave/lokal/lokalhistorie/lokallitteratur): status og metafelt røres aldri
-      if (protectedTag(product.tags)) {
-        await supabase.from("sync_log").insert({
-          isbn, title: product.handle, action: "availability_check", status: "info",
-          message: protectedMessage(product.tags), shopify_id: product.id, job_id: jobId, user_id: userId,
-        });
+      // Én loggrad per produkt (pakke F del 3.1)
+      const base: LogBase = { isbn, title: product.handle, action: mode === "update" ? "availability_update" : "availability_check", shopify_id: product.id, job_id: jobId, user_id: userId };
+      const log = (row: JobLogRow) => supabase.from("sync_log").insert(row);
+
+      // Beskyttet (tagg, leverandør Wrendale eller samling wrendale): status og metafelt røres aldri
+      if (protectedProduct(product)) {
+        await log(skipRow(base, "beskyttet", protectedProductMessage(product)));
         skippedProtected++;
         processed++;
         continue;
@@ -318,26 +339,21 @@ async function processBatch(jobId: string) {
 
       // Arkivert (ARCHIVED): endres aldri av tilgjengelighetsjobben, ingen ONIX-oppslag
       if (availabilitySkip(product) === "arkivert") {
-        await supabase.from("sync_log").insert({
-          isbn, title: product.handle, action: "availability_check", status: "info",
-          message: ARCHIVED_MESSAGE, shopify_id: product.id, job_id: jobId, user_id: userId,
-        });
+        await log(skipRow(base, "arkivert", ARCHIVED_MESSAGE));
         skippedArchived++;
         processed++;
         continue;
       }
 
       if (!isbn) {
+        await log(skipRow(base, "ingen_isbn", NO_ISBN_MESSAGE));
         skipped++;
         processed++;
         continue;
       }
 
       if (duplicates[isbn]) {
-        await supabase.from("sync_log").insert({
-          isbn, title: product.handle, action: "availability_check", status: "info",
-          message: duplicateMessage(duplicates[isbn]), shopify_id: product.id, job_id: jobId, user_id: userId,
-        });
+        await log(skipRow(base, "duplikat", duplicateMessage(duplicates[isbn])));
         skippedDuplicate++;
         processed++;
         continue;
@@ -348,16 +364,14 @@ async function processBatch(jobId: string) {
 
         if (bokbasenAvailability === null) {
           failed++;
-          await supabase.from("sync_log").insert({
-            isbn,
-            title: product.handle,
-            action: "availability_check",
-            status: "error",
-            message: "Kunne ikke hente tilgjengelighet fra Bokbasen",
-            shopify_id: product.id,
-            job_id: jobId,
-            user_id: userId,
-          });
+          await log(skipRow(base, "ikke_i_bokbasen", `${NOT_IN_BOKBASEN_MESSAGE} (kunne ikke hente tilgjengelighet)`));
+          processed++;
+          continue;
+        }
+        // Bare bøker (pakke F del 2.2)
+        if (!isBookForm(bokbasenAvailability.form)) {
+          await log(skipRow(base, "ikke_bok", notBookMessage(bokbasenAvailability.form)));
+          skipped++;
           processed++;
           continue;
         }
@@ -365,11 +379,11 @@ async function processBatch(jobId: string) {
         const rule = availabilityRule(bokbasenAvailability.code);
         const date = bokbasenAvailability.date;
         // Egen tilgjengelighet (bok.egen_tilgjengelighet): status, bok.tilgjengelighet
-        // og inventoryPolicy står; bare utgivelsesdatoen kan endres
+        // og inventoryPolicy står; bare utgivelsesdatoen kan endres. På lager: aldri
+        // utkast/arkivert, inventoryPolicy står
         const plan = planAvailability({ ...product, variant: product.variants?.edges?.[0]?.node }, rule, date);
         const changes = plan.changes;
-        const held = Object.keys(plan.heldBack).length > 0;
-        if (held) skippedOwn++;
+        if (Object.keys(plan.heldBack).length || Object.keys(plan.stockKept).length) skippedOwn++;
         const statusChange = plan.changes.status ?? plan.heldBack.status;
         if (statusChange) {
           statusChanges.push({
@@ -378,31 +392,10 @@ async function processBatch(jobId: string) {
           });
         }
 
-        if (Object.keys(changes).length === 0) {
-          if (held) {
-            await supabase.from("sync_log").insert({
-              isbn, title: product.handle, action: "availability_check", status: "info",
-              message: availabilityLogMessage(plan, rule, date, "Ville endret"), shopify_id: product.id, job_id: jobId, user_id: userId,
-            });
-          }
-          skipped++;
-          processed++;
-          continue;
-        }
-
-        if (mode === "analyze") {
-          await supabase.from("sync_log").insert({
-            isbn,
-            title: product.handle,
-            action: "availability_check",
-            status: "success",
-            // «Ville endret: Kommer 15.11.2026: ACTIVE, kan forhåndsbestilles (status DRAFT → ACTIVE, …)»
-            message: availabilityLogMessage(plan, rule, date, "Ville endret"),
-            shopify_id: product.id,
-            job_id: jobId,
-            user_id: userId,
-          });
-          succeeded++;
+        if (Object.keys(changes).length === 0 || mode === "analyze") {
+          await log(availabilityPlanRow(base, plan, rule, date, false));
+          if (Object.keys(changes).length) succeeded++;
+          else skipped++;
         } else {
           let error: string | null = null;
           try {
@@ -410,25 +403,15 @@ async function processBatch(jobId: string) {
           } catch (e) {
             error = e instanceof Error ? e.message : String(e);
           }
-
           const what = availabilityLogMessage(plan, rule, date, "Endret")!;
-          await supabase.from("sync_log").insert({
-            isbn,
-            title: product.handle,
-            action: "availability_update",
-            status: error ? "error" : "success",
-            message: error ? `Endring feilet: ${what.replace(/^Endret: /, "")}. ${error}` : what,
-            shopify_id: product.id,
-            job_id: jobId,
-            user_id: userId,
-          });
-
+          await log(error ? errorRow(base, `Endring feilet: ${what.replace(/^Endret: /, "")}. ${error}`) : availabilityPlanRow(base, plan, rule, date, true));
           if (error) failed++;
           else succeeded++;
         }
       } catch (err) {
         failed++;
         console.error(`Error processing ${isbn}:`, err);
+        await log(errorRow(base, err instanceof Error ? err.message : String(err)));
       }
 
       processed++;
@@ -465,9 +448,9 @@ async function processBatch(jobId: string) {
   } catch (err) {
     console.error("Batch processing error:", err);
     const errMsg = String(err);
-    // Fatal auth/config errors → fail permanently to avoid infinite retry loop.
+    // Fatal auth/config errors (og manglende beskyttet samling) → fail permanently to avoid infinite retry loop.
     // Transient errors (network, throttle) → stay paused so pg_cron retries.
-    const isFatal = errMsg.includes("HTTP 401") || errMsg.includes("HTTP 403");
+    const isFatal = isFatalJobError(errMsg);
     await supabase.from("jobs").update({
       status: isFatal ? "failed" : "paused",
       error_message: errMsg,
@@ -491,7 +474,7 @@ async function processBatch(jobId: string) {
 interface AvailabilityCounts {
   changed: number; unchanged: number; errors: number;
   skippedNoIsbn: number; skippedNoOnix: number; skippedProtected: number; skippedDuplicate: number;
-  skippedOwnAvailability: number; skippedArchived: number;
+  skippedOwnAvailability: number; skippedArchived: number; skippedNotBook: number; keptInStock: number;
 }
 
 function loadAvailabilityCounts(raw: unknown): AvailabilityCounts {
@@ -501,15 +484,37 @@ function loadAvailabilityCounts(raw: unknown): AvailabilityCounts {
     changed: n("changed"), unchanged: n("unchanged"), errors: n("errors"), skippedNoIsbn: n("skippedNoIsbn"),
     skippedNoOnix: n("skippedNoOnix"), skippedProtected: n("skippedProtected"), skippedDuplicate: n("skippedDuplicate"),
     skippedOwnAvailability: n("skippedOwnAvailability"), skippedArchived: n("skippedArchived"),
+    skippedNotBook: n("skippedNotBook"), keptInStock: n("keptInStock"),
   };
 }
 
-/** «12 ville endret, 420 uendret, hoppet over 10 (6 beskyttet, 1 arkivert, …), 1 egen tilgjengelighet, 0 feil» */
+/** «12 ville endret, 420 uendret, hoppet over 10 (6 beskyttet, 1 arkivert, …), 1 egen tilgjengelighet, 2 status beholdt (på lager), 0 feil» */
 function summarizeAvailability(c: AvailabilityCounts, mode: "analyze" | "update"): string {
-  const skipped = c.skippedProtected + c.skippedArchived + c.skippedDuplicate + c.skippedNoIsbn + c.skippedNoOnix;
+  const skipped = c.skippedProtected + c.skippedArchived + c.skippedDuplicate + c.skippedNoIsbn + c.skippedNoOnix + c.skippedNotBook;
   return `${c.changed} ${mode === "update" ? "endret" : "ville endret"}, ${c.unchanged} uendret, hoppet over ${skipped} ` +
     `(${c.skippedProtected} beskyttet, ${c.skippedArchived} arkivert, ${c.skippedDuplicate} DUPLIKAT, ${c.skippedNoIsbn} uten ISBN, ` +
-    `${c.skippedNoOnix} fant ikke boka i Bokbasen), ${c.skippedOwnAvailability} egen tilgjengelighet, ${c.errors} feil`;
+    `${c.skippedNoOnix} fant ikke boka i Bokbasen, ${c.skippedNotBook} ikke bok), ${c.skippedOwnAvailability} egen tilgjengelighet, ` +
+    `${c.keptInStock} status beholdt (på lager), ${c.errors} feil`;
+}
+
+/** Feltnavnene i loggen (sync_log.fields) */
+function availabilityFields(c: AvailabilityChanges): string[] {
+  return [
+    ...(c.status ? ["status"] : []), ...(c.tilgjengelighet ? ["bok.tilgjengelighet"] : []),
+    ...(c.utgivelsesdato ? ["bok.utgivelsesdato"] : []), ...(c.continuePolicy ? ["inventoryPolicy"] : []),
+  ];
+}
+
+/**
+ * Loggraden for et produkt med plan (felles for side-for-side og bulk). Ingen endring:
+ * hoppet over (egen tilgjengelighet / på lager) når regelen ble holdt tilbake, ellers uendret.
+ */
+function availabilityPlanRow(base: LogBase, plan: AvailabilityPlan, rule: AvailabilityRule, date: string | null, update: boolean): JobLogRow {
+  const message = availabilityLogMessage(plan, rule, date, update ? "Endret" : "Ville endret");
+  if (Object.keys(plan.changes).length) return changedRow(base, message!, availabilityFields(plan.changes));
+  if (Object.keys(plan.heldBack).length) return skipRow(base, "egen_tilgjengelighet", message!);
+  if (Object.keys(plan.stockKept).length) return skipRow(base, "paa_lager", message!);
+  return unchangedRow(base, `Uendret: ${availabilityDescription(rule, date)}`);
 }
 
 const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
@@ -523,7 +528,7 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
 
   onixIsbns(products) {
     return products
-      .filter((p) => !protectedTag(p.tags) && !availabilitySkip(p as { status?: string }))
+      .filter((p) => !protectedProduct(p) && !availabilitySkip(p as { status?: string }))
       .map((p) => extractIsbn(p))
       .filter((i): i is string => !!i);
   },
@@ -531,38 +536,46 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
   async planChunk(products, ctx) {
     const c = ctx.counts;
     const statusChanges: StatusChangeRow[] = (ctx.state.extra.statusChanges ??= []);
-    const eligible = products.filter((p) => !protectedTag(p.tags) && !availabilitySkip(p as { status?: string }));
+    const eligible = products.filter((p) => !protectedProduct(p) && !availabilitySkip(p as { status?: string }));
     const xmlByIsbn = await ctx.loadXml(eligible.map((p) => extractIsbn(p)).filter((i): i is string => !!i && !ctx.state.duplicates?.[i]));
     const logs: Record<string, unknown>[] = [];
     const variantLines: unknown[] = [], variantRefs: BulkRef[] = [];
     const productLines: unknown[] = [], productRefs: BulkRef[] = [];
+    const update = ctx.mode === "update";
 
+    // Én loggrad per produkt (pakke F del 3.1)
     for (const product of products) {
       // deno-lint-ignore no-explicit-any
       const p = product as any;
       const isbn = extractIsbn(product);
-      const base = { isbn, title: product.handle, action: "availability_check", shopify_id: product.id, job_id: ctx.jobId, user_id: ctx.userId };
-      if (protectedTag(product.tags)) {
+      const base = { isbn, title: product.handle, action: update ? "availability_update" : "availability_check", shopify_id: product.id, job_id: ctx.jobId, user_id: ctx.userId };
+      if (protectedProduct(product)) {
         c.skippedProtected++;
-        logs.push({ ...base, status: "info", message: protectedMessage(product.tags) });
+        logs.push(skipRow(base, "beskyttet", protectedProductMessage(product)));
         continue;
       }
       if (availabilitySkip(p) === "arkivert") {
         c.skippedArchived++;
-        logs.push({ ...base, status: "info", message: ARCHIVED_MESSAGE });
+        logs.push(skipRow(base, "arkivert", ARCHIVED_MESSAGE));
         continue;
       }
-      if (!isbn) { c.skippedNoIsbn++; continue; }
+      if (!isbn) { c.skippedNoIsbn++; logs.push(skipRow(base, "ingen_isbn", NO_ISBN_MESSAGE)); continue; }
       const dup = ctx.state.duplicates?.[isbn];
       if (dup) {
         c.skippedDuplicate++;
-        logs.push({ ...base, status: "info", message: duplicateMessage(dup) });
+        logs.push(skipRow(base, "duplikat", duplicateMessage(dup)));
         continue;
       }
       const xml = xmlByIsbn.get(isbn);
       if (!xml) {
         c.skippedNoOnix++;
-        logs.push({ ...base, status: "error", message: "Kunne ikke hente tilgjengelighet fra Bokbasen" });
+        logs.push(skipRow(base, "ikke_i_bokbasen", NOT_IN_BOKBASEN_MESSAGE));
+        continue;
+      }
+      const notBook = notBookSkip(xml);
+      if (notBook) {
+        c.skippedNotBook++;
+        logs.push(skipRow(base, "ikke_bok", notBook));
         continue;
       }
       const rule = availabilityRule(extractAvailabilityCode(xml));
@@ -576,15 +589,11 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
         });
       }
       if (Object.keys(plan.heldBack).length) c.skippedOwnAvailability++;
-      const message = availabilityLogMessage(plan, rule, date, ctx.mode === "update" ? "Endret" : "Ville endret");
-      if (!Object.keys(plan.changes).length) {
-        c.unchanged++;
-        if (message) logs.push({ ...base, status: "info", message });
-        continue;
-      }
+      if (Object.keys(plan.stockKept).length) c.keptInStock++;
+      logs.push(availabilityPlanRow(base, plan, rule, date, update));
+      if (!Object.keys(plan.changes).length) { c.unchanged++; continue; }
       c.changed++;
-      logs.push({ ...base, action: ctx.mode === "update" ? "availability_update" : "availability_check", status: "success", message });
-      if (ctx.mode !== "update") continue;
+      if (!update) continue;
       const lines = availabilityBulkLines(p, rule, date, plan);
       const ref = { id: product.id, isbn, handle: product.handle };
       if (lines.variant) { variantLines.push(lines.variant); variantRefs.push(ref); }
@@ -608,16 +617,15 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
       ctx.counts.errors++;
       ctx.counts.changed = Math.max(0, ctx.counts.changed - 1);
     }
-    return {
-      isbn: ref.isbn, title: ref.handle, action: "availability_update", status: "error",
-      message: `Feil i bulk (${kind === "variant" ? "salg uten lager" : "status/metafelt"}): ${error}`,
-      shopify_id: ref.id, job_id: ctx.jobId, user_id: ctx.userId,
-    };
+    return errorRow(
+      { isbn: ref.isbn, title: ref.handle, action: "availability_update", shopify_id: ref.id, job_id: ctx.jobId, user_id: ctx.userId },
+      `Feil i bulk (${kind === "variant" ? "salg uten lager" : "status/metafelt"}): ${error}`,
+    );
   },
 
   totals(ctx: BulkJobContext<AvailabilityCounts>) {
     const c = ctx.counts;
-    return { succeeded: c.changed, skipped: c.unchanged + c.skippedNoIsbn + c.skippedNoOnix, failed: c.errors };
+    return { succeeded: c.changed, skipped: c.unchanged + c.skippedNoIsbn + c.skippedNoOnix + c.skippedNotBook, failed: c.errors };
   },
 
   result(ctx) {
@@ -626,6 +634,7 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
       counts: c,
       skippedProtected: c.skippedProtected, skippedDuplicate: c.skippedDuplicate,
       skippedOwnAvailability: c.skippedOwnAvailability, skippedArchived: c.skippedArchived,
+      skippedNotBook: c.skippedNotBook, keptInStock: c.keptInStock,
       statusChanges: ctx.state.extra.statusChanges ?? [], shopDomain: Deno.env.get("SHOPIFY_SHOP_DOMAIN") ?? null,
       summary: `${summarizeAvailability(c, ctx.mode)}. ${summarizeBulkStats(ctx.state.stats)}`,
     };

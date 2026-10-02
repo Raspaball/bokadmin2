@@ -1,5 +1,8 @@
 // node --test scripts/*.test.mjs
 // Bulk-modus for «Oppdater eksisterende bøker» (pakke D del 3, _shared/book-bulk.ts).
+import { setProtectedMembers } from "../supabase/functions/_shared/protected.ts";
+// Ingen produkter i beskyttede samlinger her (medlemskap testes i protected.test.mjs)
+setProtectedMembers([]);
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
