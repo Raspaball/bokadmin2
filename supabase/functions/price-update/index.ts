@@ -11,6 +11,7 @@ import { getMaxPriceChangePct, recordPendingApproval } from "../_shared/price-ap
 import { EGEN_PRIS_FIELD, priceLock, priceLockMessage } from "../_shared/price-lock.ts";
 import { countMissing, loadCounts, summarizeCounts } from "../_shared/price-summary.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
+import { protectedMessage, protectedTag } from "../_shared/protected.ts";
 
 const PAGE_SIZE = 250;
 const TIMEOUT_MS = 45_000; // Leave 15s headroom
@@ -33,6 +34,7 @@ interface ShopifyProduct {
   id: string;
   status: string;
   handle: string;
+  tags: string[];
   bokIsbn?: { value: string } | null;
   egenPris?: { value: string } | null;
   variants: {
@@ -82,6 +84,7 @@ async function fetchShopifyProductsPage(
             id
             status
             handle
+            tags
             ${BOK_ISBN_FIELD}
             ${EGEN_PRIS_FIELD}
             variants(first: 1) {
@@ -141,17 +144,17 @@ async function fetchBokbasenPrice(isbn: string, userId: string | null): Promise<
 
 // Nåværende pris på varianten (tall eller null) og om den er låst (egen pris/tilbud).
 // undefined når varianten ikke finnes.
-async function getVariantPrice(variantId: string): Promise<{ price: number | null; lock: ReturnType<typeof priceLock> } | undefined> {
+async function getVariantPrice(variantId: string): Promise<{ price: number | null; lock: ReturnType<typeof priceLock>; tags: string[] } | undefined> {
   const { data } = await shopifyGraphQL<{
-    productVariant: { price: string | null; compareAtPrice: string | null; product: { egenPris: { value: string } | null } } | null;
+    productVariant: { price: string | null; compareAtPrice: string | null; product: { tags: string[]; egenPris: { value: string } | null } } | null;
   }>(
-    `query variantPrice($id: ID!) { productVariant(id: $id) { price compareAtPrice product { ${EGEN_PRIS_FIELD} } } }`,
+    `query variantPrice($id: ID!) { productVariant(id: $id) { price compareAtPrice product { tags ${EGEN_PRIS_FIELD} } } }`,
     { id: variantId },
   );
   const v = data.productVariant;
   if (!v) return undefined;
   const p = parseFloat(v.price ?? "");
-  return { price: Number.isFinite(p) ? p : null, lock: priceLock(v.product?.egenPris, v.compareAtPrice) };
+  return { price: Number.isFinite(p) ? p : null, lock: priceLock(v.product?.egenPris, v.compareAtPrice), tags: v.product?.tags ?? [] };
 }
 
 function getEmailFromJWT(authHeader: string): string | null {
@@ -263,6 +266,18 @@ async function processBatch(jobId: string) {
         current_isbn: isbn || product.handle,
         processed,
       }).eq("id", jobId);
+
+      // Beskyttet (tagg gave/lokal/lokalhistorie/lokallitteratur): prisen røres aldri
+      if (protectedTag(product.tags)) {
+        await supabase.from("sync_log").insert({
+          isbn, title: product.handle, action: "update", status: "info",
+          message: protectedMessage(product.tags), shopify_id: product.id, job_id: jobId, user_id: userId,
+        });
+        counts.skippedProtected++;
+        skipped++;
+        processed++;
+        continue;
+      }
 
       if (!isbn || !variantId) {
         counts.skippedNoIsbn++;
@@ -489,6 +504,7 @@ serve(async (req) => {
             // Bare hvis Shopify-prisen fortsatt er den gamle — ellers er den endret siden
             const variant = await getVariantPrice(row.shopify_variant_id);
             if (variant === undefined) throw new Error("Varianten finnes ikke lenger i Shopify");
+            if (protectedTag(variant.tags)) throw new Error(`Produktet er beskyttet (tagg: ${protectedTag(variant.tags)}). Prisen endres aldri; avvis endringen`);
             if (variant.lock) throw new Error(`Prisen er låst i Shopify (${variant.lock}). Avvis endringen, eller fjern låsen først`);
             const current = variant.price;
             const old = row.old_price === null ? null : Number(row.old_price);

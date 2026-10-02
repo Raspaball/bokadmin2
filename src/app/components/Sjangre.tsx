@@ -361,7 +361,7 @@ export function Sjangre() {
           syncLog.add({
             isbn: null, title: 'Synk sjangre til Shopify',
             action: 'sjangre_sync', status: 'success',
-            message: `${r?.products?.tagged ?? 0} tagget, ${r?.products?.already_tagged ?? 0} hadde tags, ${r?.collections?.created ?? 0} kolleksjoner opprettet`,
+            message: `${r?.products?.tagged ?? 0} tagget, ${r?.products?.already_tagged ?? 0} hadde tags, ${r?.products?.skipped_protected ?? 0} beskyttet, ${r?.collections?.created ?? 0} kolleksjoner opprettet`,
             shopify_id: null, job_id: syncJobId,
           }).catch(console.error);
 
@@ -704,6 +704,7 @@ export function Sjangre() {
                         </span>
                       )}
                       <span className="text-gray-400">{pipelineResult.sync.products.already_tagged} hadde tags</span>
+                      <span className="text-gray-400">{pipelineResult.sync.products.skipped_protected ?? 0} beskyttet</span>
                       {pipelineResult.sync.collections.created > 0 && (
                         <span className="flex items-center gap-1 text-green-600">
                           <CheckCircle2 className="size-3.5" />{pipelineResult.sync.collections.created} samlinger opprettet

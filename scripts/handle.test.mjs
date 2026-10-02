@@ -108,7 +108,7 @@ test("planHandleMigration: ny handle, allerede riktig, uten ISBN, egendefinert, 
     prod(4, "min-egen-handle", "Alt starter med en drøm", "Nusa, Antonio", "9788205621060"),
     prod(5, "9788293891604", "Det hende i Telemark 8", "", "9788293891604"),
   ]);
-  assert.deepEqual(r.skipped, { ingenIsbn: 1, alleredeRiktig: 1, egendefinert: 1 });
+  assert.deepEqual(r.skipped, { ingenIsbn: 1, alleredeRiktig: 1, egendefinert: 1, beskyttet: 0 });
   assert.equal(r.counts.planned, 2);
   assert.equal(r.counts.missingAuthor, 1);
   assert.equal(r.counts.blocked, 0);

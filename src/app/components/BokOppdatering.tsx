@@ -37,7 +37,7 @@ function FieldSummary({ counts }: { counts: BookUpdateCounts }) {
   return (
     <div className="space-y-2 text-sm">
       <p className="text-gray-600">
-        {counts.changed} endres, {counts.unchanged} uendret, hoppet over {counts.skippedNoIsbn + counts.skippedNoOnix} ({counts.skippedNoIsbn} uten ISBN, {counts.skippedNoOnix} uten ONIX), {counts.errors} feil
+        {counts.changed} endres, {counts.unchanged} uendret, hoppet over {counts.skippedNoIsbn + counts.skippedNoOnix + (counts.skippedProtected ?? 0)} ({counts.skippedNoIsbn} uten ISBN, {counts.skippedNoOnix} uten ONIX, {counts.skippedProtected ?? 0} beskyttet), {counts.errors} feil
       </p>
       {fields.length > 0 && (
         <div className="border rounded-lg divide-y">

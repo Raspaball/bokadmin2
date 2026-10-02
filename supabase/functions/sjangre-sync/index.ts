@@ -7,6 +7,7 @@ import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
 import { BOKBASEN_ONIX_URL, clearBokbasenToken, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { extractBokgruppekode } from "../_shared/onix.js";
+import { protectedMessage, protectedTag } from "../_shared/protected.ts";
 import { COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, collectionTitleFix, tagSources } from "../_shared/collections.ts";
 import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
 
@@ -132,6 +133,8 @@ interface SyncJobConfig {
   already_tagged: number;
   no_kode: number;
   tag_errors: number;
+  /** Beskyttet tagg (_shared/protected.ts): aldri tagget */
+  skipped_protected?: number;
   processed: number;
 }
 
@@ -154,6 +157,7 @@ async function runCollectionsPhase(
         already_tagged: config.already_tagged,
         no_product: config.no_kode,
         errors: config.tag_errors,
+        skipped_protected: config.skipped_protected ?? 0,
       },
       collections: colResult,
     },
@@ -227,6 +231,17 @@ async function processSyncBatch(jobId: string) {
         }
 
         const kode = product.isbn ? kodeMap.get(product.isbn) : undefined;
+
+        // Beskyttet (tagg gave/lokal/lokalhistorie/lokallitteratur): får aldri nye tagger
+        if (protectedTag(product.tags)) {
+          config.skipped_protected = (config.skipped_protected ?? 0) + 1;
+          await supabase.from("sync_log").insert({
+            isbn: product.isbn, title: product.handle, action: "sjangre_sync", status: "info",
+            message: protectedMessage(product.tags), shopify_id: product.id, job_id: jobId, user_id: userId,
+          });
+          config.processed++;
+          continue;
+        }
 
         if (!kode) {
           config.no_kode++;

@@ -25,6 +25,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { normalizeIsbn } from "../supabase/functions/_shared/handle.js";
 import { shopifyGql, testShop, ensureOutDir, fail } from "./lib/clients.mjs";
+import { protectedMessage, protectedTag } from "../supabase/functions/_shared/protected.ts";
 
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(`--${name}`);
@@ -59,7 +60,7 @@ query bokIsbnProducts($cursor: String) {
   products(first: 250, after: $cursor, query: "status:active OR status:draft OR status:archived") {
     pageInfo { hasNextPage endCursor }
     nodes {
-      id handle title status
+      id handle title status tags
       bokIsbn: metafield(namespace: "bok", key: "isbn") { id value type }
       variants(first: 1) { nodes { barcode sku } }
     }
@@ -132,7 +133,8 @@ async function waitFor(label, check, maxMinutes = 30) {
   const start = Date.now();
   while (!(await check())) {
     if (Date.now() - start > maxMinutes * 60_000) fail(`Ventet ${maxMinutes} min uten at ${label}. Prøv igjen senere.`);
-    process.stdout.write(`  Venter til ${label} … ${Math.round((Date.now() - start) / 1000)} s`);
+    process.stdout.write(`
+  Venter til ${label} … ${Math.round((Date.now() - start) / 1000)} s`);
     await new Promise((r) => setTimeout(r, 15_000));
   }
   console.log(`
@@ -185,6 +187,12 @@ async function recreate() {
   const old = current ?? backup.definition;
   if (!old) fail("Fant ingen definisjon i butikken eller i sikkerhetskopien.");
 
+  // Sletting av definisjonen sletter også verdiene på beskyttede produkter (protected.ts): ikke lov
+  if (current) {
+    const hit = (await fetchAllProducts()).filter((p) => p.bokIsbn && protectedTag(p.tags));
+    if (hit.length) fail(`${hit.length} beskyttede produkter har bok.isbn, og verdien ville blitt slettet: ${hit.slice(0, 10).map((p) => `${p.handle} (${protectedMessage(p.tags)})`).join(", ")}`);
+  }
+
   if (current) {
     console.log(`\nSletter ${old.namespace}.${old.key} (type ${old.type.name}, ${old.metafieldsCount} verdier) …`);
     const del = (await shopifyGql(DEFINITION_DELETE, { id: old.id })).metafieldDefinitionDelete;
@@ -234,8 +242,9 @@ async function restore() {
   const skipped = [];
   const seen = new Map();
   for (const p of products) {
-    const { isbn, source, note } = isbnFromVariant(p);
     const before = backedUp.get(p.id) ?? null;
+    if (protectedTag(p.tags)) { skipped.push({ handle: p.handle, before, note: protectedMessage(p.tags) }); continue; }
+    const { isbn, source, note } = isbnFromVariant(p);
     if (!isbn) {
       if (before || note) skipped.push({ handle: p.handle, before, note: note ?? "ingen eksakt ISBN-13 i strekkode/SKU" });
       continue;

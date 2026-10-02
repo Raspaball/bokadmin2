@@ -140,6 +140,7 @@ export function Handles() {
         if (!r.timedOut) {
           if (r.failed) toast.error(`${r.failed} kunne ikke settes tilbake`);
           else toast.success(`${restored} handles satt tilbake`);
+          if (r.skippedProtected) toast.info(`${r.skippedProtected} beskyttede produkter (gave/lokal) er ikke rørt`);
           break;
         }
       }
@@ -341,6 +342,7 @@ export function Handles() {
               <Stat label="Allerede riktige" value={analysis.skipped.alleredeRiktig} />
               <Stat label="Uten ISBN (hoppes over)" value={analysis.skipped.ingenIsbn} />
               <Stat label="Egendefinert handle (hoppes over)" value={analysis.skipped.egendefinert} />
+              <Stat label="Beskyttet (gave/lokal, hoppes over)" value={analysis.skipped.beskyttet ?? 0} />
               <Stat label="Mangler forfatter" value={analysis.counts.missingAuthor} tone={analysis.counts.missingAuthor ? 'amber' : undefined} />
               <Stat label="Duplikat / kollisjon" value={blockedCount} tone={blockedCount ? 'red' : undefined} />
               <Stat label="Klare til endring" value={readyCount} strong />

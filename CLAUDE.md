@@ -56,6 +56,7 @@ Prøv i så stor grad som mulig å bruke felles datakilder for viktige data som 
 | Plan for handle-migrering | `planHandleMigration()` i `supabase/functions/_shared/handle-migration.js` | /shopify/handles/*, scripts/migrate-handles.mjs |
 | Bokgruppekode fra ONIX (skjema 37) | `extractBokgruppekode()` i `supabase/functions/_shared/onix.js` | bokbasen, shopify, sjangre-sync |
 | Bokbasen-innlogging (legitimasjon, token-cache, ONIX-URL) | `getBokbasenCredentials()` / `getBokbasenToken()` / `BOKBASEN_ONIX_URL` i `supabase/functions/_shared/bokbasen-auth.ts` | bokbasen, shopify, price-update, availability-check, sjangre-sync |
+| Beskyttede produkter (fast regel 2026-10-02) | `PROTECTED_TAGS` / `isProtected()` / `protectedTag()` i `_shared/protected.ts` (taggene gave, lokal, lokalhistorie, lokallitteratur; hel tagg, uten store/små bokstaver). Ligger fast i koden, ingen innstilling. Se `oppgaver/regel-beskyttede-samlinger.md` | book-update, price-update (jobb + godkjenning), availability-check, sjangre-sync, push/push-bulk, samlingstagging, handle-plan/-tilbakeføring, katalogredigering, CSV-eksport, `planBookUpdate`, `cleanBookTags`, scripts (clean-tags, migrate-handles, isbn-definition). Hver ny skriver til Shopify må hente `tags` og sjekke |
 | Formatfilter (ONIX ProductForm) | `FORMAT_OPTIONS` i Import.tsx | Kun Import.tsx — kan flyttes til utils/ hvis det trengs andre steder |
 
 ### Regel for nye datatyper

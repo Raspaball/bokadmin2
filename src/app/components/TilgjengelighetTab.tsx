@@ -176,9 +176,9 @@ export function TilgjengelighetTab() {
           const mode = (job.config as { mode?: string })?.mode || 'analyze';
           if (job.status === 'completed') {
             if (mode === 'analyze') {
-              toast.success(`Analyse fullfort: ${job.succeeded} avvik funnet, ${job.skipped} OK`);
+              toast.success(`Analyse fullfort: ${job.succeeded} avvik funnet, ${job.skipped} OK, ${(job.result as { skippedProtected?: number } | null)?.skippedProtected ?? 0} beskyttet`);
             } else {
-              toast.success(`Oppdatering fullfort: ${job.succeeded} endret, ${job.skipped} uendret`);
+              toast.success(`Oppdatering fullfort: ${job.succeeded} endret, ${job.skipped} uendret, ${(job.result as { skippedProtected?: number } | null)?.skippedProtected ?? 0} beskyttet`);
             }
           } else {
             toast.error('Tilgjengelighetssjekk feilet: ' + (job.error_message || 'Ukjent feil'));
@@ -368,6 +368,7 @@ export function TilgjengelighetTab() {
                             {new Date(job.created_at).toLocaleString('nb-NO')}
                             {' — '}
                             {job.processed} sjekket, {job.succeeded} {mode === 'analyze' ? 'avvik' : 'endret'}, {job.skipped} OK
+                            {`, ${(job.result as { skippedProtected?: number } | null)?.skippedProtected ?? 0} beskyttet`}
                             {job.failed > 0 && `, ${job.failed} feilet`}
                           </p>
                         </div>

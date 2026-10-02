@@ -19,6 +19,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL, waitForShopifyBudget } from "../_shared/shopify.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { getOnixCached } from "../_shared/onix-cache.ts";
+import { protectedMessage, protectedTag } from "../_shared/protected.ts";
 import {
   BOOK_UPDATE_PRODUCT_FIELDS, countPlan, loadBookUpdateCounts, planBookUpdate, summarizeBookUpdate,
   type BookUpdatePlan, type ShopifyBookProduct,
@@ -148,7 +149,7 @@ async function processBatch(jobId: string) {
   const save = (extra: Record<string, unknown>) => supabase.from("jobs").update({
     processed,
     succeeded: counts.changed,
-    skipped: counts.unchanged + counts.skippedNoIsbn + counts.skippedNoOnix,
+    skipped: counts.unchanged + counts.skippedNoIsbn + counts.skippedNoOnix + counts.skippedProtected,
     failed: counts.errors,
     ...extra,
   }).eq("id", jobId);
@@ -170,6 +171,15 @@ async function processBatch(jobId: string) {
       const isbn = extractIsbn(product);
       if (only && (!isbn || !only.includes(isbn))) continue; // ikke valgt i denne kjøringen
       processed++;
+      // Beskyttet (tagg gave/lokal/lokalhistorie/lokallitteratur): aldri rørt, ikke engang ONIX-oppslag
+      if (protectedTag(product.tags)) {
+        counts.skippedProtected++;
+        await supabase.from("sync_log").insert({
+          isbn, title: product.handle, action: "book_update", status: "info",
+          message: protectedMessage(product.tags), shopify_id: product.id, job_id: jobId, user_id: userId,
+        });
+        continue;
+      }
       if (!isbn) { counts.skippedNoIsbn++; continue; }
 
       await supabase.from("jobs").update({ current_isbn: isbn, processed }).eq("id", jobId);

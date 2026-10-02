@@ -22,6 +22,7 @@ import { CATEGORY_IDS, CATEGORY_NAMES } from "../_shared/book-format.ts";
 import { bookSeo, decideSeo, legacySeo, parseSeoAuto, seoMetafields } from "../_shared/book-seo.ts";
 import { coverAlt, coverChanges, coverFilename, type CoverChange } from "../_shared/book-cover.ts";
 import { cleanBookTags } from "../_shared/book-tags.ts";
+import { protectedMessage, protectedTag } from "../_shared/protected.ts";
 import { getOnixCached } from "../_shared/onix-cache.ts";
 import {
   SAFE_STORES, MIGRATION_PRODUCTS_QUERY, HANDLE_UPDATE_MUTATION,
@@ -441,7 +442,7 @@ async function pushOneBook(
   book: BookMetadata,
   bokbasenCredentials: BokbasenCredentials | null = null,
   userId: string | null = null,
-): Promise<{ shopifyId: string; handle: string; variantId?: string; created: boolean; warning?: string; priceNote?: string; approvalRequired?: boolean; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string; tagNote?: string }> {
+): Promise<{ shopifyId: string; handle: string; variantId?: string; created: boolean; warning?: string; priceNote?: string; approvalRequired?: boolean; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string; tagNote?: string; protectedNote?: string }> {
   // Tagger: bare bokgruppekode-hierarkiet (bkg-N, bkg-NN, bkg-NNN). Forfatter og
   // tittel er ikke lenger tagger (pakke B del 7, _shared/book-tags.ts).
   const bkgTags = book.bokgruppekode ? bokgruppeTagsForKode(book.bokgruppekode) : [];
@@ -460,6 +461,13 @@ async function pushOneBook(
   // Step 1: Finn eksisterende produkt (se findExistingProduct), ellers opprett.
   // Handle settes bare ved opprettelse — eksisterende produkter beholder sin.
   const existing = await findExistingProduct(book, isbn);
+  // Beskyttet (tagg gave/lokal/lokalhistorie/lokallitteratur, _shared/protected.ts):
+  // ingenting skrives, verken produkt, pris, metafelt, bilde eller publisering.
+  if (existing && protectedTag(existing.tags as string[] | undefined)) {
+    const protectedNote = protectedMessage(existing.tags as string[]);
+    console.warn(`[push ${isbn}] ${protectedNote}`);
+    return { shopifyId: existing.id as string, handle: existing.handle as string, created: false, protectedNote };
+  }
   let product: Record<string, unknown> | null = existing;
   const isUpdate = !!existing;
   const alreadyHasImage = ((existing?.media as { edges: unknown[] } | undefined)?.edges?.length ?? 0) > 0;
@@ -770,6 +778,8 @@ interface FullSyncResult {
     alreadyTagged: number;
     noKode: number;
     tagErrors: number;
+    /** Beskyttet tagg (_shared/protected.ts): aldri tagget */
+    skippedProtected: number;
   };
   collections: CollectionSyncResult;
 }
@@ -965,8 +975,12 @@ async function fullSyncCollections(
   // Otherwise look it up from Bokbasen by ISBN (bok.isbn / strekkode / SKU / ISBN-handle).
   const productToKode = new Map<string, string>(); // product.id → kode
   const needsLookup: Array<{ id: string; isbn: string }> = [];
+  // Beskyttede produkter (tagg gave/lokal/lokalhistorie/lokallitteratur) får aldri nye tagger
+  const isProtectedProduct = (p: { tags: string[] }) => protectedTag(p.tags) !== null;
+  const skippedProtected = allProducts.filter(isProtectedProduct).length;
 
   for (const product of allProducts) {
+    if (isProtectedProduct(product)) continue;
     const existing = product.tags.find(t => /^bkg-\d{3}$/.test(t));
     if (existing) {
       productToKode.set(product.id, existing.slice(4)); // strip "bkg-"
@@ -998,6 +1012,10 @@ async function fullSyncCollections(
   const koderFound = new Set<string>();
 
   for (const product of allProducts) {
+    if (isProtectedProduct(product)) {
+      console.warn(`[sync-collections ${product.handle}] ${protectedMessage(product.tags)}`);
+      continue;
+    }
     const kode = productToKode.get(product.id);
     if (!kode) { noKode++; continue; }
 
@@ -1025,7 +1043,7 @@ async function fullSyncCollections(
   const collections = await ensureCollections(koderFound);
 
   return {
-    products: { total: allProducts.length, updated, alreadyTagged, noKode, tagErrors },
+    products: { total: allProducts.length, updated, alreadyTagged, noKode, tagErrors, skippedProtected },
     collections,
   };
 }
@@ -1843,7 +1861,7 @@ async function rollbackHandleJob(jobId: string | null, userId: string | null) {
 
   const pending = await activeHandleChanges(job.id);
   const started = Date.now();
-  let restored = 0, failed = 0, timedOut = false;
+  let restored = 0, failed = 0, skippedProtected = 0, timedOut = false;
   const errors: string[] = [];
   const log: Record<string, unknown>[] = [];
 
@@ -1851,9 +1869,16 @@ async function rollbackHandleJob(jobId: string | null, userId: string | null) {
     if (Date.now() - started > HANDLE_PULSE_MS) { timedOut = true; break; }
     const path = `/products/${c.oldHandle}`;
     try {
-      const cur = await shopifyGraphQL(`query ($id: ID!) { product(id: $id) { handle } }`, { id: c.id });
+      const cur = await shopifyGraphQL(`query ($id: ID!) { product(id: $id) { handle tags } }`, { id: c.id });
       const handle = cur.data?.product?.handle;
       if (!handle) throw new Error("produktet finnes ikke lenger");
+      // Beskyttet nå (tagg gave/lokal/…): verken handle eller videresending røres.
+      // Logges som info, så endringen står som aktiv i sync_log.
+      if (protectedTag(cur.data.product.tags)) {
+        skippedProtected++;
+        log.push({ isbn: c.isbn, title: c.title, action: HANDLE_LOG_ROLLBACK, status: "info", message: `${c.newHandle}: ${protectedMessage(cur.data.product.tags)}`, shopify_id: c.id, job_id: job.id, user_id: userId });
+        continue;
+      }
       if (handle !== c.oldHandle) {
         if (handle !== c.newHandle) throw new Error(`handle er endret siden migreringen (nå ${handle})`);
         // Videresendingen fra gammel sti må bort før produktet kan få stien tilbake
@@ -1876,11 +1901,12 @@ async function rollbackHandleJob(jobId: string | null, userId: string | null) {
   }
   await insertSyncLog(log);
 
-  const remaining = pending.length - restored;
+  // Beskyttede produkter blir stående med ny handle; de regnes ikke som gjenstående
+  const remaining = pending.length - restored - skippedProtected;
   if (!timedOut && remaining === 0) {
     await patchHandleJob(job.id, { result: { ...(job.result ?? {}), rolledBackAt: new Date().toISOString() } });
   }
-  return { jobId: job.id, total: pending.length, restored, failed, remaining, timedOut, errors: errors.slice(0, 20) };
+  return { jobId: job.id, total: pending.length, restored, failed, skippedProtected, remaining, timedOut, errors: errors.slice(0, 20) };
 }
 
 // Katalogprodukt til frontend (katalog, katalogsøk). isbn kommer fra extractIsbn —
@@ -2004,7 +2030,7 @@ serve(async (req: Request) => {
       for (const book of books) {
         try {
           const result = await pushOneBook(book, bokbasen, userId);
-          results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle, created: result.created, warning: result.warning, priceNote: result.priceNote, approvalRequired: result.approvalRequired, availabilityNote: result.availabilityNote, status: result.status, seoNote: result.seoNote, descriptionNote: result.descriptionNote, tagNote: result.tagNote });
+          results.push({ isbn: book.isbn, success: true, shopifyId: result.shopifyId, handle: result.handle, created: result.created, warning: result.warning, priceNote: result.priceNote, approvalRequired: result.approvalRequired, availabilityNote: result.availabilityNote, status: result.status, seoNote: result.seoNote, descriptionNote: result.descriptionNote, tagNote: result.tagNote, protectedNote: result.protectedNote });
         } catch (e) {
           results.push({ isbn: book.isbn, success: false, error: String(e) });
         }
@@ -2133,6 +2159,11 @@ serve(async (req: Request) => {
         try {
           const { productId, title, productType, vendor, variantId, price } = change;
 
+          // Beskyttet (tagg gave/lokal/lokalhistorie/lokallitteratur): heller ikke manuell redigering herfra
+          const cur = await shopifyGraphQL(`query ($id: ID!) { product(id: $id) { tags } }`, { id: productId });
+          if (!cur.data?.product) throw new Error("Produktet finnes ikke");
+          if (protectedTag(cur.data.product.tags)) throw new Error(`${protectedMessage(cur.data.product.tags)}. Rediger i Shopify admin`);
+
           // Update title / productType / vendor if provided
           if (title !== undefined || productType !== undefined || vendor !== undefined) {
             const input: Record<string, unknown> = { id: productId };
@@ -2174,10 +2205,28 @@ serve(async (req: Request) => {
       if (!books.length) return new Response(JSON.stringify({ error: "No books provided" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
-      const csv = booksToShopifyCSV(books);
+      // Shopify-importen overskriver produktet med samme handle. Bøker der handlen
+      // tilhører et beskyttet produkt (tagg gave/lokal/…) tas ikke med i fila.
+      const allowed: BookMetadata[] = [];
+      let protectedSkipped = 0;
+      for (const book of books) {
+        const isbn = normalizeIsbn(book.isbn);
+        const handle = isbn ? newBookHandle(book, isbn) : book.isbn;
+        const r = await shopifyGraphQL(`query ($handle: String!) { productByIdentifier(identifier: { handle: $handle }) { tags } }`, { handle });
+        const tags = r.data?.productByIdentifier?.tags;
+        if (tags && protectedTag(tags)) {
+          protectedSkipped++;
+          console.warn(`[export-csv ${handle}] ${protectedMessage(tags)}`);
+        } else {
+          allowed.push(book);
+        }
+      }
+      const csv = booksToShopifyCSV(allowed);
       return new Response(csv, {
         headers: {
           ...corsHeaders,
+          "Access-Control-Expose-Headers": "X-Protected-Skipped",
+          "X-Protected-Skipped": String(protectedSkipped),
           "Content-Type": "text/csv; charset=utf-8",
           "Content-Disposition": `attachment; filename="shopify-products-${Date.now()}.csv"`,
         },

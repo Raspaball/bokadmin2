@@ -3,8 +3,10 @@
  * clean-tags.mjs
  *
  * Fjerner uønskede tags fra alle Shopify-produkter.
- * Beholder: "lokal", "gave", og alle "bkg-*" tags (bokgruppe-system).
+ * Beholder: de beskyttede taggene (gave, lokal, lokalhistorie, lokallitteratur),
+ * "gaver" og alle "bkg-*" tags (bokgruppe-system).
  * Sletter: alt annet (typisk forfatter- og titteltagger).
+ * Beskyttede produkter (supabase/functions/_shared/protected.ts) røres ikke i det hele tatt.
  *
  * Bruk:
  *   node scripts/clean-tags.mjs --dry-run     # analyser uten endringer (standard)
@@ -15,8 +17,9 @@
 import fs from "fs";
 import path from "path";
 import readline from "readline";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import cliProgress from "cli-progress";
+import { isProtectedTag, protectedMessage, protectedTag } from "../supabase/functions/_shared/protected.ts";
 
 // ── Konfigurasjon ─────────────────────────────────────────────────────────────
 
@@ -38,15 +41,20 @@ const RESUME = args.includes("--resume");
 
 /**
  * Returner true for tags som skal BEHOLDES.
- * Kritisk: "lokal", "gave" og alle bkg-* tags berøres ALDRI.
+ * Kritisk: de beskyttede taggene (alle skrivemåter) og alle bkg-* tags berøres ALDRI.
  */
-function shouldKeepTag(tag) {
-  return (
-    tag === "lokal" ||
-    tag === "gave" ||
-    tag === "gaver" ||
-    /^bkg-/.test(tag)
-  );
+export function shouldKeepTag(tag) {
+  return isProtectedTag(tag) || tag === "gaver" || /^bkg-/.test(tag);
+}
+
+/**
+ * Hva taggryddingen gjør med ett produkt. Beskyttet produkt: ingenting.
+ * @returns {{ protected: string | null, kept: string[], removed: string[] }}
+ */
+export function planTagCleanup(tags) {
+  const hit = protectedTag(tags);
+  if (hit) return { protected: hit, kept: [...tags], removed: [] };
+  return { protected: null, kept: tags.filter(shouldKeepTag), removed: tags.filter((t) => !shouldKeepTag(t)) };
 }
 
 // ── Credentials ───────────────────────────────────────────────────────────────
@@ -203,7 +211,8 @@ async function main() {
   // Bekreftelse for --execute
   if (!DRY_RUN) {
     console.log("\nADVARSEL: Dette vil oppdatere tags på opp til", totalProducts, "produkter.");
-    console.log("Beholder: lokal, gave, bkg-* tags");
+    console.log("Beholder: gave, lokal, lokalhistorie, lokallitteratur, gaver, bkg-* tags");
+    console.log("Beskyttede produkter (gave/lokal/lokalhistorie/lokallitteratur) røres ikke");
     console.log("Fjerner: alle andre tags (forfatter, tittel, osv.)\n");
     const ok = await confirm("Er du sikker på at du vil fortsette?");
     if (!ok) { console.log("Avbrutt."); process.exit(0); }
@@ -259,8 +268,9 @@ async function main() {
 
     // Behandle hvert produkt på siden
     for (const product of products) {
-      const keptTags = product.tags.filter(shouldKeepTag);
-      const removedTags = product.tags.filter(t => !shouldKeepTag(t));
+      const cleanup = planTagCleanup(product.tags);
+      const keptTags = cleanup.kept;
+      const removedTags = cleanup.removed;
       const needsUpdate = removedTags.length > 0;
 
       const logEntry = {
@@ -273,7 +283,11 @@ async function main() {
         result: null,
       };
 
-      if (!needsUpdate) {
+      if (cleanup.protected) {
+        state.skipped++;
+        state.protected = (state.protected ?? 0) + 1;
+        logEntry.result = protectedMessage(product.tags);
+      } else if (!needsUpdate) {
         state.skipped++;
         logEntry.result = "no-change";
       } else if (DRY_RUN) {
@@ -328,7 +342,8 @@ async function main() {
   console.log("\n\n=== Ferdig ===");
   console.log(`Behandlet:  ${state.processed}`);
   console.log(`${DRY_RUN ? "Ville oppdatert" : "Oppdatert"}:  ${state.updated}`);
-  console.log(`Hoppet over: ${state.skipped} (ingen tags å fjerne)`);
+  console.log(`Hoppet over: ${state.skipped} (ingen tags å fjerne, eller beskyttet)`);
+  console.log(`Beskyttet:   ${state.protected ?? 0} (tagg gave/lokal/lokalhistorie/lokallitteratur, ikke rørt)`);
   console.log(`Feil:        ${state.errors}`);
   console.log(`\nLogg: ${LOG_FILE}`);
 
@@ -341,7 +356,10 @@ async function main() {
   }
 }
 
-main().catch(e => {
-  console.error("Uventet feil:", e);
-  process.exit(1);
-});
+// Kjøres bare som skript (testene importerer shouldKeepTag/planTagCleanup)
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(e => {
+    console.error("Uventet feil:", e);
+    process.exit(1);
+  });
+}

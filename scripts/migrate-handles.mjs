@@ -36,6 +36,7 @@ import {
   SAFE_STORES, MIGRATION_PRODUCTS_QUERY, HANDLE_UPDATE_MUTATION,
   planHandleMigration, isBlockedRow, handleUpdateInput,
 } from "../supabase/functions/_shared/handle-migration.js";
+import { protectedMessage, protectedTag } from "../supabase/functions/_shared/protected.ts";
 
 const API_VERSION = "2026-07"; // samme som supabase/functions/_shared/shopify.ts
 const PLAN_MAX_AGE_HOURS = 24;
@@ -158,6 +159,7 @@ async function dryRun() {
   console.log(`Hoppet over, uten ISBN:      ${skipped.ingenIsbn}`);
   console.log(`Hoppet over, allerede riktig:${String(skipped.alleredeRiktig).padStart(3)}`);
   console.log(`Hoppet over, egendefinert:   ${skipped.egendefinert}${skipped.egendefinert ? "  (bruk --include-custom for å ta med)" : ""}`);
+  console.log(`Hoppet over, beskyttet:      ${skipped.beskyttet}  (tagg gave/lokal/lokalhistorie/lokallitteratur)`);
   console.log(`Med merknader:               ${warnings.length}`);
   console.log(`\nEksempler:`);
   for (const r of plan.slice(0, 5)) console.log(`  /products/${r.oldHandle}\n    → /products/${r.newHandle}`);
@@ -248,12 +250,21 @@ async function runBulk(rows, label) {
 async function execute() {
   const plan = readPlan();
   console.log(`\nUtfører ${plan.length} handle-endringer i ${SHOP}${DIRECT ? " (ett og ett)" : " (bulk-operasjon)"}\n`);
-  // Sjekk at produktene fortsatt har den gamle handle-en (planen kan være utdatert)
-  const current = new Map((await fetchAllProducts()).map((p) => [p.id, p.handle]));
+  // Sjekk at produktene fortsatt har den gamle handle-en (planen kan være utdatert),
+  // og at de ikke har fått en beskyttet tagg siden planen ble laget (protected.ts)
+  const products = await fetchAllProducts();
+  const current = new Map(products.map((p) => [p.id, p.handle]));
+  const protectedNow = new Map(products.filter((p) => protectedTag(p.tags)).map((p) => [p.id, p.tags]));
+  for (const r of plan.filter((r) => protectedNow.has(r.id))) {
+    console.log(`  ${r.oldHandle}: ${protectedMessage(protectedNow.get(r.id))}`);
+    log({ mode: "execute", id: r.id, skipped: protectedMessage(protectedNow.get(r.id)) });
+  }
+  const skippedProtected = plan.filter((r) => protectedNow.has(r.id)).length;
   const rows = plan
+    .filter((r) => !protectedNow.has(r.id))
     .filter((r) => current.get(r.id) === r.oldHandle)
     .map((r) => ({ id: r.id, fromHandle: r.oldHandle, oldHandle: r.oldHandle, newHandle: r.newHandle, input: handleUpdateInput(r) }));
-  const stale = plan.length - rows.length;
+  const stale = plan.length - skippedProtected - rows.length;
   if (stale) console.log(`  ${stale} produkter er endret siden planen ble laget, og hoppes over.`);
   if (!rows.length) return console.log("Ingenting å gjøre.\n");
 
@@ -288,7 +299,14 @@ async function verify() {
 // ── Angre ──────────────────────────────────────────────────────────────────
 async function rollback() {
   if (!existsSync(doneFile)) fail("Ingen utførte endringer å angre.");
-  const done = JSON.parse(readFileSync(doneFile, "utf8"));
+  const all = JSON.parse(readFileSync(doneFile, "utf8"));
+  // Beskyttede produkter (protected.ts): verken handle eller videresending røres
+  const tagsById = new Map((await fetchAllProducts()).map((p) => [p.id, p.tags]));
+  const done = all.filter((d) => !protectedTag(tagsById.get(d.id)));
+  for (const d of all.filter((d) => protectedTag(tagsById.get(d.id)))) {
+    console.log(`  ${d.newHandle}: ${protectedMessage(tagsById.get(d.id))}`);
+    log({ mode: "rollback", id: d.id, skipped: protectedMessage(tagsById.get(d.id)) });
+  }
   console.log(`\nSetter tilbake ${done.length} handles i ${SHOP}\n`);
   // Fjern videresendingen fra gammel adresse først, ellers kan ikke produktet få adressen tilbake
   for (const d of done) {
@@ -302,7 +320,7 @@ async function rollback() {
   const rows = done.map((d) => ({ id: d.id, fromHandle: d.newHandle, input: { id: d.id, handle: d.oldHandle, redirectNewHandle: false } }));
   const restored = await runDirect(rows, "rollback");
   const restoredIds = new Set(restored.map((r) => r.id));
-  writeFileSync(doneFile, JSON.stringify(done.filter((d) => !restoredIds.has(d.id)), null, 2));
+  writeFileSync(doneFile, JSON.stringify(all.filter((d) => !restoredIds.has(d.id)), null, 2));
   console.log(`\n✔ ${restored.length} av ${done.length} satt tilbake.\n`);
 }
 

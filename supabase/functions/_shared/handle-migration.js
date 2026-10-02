@@ -10,6 +10,7 @@
 
 import { buildBookHandle } from "./handle.js";
 import { BOK_ISBN_FIELD, extractIsbn } from "./isbn.js";
+import { protectedTag } from "./protected.ts";
 
 /** Butikker migreringen alltid kan kjøres mot. Andre krever eksplisitt samtykke. */
 export const SAFE_STORES = ["testbutikk-9434.myshopify.com"];
@@ -20,7 +21,7 @@ query Products($cursor: String) {
   products(first: 250, after: $cursor, query: "status:active OR status:draft OR status:archived") {
     pageInfo { hasNextPage endCursor }
     nodes {
-      id handle title productType status
+      id handle title productType status tags
       forfatter: metafield(namespace: "bok", key: "forfatter") { value }
       ${BOK_ISBN_FIELD}
       variants(first: 1) { nodes { barcode sku } }
@@ -68,14 +69,14 @@ export function isIsbnHandle(handle) {
  *   total: number,
  *   plan: Array<{ id: string, status: string, title: string, author: string, isbn: string,
  *                 oldHandle: string, newHandle: string, flags: string[], setIsbn: boolean }>,
- *   skipped: { ingenIsbn: number, alleredeRiktig: number, egendefinert: number },
+ *   skipped: { ingenIsbn: number, alleredeRiktig: number, egendefinert: number, beskyttet: number },
  *   counts: { planned: number, withFlags: number, blocked: number, missingAuthor: number, ready: number },
  * }}
  */
 export function planHandleMigration(products, { includeCustom = false, limit = Infinity } = {}) {
   const existing = new Set(products.map((p) => p.handle));
   const plan = [];
-  const skipped = { ingenIsbn: 0, alleredeRiktig: 0, egendefinert: 0 };
+  const skipped = { ingenIsbn: 0, alleredeRiktig: 0, egendefinert: 0, beskyttet: 0 };
 
   // ISBN per produkt, og hvor mange produkter som deler hvert ISBN
   const isbnById = new Map();
@@ -88,6 +89,9 @@ export function planHandleMigration(products, { includeCustom = false, limit = I
 
   for (const p of products) {
     if (plan.length >= limit) break;
+    // Beskyttet (tagg gave/lokal/lokalhistorie/lokallitteratur, protected.ts): aldri ny handle.
+    // Handlen teller fortsatt med i kollisjonssjekken (existing).
+    if (protectedTag(p.tags)) { skipped.beskyttet++; continue; }
     const isbn = isbnById.get(p.id);
     if (!isbn) { skipped.ingenIsbn++; continue; }
     const authors = p.forfatter?.value || p.productType;

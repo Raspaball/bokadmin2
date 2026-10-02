@@ -12,6 +12,7 @@
 // Sammenligningen er uten store/små bokstaver og ekstra mellomrom.
 
 import { mainTitle } from "./handle.js";
+import { isProtectedTag } from "./protected.ts";
 
 const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
 
@@ -62,7 +63,7 @@ export function cleanBookTags(
   const removed: string[] = [];
   const kept: string[] = [];
   for (const t of currentTags) {
-    if (remove.has(norm(t)) && !t.startsWith("bkg-")) removed.push(t);
+    if (remove.has(norm(t)) && !t.startsWith("bkg-") && !isProtectedTag(t)) removed.push(t);
     else kept.push(t);
   }
   for (const t of addTags) if (!kept.some((k) => norm(k) === norm(t))) kept.push(t);

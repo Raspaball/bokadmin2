@@ -502,7 +502,7 @@ export const bokbasen = {
 
 export const shopify = {
   // Push one book to Shopify
-  async pushBook(book: BokbasenSearchResult | Book): Promise<{ shopifyId: string; handle: string; variantId?: string; created?: boolean; warning?: string; priceNote?: string; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string; tagNote?: string }> {
+  async pushBook(book: BokbasenSearchResult | Book): Promise<{ shopifyId: string; handle: string; variantId?: string; created?: boolean; warning?: string; priceNote?: string; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string; tagNote?: string; protectedNote?: string }> {
     const res = await callEdgeFunction("shopify/push", {
       method: "POST",
       body: JSON.stringify({ book }),
@@ -511,7 +511,7 @@ export const shopify = {
   },
 
   // Push multiple books to Shopify
-  async pushBooks(bookList: (BokbasenSearchResult | Book)[]): Promise<Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string; tagNote?: string }>> {
+  async pushBooks(bookList: (BokbasenSearchResult | Book)[]): Promise<Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string; tagNote?: string; protectedNote?: string }>> {
     const res = await callEdgeFunction("shopify/push-bulk", {
       method: "POST",
       body: JSON.stringify({ books: bookList }),
@@ -521,12 +521,15 @@ export const shopify = {
   },
 
   // Download Shopify CSV
-  async exportCSV(bookList: (BokbasenSearchResult | Book)[]): Promise<void> {
+  // Returnerer antall bøker som ikke kom med fordi handlen tilhører et beskyttet produkt
+  async exportCSV(bookList: (BokbasenSearchResult | Book)[]): Promise<{ protectedSkipped: number }> {
     const res = await callEdgeFunction("shopify/export-csv", {
       method: "POST",
       body: JSON.stringify({ books: bookList }),
     });
     const csv = await res.text();
+    // Bøker med handle på et beskyttet produkt (tagg gave/lokal/…) er ikke med i fila
+    const protectedSkipped = Number(res.headers.get("X-Protected-Skipped") ?? 0);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -534,6 +537,7 @@ export const shopify = {
     a.download = `shopify-products-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+    return { protectedSkipped };
   },
 
   // Bygg megameny i Shopify Navigation
@@ -795,6 +799,7 @@ export interface BookUpdateCounts {
   unchanged: number;
   skippedNoIsbn: number;
   skippedNoOnix: number;
+  skippedProtected?: number;
   errors: number;
   fields: Record<string, { count: number; examples: string[] }>;
   notes: Record<string, number>;
@@ -837,7 +842,7 @@ export interface SjangreSyncAnalyzeResult {
 }
 
 export interface SjangreSyncJobResult {
-  products: { total: number; tagged: number; already_tagged: number; no_product: number; errors: number };
+  products: { total: number; tagged: number; already_tagged: number; no_product: number; errors: number; skipped_protected?: number };
   collections: { created: number; existing: number; renamed?: number; errors: number; total: number; details: Array<{ code: string; status: string; error?: string; from?: string; to?: string }> };
 }
 
@@ -1025,7 +1030,7 @@ export interface HandleAnalyzeResult {
   allowed: boolean;
   total: number;
   plan: HandlePlanRow[];
-  skipped: { ingenIsbn: number; alleredeRiktig: number; egendefinert: number };
+  skipped: { ingenIsbn: number; alleredeRiktig: number; egendefinert: number; beskyttet?: number };
   counts: { planned: number; withFlags: number; blocked: number; missingAuthor: number; ready: number };
 }
 
@@ -1054,6 +1059,8 @@ export interface HandleRollbackResult {
   total: number;
   restored: number;
   failed: number;
+  /** Beskyttet (tagg gave/lokal/…): handle og videresending røres ikke */
+  skippedProtected?: number;
   remaining: number;
   timedOut: boolean;
   errors: string[];

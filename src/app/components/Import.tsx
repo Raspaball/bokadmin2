@@ -143,7 +143,9 @@ function ImportResultLog({
 
 // Loggmelding for push: handle, prisnotat (pakke A2) og tilgjengelighet (pakke C),
 // f.eks. «Pushet til Shopify som avkledd-…. Kommer 15.11.2026: ACTIVE, kan forhåndsbestilles»
-function pushLogMessage(r: { handle?: string; priceNote?: string; availabilityNote?: string; seoNote?: string; descriptionNote?: string; tagNote?: string }): string {
+// Beskyttet produkt (tagg gave/lokal/…): «Hoppet over: beskyttet (tagg: Lokalhistorie)», ingenting endret.
+function pushLogMessage(r: { handle?: string; priceNote?: string; availabilityNote?: string; seoNote?: string; descriptionNote?: string; tagNote?: string; protectedNote?: string }): string {
+  if (r.protectedNote) return `${r.protectedNote}: ${r.handle} er ikke endret`;
   return [`Pushet til Shopify som ${r.handle}`, r.priceNote, r.availabilityNote, r.seoNote, r.descriptionNote, r.tagNote].filter(Boolean).join('. ');
 }
 
@@ -346,6 +348,7 @@ export function Import() {
     let successCount = 0;
     let failCount = 0;
     let priceNoteCount = 0;
+    let protectedCount = 0;
 
     for (let i = 0; i < toPush.length; i += 10) {
       if (cancelBatchRef.current) break;
@@ -356,7 +359,7 @@ export function Import() {
         chunk.find(c => c.id === b.id) ? { ...b, pushing: true } : b
       ));
 
-      let results: Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string; availabilityNote?: string; seoNote?: string; descriptionNote?: string; tagNote?: string }>;
+      let results: Array<{ isbn: string; success: boolean; shopifyId?: string; handle?: string; error?: string; priceNote?: string; availabilityNote?: string; seoNote?: string; descriptionNote?: string; tagNote?: string; protectedNote?: string }>;
       try {
         results = await shopify.pushBooks(chunk);
       } catch (e) {
@@ -377,7 +380,7 @@ export function Import() {
             isbn: book.isbn,
             title: book.title,
             action: 'push',
-            status: res.priceNote ? 'info' : 'success',
+            status: res.priceNote || res.protectedNote ? 'info' : 'success',
             message: pushLogMessage(res),
             shopify_id: res.shopifyId,
             job_id: null,
@@ -385,7 +388,8 @@ export function Import() {
           setAddedBooks(prev => prev.map(b =>
             b.id === book.id ? { ...b, pushing: false, pushed: true, shopify_id: res.shopifyId, shopify_handle: res.handle } : b
           ));
-          successCount++;
+          if (res.protectedNote) protectedCount++;
+          else successCount++;
           if (res.priceNote) priceNoteCount++;
         } else {
           await syncLog.add({
@@ -410,6 +414,7 @@ export function Import() {
     const wasCancelled = cancelBatchRef.current;
     if (successCount > 0) toast.success(`${successCount} bøker eksportert til Shopify${wasCancelled ? ' (avbrutt)' : ''}`);
     if (failCount > 0) toast.error(`${failCount} bøker feilet`);
+    if (protectedCount > 0) toast.info(`${protectedCount} bøker hoppet over: beskyttet (gave/lokal), ikke endret`);
     if (priceNoteCount > 0) toast.warning(`${priceNoteCount} bøker mangler pris — se «Mangler pris»`);
     if (wasCancelled) toast.info('Eksport avbrutt');
     setIsBatchPushing(false);
@@ -442,7 +447,7 @@ export function Import() {
         isbn: book.isbn,
         title: book.title,
         action: 'push',
-        status: result.priceNote ? 'info' : 'success',
+        status: result.priceNote || result.protectedNote ? 'info' : 'success',
         message: pushLogMessage(result),
         shopify_id: result.shopifyId,
         job_id: null,
@@ -450,7 +455,8 @@ export function Import() {
       setAddedBooks(prev => prev.map(b =>
         b.id === bookId ? { ...b, pushing: false, pushed: true, shopify_id: result.shopifyId, shopify_handle: result.handle } : b
       ));
-      toast.success(`"${book.title}" pushet til Shopify`);
+      if (result.protectedNote) toast.info(`"${book.title}": ${result.protectedNote}. Ingenting er endret i Shopify`);
+      else toast.success(`"${book.title}" pushet til Shopify`);
       if (result.warning) toast.warning(result.warning);
       if (result.priceNote) { toast.warning(result.priceNote); loadMissingPriceLog(); }
       if (result.descriptionNote) loadMissingDescriptionLog();

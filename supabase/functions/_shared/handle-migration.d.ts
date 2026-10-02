@@ -14,7 +14,7 @@ export interface HandlePlanRow {
 export interface HandlePlan {
   total: number;
   plan: HandlePlanRow[];
-  skipped: { ingenIsbn: number; alleredeRiktig: number; egendefinert: number };
+  skipped: { ingenIsbn: number; alleredeRiktig: number; egendefinert: number; beskyttet: number };
   counts: { planned: number; withFlags: number; blocked: number; missingAuthor: number; ready: number };
 }
 

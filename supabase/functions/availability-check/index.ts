@@ -7,6 +7,7 @@ import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
 import { BOKBASEN_ONIX_URL, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { extractAvailabilityCode, extractPublishingDate } from "../_shared/onix.js";
+import { protectedMessage, protectedTag } from "../_shared/protected.ts";
 import {
   availabilityDescription, availabilityMetafields, availabilityRule, needsContinuePolicy, type AvailabilityRule,
 } from "../_shared/availability.ts";
@@ -32,6 +33,7 @@ interface ShopifyProduct {
   id: string;
   status: string;
   handle: string;
+  tags: string[];
   bokIsbn?: { value: string } | null;
   tilgjengelighet?: { value: string } | null;
   utgivelsesdato?: { value: string } | null;
@@ -82,6 +84,7 @@ async function fetchShopifyProductsPage(
             id
             status
             handle
+            tags
             ${BOK_ISBN_FIELD}
             tilgjengelighet: metafield(namespace: "bok", key: "tilgjengelighet") { value }
             utgivelsesdato: metafield(namespace: "bok", key: "utgivelsesdato") { value }
@@ -267,6 +270,9 @@ async function processBatch(jobId: string) {
   let failed = job.failed || 0;
   let skipped = job.skipped || 0;
   let processed = job.processed || 0;
+  // Beskyttede produkter (_shared/protected.ts) telles for seg, ikke som «OK»
+  const protectedAtStart: number = job.config?.skipped_protected || 0;
+  let skippedProtected = protectedAtStart;
 
   try {
     const page = await fetchShopifyProductsPage(userId, cursor);
@@ -292,7 +298,7 @@ async function processBatch(jobId: string) {
           failed,
           skipped,
           current_isbn: null,
-          config: { ...job.config, shopify_cursor: cursor, page_start_index: i },
+          config: { ...job.config, shopify_cursor: cursor, page_start_index: i, skipped_protected: skippedProtected },
         }).eq("id", jobId);
         return;
       }
@@ -303,6 +309,17 @@ async function processBatch(jobId: string) {
         current_isbn: isbn || product.handle,
         processed,
       }).eq("id", jobId);
+
+      // Beskyttet (tagg gave/lokal/lokalhistorie/lokallitteratur): status og metafelt røres aldri
+      if (protectedTag(product.tags)) {
+        await supabase.from("sync_log").insert({
+          isbn, title: product.handle, action: "availability_check", status: "info",
+          message: protectedMessage(product.tags), shopify_id: product.id, job_id: jobId, user_id: userId,
+        });
+        skippedProtected++;
+        processed++;
+        continue;
+      }
 
       if (!isbn) {
         skipped++;
@@ -397,11 +414,12 @@ async function processBatch(jobId: string) {
         ...job.config,
         shopify_cursor: page.endCursor,
         page_start_index: 0,
+        skipped_protected: skippedProtected,
       },
       ...(isComplete ? {
         completed_at: new Date().toISOString(),
         total_items: processed,
-        result: { total: processed, processed, succeeded, failed, skipped },
+        result: { total: processed, processed, succeeded, failed, skipped, skippedProtected },
       } : {}),
     }).eq("id", jobId);
 
@@ -418,7 +436,7 @@ async function processBatch(jobId: string) {
       succeeded,
       failed,
       skipped,
-      config: { ...job.config, shopify_cursor: cursor, page_start_index: pageStartIndex },
+      config: { ...job.config, shopify_cursor: cursor, page_start_index: pageStartIndex, skipped_protected: protectedAtStart },
     }).eq("id", jobId);
   }
 }
