@@ -403,7 +403,10 @@ Anslag for 11 000 bøker: ONIX ~17 min første gang (deretter fra cache i 7 dage
 
 ### Del 3b: duplikater
 `scripts/duplicates.mjs --report` (Testbutikk via API, eller `--csv` for en eksport fra live uten API-kall). Testbutikk og live-eksporten: de samme 10 ISBN-ene, hver med et eldre produkt med tittel-handle og tema-tagger og ett fra gamle Bokadmin med ISBN-handle og bkg-/tittel-/forfattertagger.
-- Appen har ikke `read_orders`: ordrer vises som «ukjent», og regelen faller tilbake til «behold det eldste». I Testbutikk er opprettet-datoen importtidspunktet; i live er den ekte. Fra CSV finnes ingen dato, og da avgjør Eirik.
+- Regelen (bekreftet av Eirik 02.10.2026): behold produktet med ordrer, ellers det eldste. Ordrene telles med en bulk-spørring over alle ordrer (`ORDERS_BY_PRODUCT_BULK_QUERY`, produktet på hver ordrelinje; én ordre teller én gang per produkt).
+- Ordretilgang sies tydelig fra om øverst i rapporten: uten `read_orders` er ordrene «ukjent» og regelen blir «eldst»; med `read_orders` men uten `read_all_orders` ser Shopify bare de siste 60 dagene (merket i hver gruppe). Eirik legger til `read_orders` i appen; `read_all_orders` trengs for en sikker regel i live.
+- I Testbutikk (uten ordretilgang) beholdes tittel-handle-produktet i alle 10 gruppene (godtatt av Eirik). Opprettet-datoen der er importtidspunktet; i live er den ekte. Fra CSV finnes ingen dato, og da avgjør Eirik.
+- `--merge --execute` kjørt 02.10.2026: 6 produkter fikk bkg-* fra duplikatet.
 - Sammenslåing (`--merge`): bare tillegg med `tagsAdd` (bkg-* og egne tagger, ikke tittel/forfatterbiter). 6 av 10 som beholdes, mangler bkg-*.
 - Videresending (`--redirects`) lages først når Eirik har slettet duplikatet.
 - Jobbene (book-update side/bulk, pris, tilgjengelighet, sjangersynk, samlingstagging) skanner katalogen én gang per jobb og hopper over ISBN med flere produkter: 20 produkter (10 × 2) i hver jobb, med «DUPLIKAT» i sammendraget. Push stopper med feilmelding. Handle-migreringen blokkerer som før.

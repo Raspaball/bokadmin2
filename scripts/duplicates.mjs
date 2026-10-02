@@ -12,11 +12,16 @@
 //
 // Bokadmin sletter aldri produkter: Eirik sletter duplikatene i Shopify admin etter
 // å ha sett rapporten. Beskyttede produkter (protected.ts) røres ikke.
-// Ordrer: appen har ikke read_orders, så de vises som «ukjent» og regelen blir «eldst».
+// Ordrer: regelen er «behold produktet med ordrer, ellers det eldste». Ordrene telles
+// med en bulk-spørring over alle ordrer (produktet på hver ordrelinje). Uten read_orders
+// er ordrene «ukjent» og regelen blir «eldst»; uten read_all_orders ser Shopify bare
+// de siste 60 dagene. Begge deler sies tydelig fra om, i terminalen og i rapporten.
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { decideDuplicate, groupDuplicates, tagsToMerge } from "../supabase/functions/_shared/duplicates.ts";
+import {
+  ORDERS_BY_PRODUCT_BULK_QUERY, OrderCounter, decideDuplicate, groupDuplicates, orderAccess, orderAccessWarning, tagsToMerge,
+} from "../supabase/functions/_shared/duplicates.ts";
 import { protectedMessage, protectedTag } from "../supabase/functions/_shared/protected.ts";
 
 const args = process.argv.slice(2);
@@ -70,6 +75,25 @@ const PRODUCT_FIELDS = `id handle title status createdAt productType tags
   bokIsbn: metafield(namespace: "bok", key: "isbn") { value }
   variants(first: 1) { nodes { barcode sku } }`;
 
+/** Ordretilgang og ordrer per produkt (bare for produktene i duplikatgruppene). */
+async function loadOrders(shopifyGql, sleep) {
+  const scopes = (await shopifyGql(`{ currentAppInstallation { accessScopes { handle } } }`)).currentAppInstallation.accessScopes.map((x) => x.handle);
+  const access = orderAccess(scopes);
+  if (access === "ingen") return { access, counts: null };
+  const run = await shopifyGql(`mutation ($q: String!) { bulkOperationRunQuery(query: $q) { bulkOperation { id } userErrors { message } } }`, { q: ORDERS_BY_PRODUCT_BULK_QUERY });
+  const opId = run.bulkOperationRunQuery.bulkOperation?.id;
+  if (!opId) throw new Error(`Ordrespørringen startet ikke: ${JSON.stringify(run.bulkOperationRunQuery.userErrors)}`);
+  let op;
+  do {
+    await sleep(2000);
+    op = (await shopifyGql(`query ($id: ID!) { node(id: $id) { ... on BulkOperation { status errorCode url objectCount } } }`, { id: opId })).node;
+  } while (["CREATED", "RUNNING", "CANCELING"].includes(op.status));
+  if (op.status !== "COMPLETED") throw new Error(`Ordrespørringen endte med ${op.status} (${op.errorCode ?? "ingen feilkode"})`);
+  const counter = new OrderCounter();
+  if (op.url) for (const line of (await (await fetch(op.url)).text()).split("\n")) counter.add(line);
+  return { access, counts: counter.counts };
+}
+
 async function shopProducts(shopifyGql) {
   const all = [];
   let cursor = null;
@@ -86,9 +110,9 @@ function parseList(v) {
 }
 
 // ── Rapport ────────────────────────────────────────────────────────────────
-function buildReport(products, source) {
+function buildReport(products, source, access = "ingen") {
   const groups = groupDuplicates(products).map(({ isbn, products: ps }) => {
-    const d = decideDuplicate(ps);
+    const d = decideDuplicate(ps, access);
     const keep = ps.find((p) => p.id === d.keepId) ?? null;
     return {
       isbn, decision: d.reason, flags: d.flags, automatic: d.automatic,
@@ -101,15 +125,16 @@ function buildReport(products, source) {
       })),
     };
   });
-  return { source, createdAt: new Date().toISOString(), totalProducts: products.length, groups };
+  return { source, createdAt: new Date().toISOString(), totalProducts: products.length, orderAccess: access, orderWarning: orderAccessWarning(access), groups };
 }
 
 function printReport(r) {
-  console.log(`\nKilde: ${r.source}. Produkter: ${r.totalProducts}. ISBN med flere produkter: ${r.groups.length}\n`);
+  if (r.orderWarning) console.log(`\n⚠ ORDRER: ${r.orderWarning}`);
+  console.log(`\nKilde: ${r.source}. Produkter: ${r.totalProducts}. ISBN med flere produkter: ${r.groups.length}. Ordretilgang: ${r.orderAccess}\n`);
   for (const g of r.groups) {
     console.log(`${g.isbn}  → ${g.decision}${g.flags.length ? `  [${g.flags.join(", ")}]` : ""}`);
     for (const p of g.products) {
-      console.log(`   ${p.action.padEnd(18)} ${p.status.padEnd(8)} ${(p.createdAt ?? "dato ukjent").slice(0, 10)}  ${p.handle}`);
+      console.log(`   ${p.action.padEnd(18)} ${p.status.padEnd(8)} ${(p.createdAt ?? "dato ukjent").slice(0, 10)}  ordrer: ${String(p.orders).padEnd(6)} ${p.handle}`);
       console.log(`   ${"".padEnd(18)} tagger: ${p.tags.join(", ") || "-"}`);
       if (p.mergeTags.length) console.log(`   ${"".padEnd(18)} legges til på det som beholdes: ${p.mergeTags.join(", ")}`);
     }
@@ -124,6 +149,7 @@ function writeReport(r, name) {
   for (const g of r.groups) for (const p of g.products) {
     lines.push([g.isbn, g.decision, g.flags.join("; "), p.action, p.status, p.createdAt ?? "", p.handle, p.title, p.tags.join("; "), p.orders, p.mergeTags.join("; ")].map(csvCell).join(","));
   }
+  if (r.orderWarning) lines.unshift(csvCell(`ORDRER: ${r.orderWarning}`));
   writeFileSync(json.replace(/\.json$/, ".csv"), "﻿" + lines.join("\n"));
   console.log(`\nRapport: ${json} (+ .csv)\n`);
   return json;
@@ -137,12 +163,15 @@ if (MODE === "report" && CSV) {
   process.exit(0);
 }
 
-const { shopifyGql, testShop, fail } = await import("./lib/clients.mjs");
+const { shopifyGql, testShop, fail, sleep } = await import("./lib/clients.mjs");
 const SHOP = testShop();
 const reportFile = join(process.cwd(), "scripts", "out", `duplikater-${SHOP.replace(".myshopify.com", "")}.json`);
 
 if (MODE === "report") {
-  const r = buildReport(await shopProducts(shopifyGql), SHOP);
+  const products = await shopProducts(shopifyGql);
+  const { access, counts } = await loadOrders(shopifyGql, sleep);
+  if (counts) for (const p of products) p.orders = counts.get(p.id) ?? 0;
+  const r = buildReport(products, SHOP, access);
   printReport(r);
   writeReport(r, SHOP.replace(".myshopify.com", ""));
 } else {

@@ -112,8 +112,10 @@ const time = (p: DuplicateProduct) => (p.createdAt ? Date.parse(p.createdAt) : N
  * ordrer (eller ordrene er ukjente), behold det eldste. Er et av produktene
  * beskyttet, gjøres ingenting automatisk.
  */
-export function decideDuplicate(products: DuplicateProduct[]): DuplicateDecision {
+export function decideDuplicate(products: DuplicateProduct[], access: OrderAccess = "alle"): DuplicateDecision {
   const flags: string[] = [];
+  // Bare de siste 60 dagene: «ingen ordrer» betyr ikke at produktet aldri er solgt
+  if (access === "60 dager") flags.push("ordrer bare siste 60 dager");
   const prot = products.filter((p) => protectedTag(p.tags));
   if (prot.length) {
     return {
@@ -161,4 +163,53 @@ export function tagsToMerge(keep: DuplicateProduct, other: DuplicateProduct): st
   const { tags: kept2 } = cleanBookTags(kept, { title: keep.title, authors: other.forfatter ?? [], authorTexts });
   const have = new Set(keep.tags.map((t) => t.trim().toLowerCase()));
   return kept2.filter((t) => !have.has(t.trim().toLowerCase()) && !protectedTag([t]));
+}
+
+// ── Ordrer (regelen for live: behold produktet med ordrer) ──────────────────
+
+/**
+ * Bulk-spørring over alle ordrer med produktet på hver ordrelinje. Uten
+ * read_all_orders gir Shopify bare ordrer fra de siste 60 dagene.
+ */
+export const ORDERS_BY_PRODUCT_BULK_QUERY = `{
+  orders {
+    edges { node {
+      id
+      lineItems { edges { node { product { id } } } }
+    } }
+  }
+}`;
+
+/**
+ * Antall ordrer per produkt-ID fra bulk-fila (ordrelinjene har __parentId = ordren).
+ * En ordre teller én gang per produkt, selv med flere linjer. Kall `add` per linje.
+ */
+export class OrderCounter {
+  readonly counts = new Map<string, number>();
+  private readonly seen = new Set<string>();
+  add(line: string): void {
+    const t = line.trim();
+    if (!t) return;
+    const o = JSON.parse(t) as { __parentId?: string; product?: { id: string } | null };
+    if (!o.__parentId || !o.product?.id) return;
+    const key = `${o.__parentId}|${o.product.id}`;
+    if (this.seen.has(key)) return;
+    this.seen.add(key);
+    this.counts.set(o.product.id, (this.counts.get(o.product.id) ?? 0) + 1);
+  }
+}
+
+export type OrderAccess = "alle" | "60 dager" | "ingen";
+
+/** Ordretilgangen ut fra appens tilganger (currentAppInstallation.accessScopes). */
+export function orderAccess(scopes: readonly string[]): OrderAccess {
+  if (!scopes.includes("read_orders") && !scopes.includes("write_orders")) return "ingen";
+  return scopes.includes("read_all_orders") ? "alle" : "60 dager";
+}
+
+/** Tydelig melding om ordretilgangen, eller null når alle ordrer kan leses. */
+export function orderAccessWarning(access: OrderAccess): string | null {
+  if (access === "ingen") return "Appen mangler read_orders: ordrer er ukjent, og regelen bruker «behold det eldste». Legg til read_orders (og read_all_orders) i appen i Dev Dashboard.";
+  if (access === "60 dager") return "Appen har read_orders, men ikke read_all_orders: Shopify gir bare ordrer fra de siste 60 dagene. Eldre salg telles ikke. Legg til read_all_orders for en sikker regel.";
+  return null;
 }

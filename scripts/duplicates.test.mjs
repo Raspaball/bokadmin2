@@ -100,3 +100,37 @@ test("alle jobber og push hopper over duplikater", async () => {
     assert.match(src, /ensureDuplicates\(/, f);
   }
 });
+
+test("ordrer per produkt fra bulk-fila: én per ordre og produkt", async () => {
+  const { OrderCounter } = await import("../supabase/functions/_shared/duplicates.ts");
+  const c = new OrderCounter();
+  const lines = [
+    { id: "gid://shopify/Order/1" },
+    { product: { id: "P1" }, __parentId: "gid://shopify/Order/1" },
+    { product: { id: "P1" }, __parentId: "gid://shopify/Order/1" }, // samme bok to ganger i ordren
+    { product: { id: "P2" }, __parentId: "gid://shopify/Order/1" },
+    { id: "gid://shopify/Order/2" },
+    { product: { id: "P1" }, __parentId: "gid://shopify/Order/2" },
+    { product: null, __parentId: "gid://shopify/Order/2" }, // slettet produkt / egendefinert linje
+  ];
+  for (const l of lines) c.add(JSON.stringify(l));
+  c.add("");
+  assert.deepEqual(Object.fromEntries(c.counts), { P1: 2, P2: 1 });
+});
+
+test("ordretilgang og tydelig melding", async () => {
+  const { orderAccess, orderAccessWarning } = await import("../supabase/functions/_shared/duplicates.ts");
+  assert.equal(orderAccess(["read_products"]), "ingen");
+  assert.equal(orderAccess(["read_products", "read_orders"]), "60 dager");
+  assert.equal(orderAccess(["read_orders", "read_all_orders"]), "alle");
+  assert.match(orderAccessWarning("ingen"), /mangler read_orders/);
+  assert.match(orderAccessWarning("60 dager"), /siste 60 dagene/);
+  assert.equal(orderAccessWarning("alle"), null);
+});
+
+test("regel med ordre-tilgang: 60 dager merkes i beslutningen", () => {
+  const d = decideDuplicate([{ ...old, orders: 0 }, { ...fromBokadmin, orders: 0 }], "60 dager");
+  assert.equal(d.keepId, old.id);
+  assert.ok(d.flags.includes("ordrer bare siste 60 dager"));
+  assert.equal(decideDuplicate([{ ...old, orders: 0 }, { ...fromBokadmin, orders: 2 }], "alle").keepId, fromBokadmin.id);
+});
