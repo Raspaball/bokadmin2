@@ -9,6 +9,8 @@ import { BOKBASEN_ONIX_URL, clearBokbasenToken, getBokbasenCredentials, getBokba
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { extractBokgruppekode } from "../_shared/onix.js";
 import { protectedMessage, protectedTag } from "../_shared/protected.ts";
+import { ensureDuplicates } from "../_shared/duplicate-scan.ts";
+import { duplicateMessage } from "../_shared/duplicates.ts";
 import { COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, collectionTitleFix, tagSources } from "../_shared/collections.ts";
 import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
 
@@ -127,6 +129,11 @@ interface SyncJobConfig {
   tag_errors: number;
   /** Beskyttet tagg (_shared/protected.ts): aldri tagget */
   skipped_protected?: number;
+  /** Samme ISBN på flere produkter: aldri tagget før de er ryddet */
+  skipped_duplicate?: number;
+  /** ISBN → antall produkter (duplikatlisten) og skanningen som lager den */
+  duplicates?: Record<string, number>;
+  dup_scan?: unknown;
   processed: number;
 }
 
@@ -150,6 +157,7 @@ async function runCollectionsPhase(
         no_product: config.no_kode,
         errors: config.tag_errors,
         skipped_protected: config.skipped_protected ?? 0,
+        skipped_duplicate: config.skipped_duplicate ?? 0,
       },
       collections: colResult,
     },
@@ -177,6 +185,13 @@ async function processSyncBatch(jobId: string) {
 
 
   try {
+    // ISBN med flere produkter (pakke D del 3b): skannes én gang per jobb, så hoppes de over
+    // Jobben lagrer sitt eget config-objekt: listen legges inn der
+    const holder = { id: jobId, config };
+    const duplicates = config.phase === "tagging" ? await ensureDuplicates(supabase, holder, startTime + 30_000) : {};
+    if (!duplicates) return; // skanningen fortsetter i neste puls
+    config.duplicates = duplicates;
+    delete config.dup_scan;
     if (config.phase === "tagging") {
       if (!config.total_products) {
         const countResult = await shopifyGraphQL(`{ productsCount(query: "${ALL_PRODUCT_STATUSES}") { count } }`, {});
@@ -230,6 +245,16 @@ async function processSyncBatch(jobId: string) {
           await supabase.from("sync_log").insert({
             isbn: product.isbn, title: product.handle, action: "sjangre_sync", status: "info",
             message: protectedMessage(product.tags), shopify_id: product.id, job_id: jobId, user_id: userId,
+          });
+          config.processed++;
+          continue;
+        }
+
+        if (product.isbn && duplicates[product.isbn]) {
+          config.skipped_duplicate = (config.skipped_duplicate ?? 0) + 1;
+          await supabase.from("sync_log").insert({
+            isbn: product.isbn, title: product.handle, action: "sjangre_sync", status: "info",
+            message: duplicateMessage(duplicates[product.isbn]), shopify_id: product.id, job_id: jobId, user_id: userId,
           });
           config.processed++;
           continue;

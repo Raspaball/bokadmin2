@@ -6,20 +6,20 @@ import { countMissing, emptyCounts, loadCounts, summarizeCounts } from "../supab
 
 test("sammendrag i oppdateringsmodus", () => {
   const c = emptyCounts();
-  c.changed = 3; c.same = 40; c.approval = 1; c.skippedOwnPrice = 1; c.skippedOffer = 1; c.skippedNoIsbn = 20; c.skippedProtected = 2;
+  c.changed = 3; c.same = 40; c.approval = 1; c.skippedOwnPrice = 1; c.skippedOffer = 1; c.skippedNoIsbn = 20; c.skippedProtected = 2; c.skippedDuplicate = 1;
   countMissing(c, "ingen pris");
   countMissing(c, "ingen NOK-pris");
   countMissing(c, "ingen pris");
   assert.equal(
     summarizeCounts(c, "update"),
-    "3 endret, 40 samme pris, 1 krever godkjenning, hoppet over 24 (1 egen pris, 1 tilbud, 20 uten ISBN, 2 beskyttet), 3 manglet godkjent pris (2 ingen pris, 1 ingen NOK-pris), 0 feil",
+    "3 endret, 40 samme pris, 1 krever godkjenning, hoppet over 25 (1 egen pris, 1 tilbud, 20 uten ISBN, 2 beskyttet, 1 DUPLIKAT), 3 manglet godkjent pris (2 ingen pris, 1 ingen NOK-pris), 0 feil",
   );
 });
 
 test("sammendrag i sjekkmodus", () => {
   assert.equal(
     summarizeCounts(emptyCounts(), "analyze"),
-    "0 ville fått ny pris, 0 samme pris, 0 ville krevd godkjenning, hoppet over 0 (0 egen pris, 0 tilbud, 0 uten ISBN, 0 beskyttet), 0 manglet godkjent pris, 0 feil",
+    "0 ville fått ny pris, 0 samme pris, 0 ville krevd godkjenning, hoppet over 0 (0 egen pris, 0 tilbud, 0 uten ISBN, 0 beskyttet, 0 DUPLIKAT), 0 manglet godkjent pris, 0 feil",
   );
 });
 

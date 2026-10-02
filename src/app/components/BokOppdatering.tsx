@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button } from './ui/button';
+import { Checkbox } from './ui/checkbox';
+import { Label } from './ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { AlertCircle, CheckCircle2, FileText, Loader2, RefreshCw, Search, X } from 'lucide-react';
 import { toast } from 'sonner';
@@ -28,6 +30,9 @@ const FIELD_LABELS: Record<string, string> = {
   tags: 'Tagger (fjernet)',
 };
 
+const isBulk = (job: Job) => !!(job.config as { bulk?: unknown })?.bulk;
+const bulkSummary = (job: Job) => (job.result as { summary?: string })?.summary?.match(/Bulk: .*$/)?.[0] ?? null;
+const bulkPhase = (job: Job) => ({ query: 'leser katalogen', onix: 'henter ONIX', plan: 'regner ut endringer', apply: 'Shopify oppdaterer' } as Record<string, string>)[(job.config as { bulk?: { phase?: string } })?.bulk?.phase ?? ''] ?? '';
 const modeOf = (job: Job) => ((job.config as { mode?: string })?.mode === 'update' ? 'update' : 'analyze');
 const countsOf = (job: Job) => ((job.result as { counts?: BookUpdateCounts })?.counts ?? (job.config as { counts?: BookUpdateCounts })?.counts ?? null);
 
@@ -37,7 +42,7 @@ function FieldSummary({ counts }: { counts: BookUpdateCounts }) {
   return (
     <div className="space-y-2 text-sm">
       <p className="text-gray-600">
-        {counts.changed} endres, {counts.unchanged} uendret, hoppet over {counts.skippedNoIsbn + counts.skippedNoOnix + (counts.skippedProtected ?? 0)} ({counts.skippedNoIsbn} uten ISBN, {counts.skippedNoOnix} uten ONIX, {counts.skippedProtected ?? 0} beskyttet), {counts.errors} feil
+        {counts.changed} endres, {counts.unchanged} uendret, hoppet over {counts.skippedNoIsbn + counts.skippedNoOnix + (counts.skippedProtected ?? 0) + (counts.skippedDuplicate ?? 0)} ({counts.skippedNoIsbn} uten ISBN, {counts.skippedNoOnix} uten ONIX, {counts.skippedProtected ?? 0} beskyttet, {counts.skippedDuplicate ?? 0} DUPLIKAT), {counts.errors} feil
       </p>
       {fields.length > 0 && (
         <div className="border rounded-lg divide-y">
@@ -65,6 +70,7 @@ export function BokOppdatering() {
   const [activeJob, setActiveJob] = useState<Job | null>(null);
   const [recent, setRecent] = useState<Job[]>([]);
   const [starting, setStarting] = useState<'analyze' | 'update' | null>(null);
+  const [bulk, setBulk] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [log, setLog] = useState<SyncLogEntry[]>([]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -101,10 +107,10 @@ export function BokOppdatering() {
   }, []);
 
   const start = async (mode: 'analyze' | 'update') => {
-    if (mode === 'update' && !confirm('Oppdatere bøkene i Shopify etter standarden? Pris, status og handle endres ikke.')) return;
+    if (mode === 'update' && !confirm(`Oppdatere ${bulk ? 'hele katalogen i bulk' : 'bøkene'} i Shopify etter standarden? Pris, status og handle endres ikke.`)) return;
     setStarting(mode);
     try {
-      const r = await bookUpdateJobs.start(mode);
+      const r = await bookUpdateJobs.start(mode, undefined, bulk);
       if (r.error) { toast.info(r.error); return; }
       const job = await bookUpdateJobs.getStatus(r.jobId);
       setActiveJob(job);
@@ -140,7 +146,7 @@ export function BokOppdatering() {
               <div className="flex items-center justify-between text-sm">
                 <span className="flex items-center gap-2">
                   <Loader2 className="size-4 animate-spin text-blue-600" />
-                  {modeOf(activeJob) === 'update' ? 'Oppdaterer' : 'Sjekker'}{activeJob.status === 'paused' ? ' (pauset)' : '…'}
+                  {modeOf(activeJob) === 'update' ? 'Oppdaterer' : 'Sjekker'}{isBulk(activeJob) ? ` i bulk (${bulkPhase(activeJob)})` : ''}{activeJob.status === 'paused' ? ' (pauset)' : '…'}
                   {activeJob.current_isbn && <span className="text-xs text-gray-400 font-mono">{activeJob.current_isbn}</span>}
                 </span>
                 <span className="text-gray-500">{activeJob.processed} / {activeJob.total_items}</span>
@@ -154,7 +160,7 @@ export function BokOppdatering() {
               </Button>
             </div>
           ) : (
-            <div className="flex gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               <Button variant="outline" onClick={() => start('analyze')} disabled={!!starting}>
                 {starting === 'analyze' ? <Loader2 className="size-4 mr-2 animate-spin" /> : <Search className="size-4 mr-2" />}
                 Sjekk (endrer ingenting)
@@ -163,6 +169,10 @@ export function BokOppdatering() {
                 {starting === 'update' ? <Loader2 className="size-4 mr-2 animate-spin" /> : <RefreshCw className="size-4 mr-2" />}
                 Oppdater Shopify
               </Button>
+              <div className="flex items-center gap-2">
+                <Checkbox id="bok-bulk" checked={bulk} onCheckedChange={v => setBulk(v === true)} />
+                <Label htmlFor="bok-bulk" className="text-sm font-normal">Bulk (hele katalogen med Shopify Bulk Operations)</Label>
+              </div>
             </div>
           )}
         </CardContent>
@@ -179,7 +189,8 @@ export function BokOppdatering() {
                   <div className="flex items-center gap-3">
                     {job.status === 'completed' ? <CheckCircle2 className="size-5 text-green-600" /> : <AlertCircle className="size-5 text-red-600" />}
                     <div className="flex-1 text-sm">
-                      <p className="font-medium">{modeOf(job) === 'update' ? 'Oppdatering' : 'Sjekk'} — {job.status === 'completed' ? 'Fullført' : 'Feilet'}</p>
+                      <p className="font-medium">{modeOf(job) === 'update' ? 'Oppdatering' : 'Sjekk'}{isBulk(job) ? ' (bulk)' : ''} — {job.status === 'completed' ? 'Fullført' : 'Feilet'}</p>
+                      {bulkSummary(job) && <p className="text-xs text-gray-500">{bulkSummary(job)}</p>}
                       <p className="text-xs text-gray-500">{new Date(job.created_at).toLocaleString('nb-NO')}{job.error_message ? ` — ${job.error_message}` : ''}</p>
                     </div>
                     <Button variant="outline" size="sm" onClick={() => toggleLog(job.id)}>

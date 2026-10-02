@@ -8,7 +8,7 @@
 // pauset → gjenopptas av pg_cron (resume-paused-book-update-jobs) eller siden.
 // Sjekkmodus (analyze, standard) endrer ingenting.
 //
-// Endepunkter: POST /start { mode?: "analyze" | "update", isbns?: string[] },
+// Endepunkter: POST /start { mode?: "analyze" | "update", isbns?: string[], bulk?: boolean },
 // GET /status/:jobId, POST /cancel/:jobId, POST /resume/:jobId,
 // POST /resume-paused, GET /active, GET /recent?limit=
 //
@@ -19,8 +19,15 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL, waitForShopifyBudget } from "../_shared/shopify.ts";
 import { getCaller } from "../_shared/auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
-import { getOnixCached } from "../_shared/onix-cache.ts";
+import { getOnixCached, ONIX_CACHE_MAX_AGE_DAYS } from "../_shared/onix-cache.ts";
+import {
+  BULK_COVER_MUTATION, BULK_PRODUCT_UPDATE_MUTATION, BULK_PRODUCTS_QUERY, BulkProductAssembler,
+  bulkCoverLine, bulkUpdateLine, parseBulkResult, toJsonl,
+} from "../_shared/book-bulk.ts";
+import { BULK_ACTIVE, fetchBulkText, startBulkMutation, startBulkQuery, streamJsonlLines, waitForBulkOperation } from "../_shared/shopify-bulk.ts";
 import { protectedMessage, protectedTag } from "../_shared/protected.ts";
+import { ensureDuplicates } from "../_shared/duplicate-scan.ts";
+import { duplicateCounts, duplicateMessage } from "../_shared/duplicates.ts";
 import {
   BOOK_UPDATE_PRODUCT_FIELDS, countPlan, loadBookUpdateCounts, planBookUpdate, summarizeBookUpdate,
   type BookUpdatePlan, type ShopifyBookProduct,
@@ -124,12 +131,19 @@ async function applyPlan(productId: string, plan: BookUpdatePlan): Promise<void>
 
 async function processBatch(jobId: string) {
   const supabase = getSupabase();
+  // Bulk-modus har egen løkke (se processBulk)
+  const { data: kind } = await supabase.from("jobs").select("config").eq("id", jobId).single();
+  if (kind?.config?.bulk) return processBulk(jobId);
   const startTime = Date.now();
 
   const { data: job } = await supabase.from("jobs").select("*").eq("id", jobId).single();
   if (!job || (job.status !== "running" && job.status !== "paused")) return;
 
   await supabase.from("jobs").update({ status: "running", started_at: job.started_at || new Date().toISOString() }).eq("id", jobId);
+
+  // ISBN med flere produkter (pakke D del 3b): skannes én gang per jobb, så hoppes de over
+  const duplicates = await ensureDuplicates(supabase, job, startTime + 30_000);
+  if (!duplicates) return; // skanningen fortsetter i neste puls
 
   const mode: "analyze" | "update" = job.config?.mode === "update" ? "update" : "analyze";
   const only: string[] | null = Array.isArray(job.config?.isbns) && job.config.isbns.length ? job.config.isbns : null;
@@ -143,7 +157,7 @@ async function processBatch(jobId: string) {
   const save = (extra: Record<string, unknown>) => supabase.from("jobs").update({
     processed,
     succeeded: counts.changed,
-    skipped: counts.unchanged + counts.skippedNoIsbn + counts.skippedNoOnix + counts.skippedProtected,
+    skipped: counts.unchanged + counts.skippedNoIsbn + counts.skippedNoOnix + counts.skippedProtected + counts.skippedDuplicate,
     failed: counts.errors,
     ...extra,
   }).eq("id", jobId);
@@ -175,6 +189,14 @@ async function processBatch(jobId: string) {
         continue;
       }
       if (!isbn) { counts.skippedNoIsbn++; continue; }
+      if (duplicates[isbn]) {
+        counts.skippedDuplicate++;
+        await supabase.from("sync_log").insert({
+          isbn, title: product.handle, action: "book_update", status: "info",
+          message: duplicateMessage(duplicates[isbn]), shopify_id: product.id, job_id: jobId, user_id: userId,
+        });
+        continue;
+      }
 
       await supabase.from("jobs").update({ current_isbn: isbn, processed }).eq("id", jobId);
 
@@ -245,6 +267,304 @@ async function processBatch(jobId: string) {
   }
 }
 
+// ── Bulk-modus (pakke D del 3) ──────────────────────────────────────────────
+// Samme regel (planBookUpdate), men hele katalogen leses med bulkOperationRunQuery
+// og endringene sendes som JSONL med bulkOperationRunMutation. Faser i config.bulk:
+//   query  → bulk-spørringen kjører; URL til fila lagres
+//   onix   → ONIX hentes til onix_cache i forkant (ONIX_CONCURRENCY parallelle kall)
+//   plan   → BULK_CHUNK produkter planlegges; sjekk: bare telling, oppdatering: én
+//            productUpdate-operasjon (+ én fileUpdate for omslag) per bit
+//   apply  → venter på operasjonen og logger feil per bok, så neste bit
+// Hver puls gjør så mye den rekker på ~40 s; pg_cron gjenopptar som før.
+
+const BULK_CHUNK = 1000;
+const ONIX_CONCURRENCY = 4;
+const BULK_DEADLINE_MS = 40_000;
+
+interface BulkLineRef { id: string; isbn: string | null; handle: string }
+interface BulkState {
+  phase: "query" | "onix" | "plan" | "apply";
+  queryOpId?: string;
+  productsUrl?: string;
+  totalProducts?: number;
+  onixTodo?: string[];
+  /** ISBN → antall produkter, for ISBN med flere produkter (fra bulk-fila) */
+  duplicates?: Record<string, number>;
+  onixMissing?: string[];
+  planIndex: number;
+  apply?: { kind: "product" | "cover"; opId: string; refs: BulkLineRef[]; coverJsonl?: string; coverRefs?: BulkLineRef[]; startedAt: number };
+  stats: { onixCalls: number; onixOk: number; onixMissing: number; onixCached: number; onixMs: number; operations: number; operationMs: number; queryMs: number };
+}
+
+function emptyBulkState(): BulkState {
+  return { phase: "query", planIndex: 0, stats: { onixCalls: 0, onixOk: 0, onixMissing: 0, onixCached: 0, onixMs: 0, operations: 0, operationMs: 0, queryMs: 0 } };
+}
+
+/** «Bulk: 3 operasjoner (41 s), ONIX: 120 kall på 95 s (115 hentet, 5 mangler), 330 fra cache» */
+function summarizeBulk(s: BulkState["stats"]): string {
+  return `Bulk: ${s.operations} operasjoner (${Math.round(s.operationMs / 1000)} s), lesing ${Math.round(s.queryMs / 1000)} s. ` +
+    `ONIX: ${s.onixCalls} kall på ${Math.round(s.onixMs / 1000)} s (${s.onixOk} hentet, ${s.onixMissing} mangler), ${s.onixCached} fra cache`;
+}
+
+// deno-lint-ignore no-explicit-any
+async function insertLogs(supabase: any, rows: Record<string, unknown>[]) {
+  for (let i = 0; i < rows.length; i += 500) await supabase.from("sync_log").insert(rows.slice(i, i + 500));
+}
+
+/** ISBN-ene som har fersk ONIX i cachen (bare ISBN, ikke XML). */
+// deno-lint-ignore no-explicit-any
+async function freshOnixIsbns(supabase: any, isbns: string[]): Promise<Set<string>> {
+  const since = new Date(Date.now() - ONIX_CACHE_MAX_AGE_DAYS * 86_400_000).toISOString();
+  const fresh = new Set<string>();
+  for (let i = 0; i < isbns.length; i += 150) {
+    const { data, error } = await supabase.from("onix_cache").select("isbn").in("isbn", isbns.slice(i, i + 150)).gte("fetched_at", since);
+    if (error) throw new Error(`onix_cache: ${error.message}`);
+    for (const r of data ?? []) fresh.add(r.isbn);
+  }
+  return fresh;
+}
+
+// deno-lint-ignore no-explicit-any
+async function loadOnixXml(supabase: any, isbns: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  for (let i = 0; i < isbns.length; i += 100) {
+    const { data, error } = await supabase.from("onix_cache").select("isbn, xml").in("isbn", isbns.slice(i, i + 100));
+    if (error) throw new Error(`onix_cache: ${error.message}`);
+    for (const r of data ?? []) if (r.xml) out.set(r.isbn, r.xml);
+  }
+  return out;
+}
+
+async function processBulk(jobId: string) {
+  const supabase = getSupabase();
+  const startTime = Date.now();
+  const deadline = startTime + BULK_DEADLINE_MS;
+
+  const { data: job } = await supabase.from("jobs").select("*").eq("id", jobId).single();
+  if (!job || (job.status !== "running" && job.status !== "paused")) return;
+  await supabase.from("jobs").update({ status: "running", started_at: job.started_at || new Date().toISOString() }).eq("id", jobId);
+
+  const mode: "analyze" | "update" = job.config?.mode === "update" ? "update" : "analyze";
+  const only: Set<string> | null = Array.isArray(job.config?.isbns) && job.config.isbns.length ? new Set(job.config.isbns) : null;
+  const userId: string | null = job.user_id || null;
+  const countsAtStart = loadBookUpdateCounts(job.config?.counts);
+  const counts = loadBookUpdateCounts(job.config?.counts);
+  const stateAtStart: BulkState = job.config?.bulk ?? emptyBulkState();
+  const state: BulkState = JSON.parse(JSON.stringify(stateAtStart));
+  const processedAtStart: number = job.processed || 0;
+  let processed = processedAtStart;
+
+  const save = (extra: Record<string, unknown> = {}) => supabase.from("jobs").update({
+    processed,
+    succeeded: counts.changed,
+    skipped: counts.unchanged + counts.skippedNoIsbn + counts.skippedNoOnix + counts.skippedProtected + counts.skippedDuplicate,
+    failed: counts.errors,
+    config: { ...job.config, counts, bulk: state },
+    ...extra,
+  }).eq("id", jobId);
+  const cancelled = async () => (await supabase.from("jobs").select("status").eq("id", jobId).single()).data?.status === "failed";
+
+  try {
+    while (Date.now() < deadline) {
+      if (await cancelled()) return;
+
+      // ── 1. Les hele katalogen ──
+      if (state.phase === "query") {
+        if (!state.queryOpId) {
+          state.queryOpId = await startBulkQuery(BULK_PRODUCTS_QUERY);
+          await save();
+        }
+        const op = await waitForBulkOperation(state.queryOpId, deadline);
+        if (!op) throw new Error("Fant ikke bulk-spørringen");
+        if (BULK_ACTIVE.includes(op.status)) break;
+        if (op.status !== "COMPLETED" || !op.url) {
+          if (op.status === "COMPLETED") { // tom butikk
+            state.totalProducts = 0;
+            state.phase = "plan";
+            continue;
+          }
+          throw new Error(`Bulk-spørringen endte med ${op.status} (${op.errorCode ?? "ingen feilkode"})`);
+        }
+        state.productsUrl = op.url;
+        state.stats.queryMs = Date.now() - new Date(job.started_at || job.created_at).getTime();
+        state.phase = "onix";
+        await save();
+        continue;
+      }
+
+      // ── 2. ONIX i forkant ──
+      if (state.phase === "onix") {
+        if (!state.onixTodo) {
+          const isbns: string[] = [];
+          // Bare ISBN og tagger trengs her (slim)
+          const a = new BulkProductAssembler(() => true, true);
+          await streamJsonlLines(state.productsUrl!, (line) => a.add(line));
+          state.totalProducts = a.count;
+          const perIsbn: Record<string, number> = {};
+          for (const p of a.products) {
+            const isbn = extractIsbn(p);
+            if (isbn) perIsbn[isbn] = (perIsbn[isbn] ?? 0) + 1;
+            if (isbn && !protectedTag(p.tags) && (!only || only.has(isbn))) isbns.push(isbn);
+          }
+          state.duplicates = duplicateCounts(perIsbn);
+          const unique = [...new Set(isbns)].filter((i) => !state.duplicates![i]);
+          const fresh = await freshOnixIsbns(supabase, unique);
+          state.stats.onixCached = fresh.size;
+          state.onixTodo = unique.filter((i) => !fresh.has(i));
+          state.onixMissing = [];
+          await supabase.from("jobs").update({ total_items: only ? only.size : state.totalProducts }).eq("id", jobId);
+          await save();
+          continue;
+        }
+        while (state.onixTodo.length && Date.now() < deadline) {
+          const batch = state.onixTodo.slice(0, ONIX_CONCURRENCY);
+          const t0 = Date.now();
+          const results = await Promise.all(batch.map((isbn) => getOnixCached(isbn, userId)));
+          state.stats.onixMs += Date.now() - t0;
+          results.forEach((r, i) => {
+            state.stats.onixCalls++;
+            if (r.xml) state.stats.onixOk++;
+            else { state.stats.onixMissing++; state.onixMissing!.push(batch[i]); }
+          });
+          state.onixTodo = state.onixTodo.slice(batch.length);
+        }
+        if (state.onixTodo.length) break;
+        state.phase = "plan";
+        await save();
+        continue;
+      }
+
+      // ── 3. Planlegg en bit ──
+      if (state.phase === "plan") {
+        const total = state.totalProducts ?? 0;
+        if (state.planIndex >= total) {
+          const summary = `${summarizeBookUpdate(counts, mode)}. ${summarizeBulk(state.stats)}`;
+          await save({
+            status: "completed", current_isbn: null, completed_at: new Date().toISOString(), total_items: processed,
+            result: { processed, counts, bulk: state.stats, summary },
+          });
+          return;
+        }
+        const from = state.planIndex;
+        const to = Math.min(total, from + BULK_CHUNK);
+        const a = new BulkProductAssembler((i) => i >= from && i < to);
+        await streamJsonlLines(state.productsUrl!, (line) => a.add(line));
+        const xmlByIsbn = await loadOnixXml(supabase, a.products.map((p) => extractIsbn(p)).filter((i): i is string => !!i && (!only || only.has(i))));
+
+        const logs: Record<string, unknown>[] = [];
+        const productLines: unknown[] = [], productRefs: BulkLineRef[] = [];
+        const coverLines: unknown[] = [], coverRefs: BulkLineRef[] = [];
+        for (const product of a.products) {
+          const isbn = extractIsbn(product);
+          if (only && (!isbn || !only.has(isbn))) continue;
+          processed++;
+          const base = { isbn, title: product.handle, action: "book_update", shopify_id: product.id, job_id: jobId, user_id: userId };
+          if (protectedTag(product.tags)) {
+            counts.skippedProtected++;
+            logs.push({ ...base, status: "info", message: protectedMessage(product.tags) });
+            continue;
+          }
+          if (!isbn) { counts.skippedNoIsbn++; continue; }
+          const dup = state.duplicates?.[isbn];
+          if (dup) {
+            counts.skippedDuplicate++;
+            logs.push({ ...base, status: "info", message: duplicateMessage(dup) });
+            continue;
+          }
+          const xml = xmlByIsbn.get(isbn);
+          if (!xml) {
+            counts.skippedNoOnix++;
+            logs.push({ ...base, status: "info", message: "Hoppet over: fant ikke boka i Bokbasen" });
+            continue;
+          }
+          const plan = planBookUpdate(product, xml);
+          countPlan(counts, product.handle, plan);
+          const notes = plan.notes.length ? ` (${plan.notes.join("; ")})` : "";
+          if (!plan.changes.length) {
+            if (plan.notes.length) logs.push({ ...base, status: "info", message: `Uendret${notes}` });
+            continue;
+          }
+          const what = plan.changes.map((c) => `${c.field}: ${c.from || "(tom)"} → ${c.to}`).join("; ");
+          logs.push({ ...base, status: "success", message: `${mode === "update" ? "Sendt i bulk" : "Ville endret"}: ${what}${notes}` });
+          if (mode !== "update") continue;
+          const ref = { id: product.id, isbn, handle: product.handle };
+          const pl = bulkUpdateLine(product, plan);
+          if (pl) { productLines.push(pl); productRefs.push(ref); }
+          const cl = bulkCoverLine(product, plan);
+          if (cl) { coverLines.push(cl); coverRefs.push(ref); }
+        }
+        await insertLogs(supabase, logs);
+        state.planIndex = to;
+
+        if (mode === "update" && (productLines.length || coverLines.length)) {
+          const kind = productLines.length ? "product" : "cover";
+          const opId = kind === "product"
+            ? await startBulkMutation(BULK_PRODUCT_UPDATE_MUTATION, toJsonl(productLines), "book-update.jsonl")
+            : await startBulkMutation(BULK_COVER_MUTATION, toJsonl(coverLines), "book-cover.jsonl");
+          state.stats.operations++;
+          state.apply = {
+            kind, opId, refs: kind === "product" ? productRefs : coverRefs, startedAt: Date.now(),
+            ...(kind === "product" && coverLines.length ? { coverJsonl: toJsonl(coverLines), coverRefs } : {}),
+          };
+          state.phase = "apply";
+        }
+        await save();
+        continue;
+      }
+
+      // ── 4. Vent på operasjonen og logg feil per bok ──
+      if (state.phase === "apply" && state.apply) {
+        const ap = state.apply;
+        const op = await waitForBulkOperation(ap.opId, deadline);
+        if (!op) throw new Error("Fant ikke bulk-operasjonen");
+        if (BULK_ACTIVE.includes(op.status)) break;
+        state.stats.operationMs += Date.now() - ap.startedAt;
+
+        const field = ap.kind === "product" ? "productUpdate" : "fileUpdate";
+        const results = parseBulkResult(await fetchBulkText(op.url ?? op.partialDataUrl), field);
+        const okLines = new Set(results.filter((r) => r.ok).map((r) => r.line));
+        const errByLine = new Map(results.filter((r) => !r.ok).map((r) => [r.line, r.error!]));
+        const logs: Record<string, unknown>[] = [];
+        ap.refs.forEach((ref, line) => {
+          if (okLines.has(line)) return;
+          const err = errByLine.get(line) ?? `mangler i resultatet (operasjonen endte med ${op.status}${op.errorCode ? `, ${op.errorCode}` : ""})`;
+          counts.errors++;
+          if (ap.kind === "product") counts.changed = Math.max(0, counts.changed - 1);
+          logs.push({ isbn: ref.isbn, title: ref.handle, action: "book_update", status: "error",
+            message: `Feil i bulk (${ap.kind === "product" ? "produkt/metafelt" : "omslag"}): ${err}`, shopify_id: ref.id, job_id: jobId, user_id: userId });
+        });
+        await insertLogs(supabase, logs);
+
+        if (ap.kind === "product" && ap.coverJsonl) {
+          const opId = await startBulkMutation(BULK_COVER_MUTATION, ap.coverJsonl, "book-cover.jsonl");
+          state.stats.operations++;
+          state.apply = { kind: "cover", opId, refs: ap.coverRefs ?? [], startedAt: Date.now() };
+        } else {
+          state.apply = undefined;
+          state.phase = "plan";
+        }
+        await save();
+        continue;
+      }
+      state.phase = "plan"; // ukjent tilstand: fortsett med neste bit
+    }
+
+    await save({ status: "paused", current_isbn: null });
+  } catch (err) {
+    console.error("book-update (bulk):", err);
+    const msg = String(err);
+    const fatal = msg.includes("HTTP 401") || msg.includes("HTTP 403");
+    // Tilstanden fra pulsstart, men en startet operasjon beholdes (ellers sendes den på nytt)
+    const keep: BulkState = state.apply && !stateAtStart.apply ? state : stateAtStart;
+    await supabase.from("jobs").update({
+      status: fatal ? "failed" : "paused",
+      error_message: msg,
+      processed: keep === state ? processed : processedAtStart,
+      config: { ...job.config, counts: keep === state ? counts : countsAtStart, bulk: keep },
+    }).eq("id", jobId);
+  }
+}
+
 // ── Endepunkter ─────────────────────────────────────────────────────────────
 
 serve(async (req) => {
@@ -263,6 +583,8 @@ serve(async (req) => {
       // Ingen planlagte oppgaver for denne jobben: user_id i body godtas ikke
       const userId = jwtUserId;
       const mode = body.mode === "update" ? "update" : "analyze";
+      // bulk: true → hele katalogen med Shopify Bulk Operations (pakke D del 3)
+      const bulk = body.bulk === true;
       const isbns = Array.isArray(body.isbns) ? body.isbns.map(String).filter((s: string) => /^\d{13}$/.test(s)) : null;
 
       let existingQ = supabase.from("jobs").select("id").eq("type", JOB_TYPE).in("status", ["running", "paused", "pending"]).limit(1);
@@ -273,13 +595,13 @@ serve(async (req) => {
       const total = isbns?.length ?? await getProductCount();
       const { data: job, error } = await supabase.from("jobs").insert({
         type: JOB_TYPE, status: "running", user_id: userId, started_at: new Date().toISOString(), total_items: total,
-        config: { mode, isbns: isbns?.length ? isbns : null, shopify_cursor: null },
+        config: { mode, isbns: isbns?.length ? isbns : null, shopify_cursor: null, ...(bulk ? { bulk: emptyBulkState() } : {}) },
       }).select().single();
       if (error || !job) return json({ error: "Kunne ikke opprette jobb" }, 500);
 
       // @ts-ignore
       EdgeRuntime.waitUntil(processBatch(job.id));
-      return json({ jobId: job.id, status: "running", mode }, 202);
+      return json({ jobId: job.id, status: "running", mode, bulk }, 202);
     }
 
     const userId = jwtUserId;

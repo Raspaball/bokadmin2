@@ -379,6 +379,35 @@ Gjenstår etter pakke B:
 - `FORMAT_OPTIONS` i Import.tsx har feil koder (se del 2) og bør flyttes til `src/app/utils/formatCodes.ts`.
 - Strømmer bruker fortsatt utfasede `collectionAddProducts`/`collectionRemoveProducts`.
 
+## Pakke D: generalprøve (2026-10-02, pågår)
+
+### Del 2: importen av runde 1
+`scripts/data/runde1.csv` (446 produkter fra live) importert av Eirik. Kontroll (`scripts/out/kontroller-import.mjs`): 0 avvik mot fila på tittel, productType, leverandør, tagger, status, pris, strekkode, SKU, SEO, antall bilder og publisering. 378 har ISBN som handle, 68 egendefinert. 444 har bilde på cdn.shopify.com (de 2 uten har heller ikke bilde i fila). Publisert i alle kanaler som push gjør (Online Store, Shop, Point of Sale): 445 i hver; det arkiverte produktet er lagt til i kanalene, men vises ikke så lenge det er arkivert. Beskyttede produkter er ikke publisert på nytt.
+
+### Beskyttede produkter, sikkerhet
+- `_shared/protected.ts` i alle skrivere, testet med 6 testprodukter (se regel-fila).
+- `_shared/auth.ts`: brukeren verifiseres med `auth.getUser` (før ble JWT-en bare dekodet, så `/price-update/approvals/decide` kunne forfalskes). Testet: forfalsket token → 401. `user_id` i body godtas bare fra pg_cron for brukere med aktiv planlagt oppgave.
+- Angring av handles: beskyttet produkt beholder ny handle → kjøringen blir «delvis angret» med liste.
+
+### Del 3: bulk-modus for «Oppdater eksisterende bøker»
+`POST /book-update/start { bulk: true }` (avkrysning på siden). Faser: bulk-spørring → ONIX til `onix_cache` → plan i biter på 1000 → én `productUpdate` (produktfelt + metafelt i samme kall) og én `fileUpdate` (omslag) som bulk-mutasjon per bit. Begge mutasjonene er validert som bulk-mutasjoner mot Testbutikk (2026-07). Resultatfila leses per linje, og feil logges per bok.
+
+| Test (Testbutikk, 452 produkter) | Resultat |
+|---|---|
+| Sjekk, bulk | 1 min 22 s totalt. Lesing 5 s. ONIX: 394 kall på 36 s (4 parallelle, ~11/s, 0 feil fra Bokbasen), 42 fra cache |
+| Sjekk, side for side (til sammenligning) | ~9 min. Samme tall felt for felt (eneste forskjell: T6, som ble oppdatert mellom kjøringene) |
+| Oppdatering, bulk, 3 ISBN (T6 + 2 beskyttede) | 1 operasjon, 0 feil. productType, tagger og bok.sider rettet; beskyttede uendret i alle felt |
+| Oppdatering, bulk, omslag | fileUpdate-operasjon: alt-tekst «Omslag: … av …» og filnavn `{handle}-omslag.jpg` satt |
+
+Anslag for 11 000 bøker: ONIX ~17 min første gang (deretter fra cache i 7 dager), plan + 11 bulk-operasjoner à 1000. Pris, tilgjengelighet og sjangersynk leser fortsatt side for side (tåler katalogen, men tar lengre tid).
+
+### Del 3b: duplikater
+`scripts/duplicates.mjs --report` (Testbutikk via API, eller `--csv` for en eksport fra live uten API-kall). Testbutikk og live-eksporten: de samme 10 ISBN-ene, hver med et eldre produkt med tittel-handle og tema-tagger og ett fra gamle Bokadmin med ISBN-handle og bkg-/tittel-/forfattertagger.
+- Appen har ikke `read_orders`: ordrer vises som «ukjent», og regelen faller tilbake til «behold det eldste». I Testbutikk er opprettet-datoen importtidspunktet; i live er den ekte. Fra CSV finnes ingen dato, og da avgjør Eirik.
+- Sammenslåing (`--merge`): bare tillegg med `tagsAdd` (bkg-* og egne tagger, ikke tittel/forfatterbiter). 6 av 10 som beholdes, mangler bkg-*.
+- Videresending (`--redirects`) lages først når Eirik har slettet duplikatet.
+- Jobbene (book-update side/bulk, pris, tilgjengelighet, sjangersynk, samlingstagging) skanner katalogen én gang per jobb og hopper over ISBN med flere produkter: 20 produkter (10 × 2) i hver jobb, med «DUPLIKAT» i sammendraget. Push stopper med feilmelding. Handle-migreringen blokkerer som før.
+
 ## Pakke C: kommende og midlertidig utsolgte bøker (2026-10-02)
 
 Oppgaven: `oppgaver/pakke-c-tilgjengelighet.md`. Beslutning (Eirik): kommende og midlertidig utsolgte bøker skal være synlige og kunne kjøpes, ikke utkast (utkast gir 404, og Google mister siden akkurat når kommende bøker gir søketrafikk). Prisregelen (List 58) er ikke endret.

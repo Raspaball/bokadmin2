@@ -800,6 +800,7 @@ export interface BookUpdateCounts {
   skippedNoIsbn: number;
   skippedNoOnix: number;
   skippedProtected?: number;
+  skippedDuplicate?: number;
   errors: number;
   fields: Record<string, { count: number; examples: string[] }>;
   notes: Record<string, number>;
@@ -807,10 +808,11 @@ export interface BookUpdateCounts {
 
 export const bookUpdateJobs = {
   // mode sendes alltid eksplisitt; uten mode gjør serveren bare en sjekk
-  async start(mode: "analyze" | "update", isbns?: string[]): Promise<{ jobId: string; error?: string }> {
+  // bulk: hele katalogen med Shopify Bulk Operations (pakke D del 3)
+  async start(mode: "analyze" | "update", isbns?: string[], bulk = false): Promise<{ jobId: string; error?: string }> {
     const res = await callEdgeFunction("book-update/start", {
       method: "POST",
-      body: JSON.stringify({ mode, ...(isbns?.length ? { isbns } : {}) }),
+      body: JSON.stringify({ mode, ...(isbns?.length ? { isbns } : {}), ...(bulk ? { bulk: true } : {}) }),
     });
     return res.json();
   },
@@ -842,7 +844,7 @@ export interface SjangreSyncAnalyzeResult {
 }
 
 export interface SjangreSyncJobResult {
-  products: { total: number; tagged: number; already_tagged: number; no_product: number; errors: number; skipped_protected?: number };
+  products: { total: number; tagged: number; already_tagged: number; no_product: number; errors: number; skipped_protected?: number; skipped_duplicate?: number };
   collections: { created: number; existing: number; renamed?: number; errors: number; total: number; details: Array<{ code: string; status: string; error?: string; from?: string; to?: string }> };
 }
 

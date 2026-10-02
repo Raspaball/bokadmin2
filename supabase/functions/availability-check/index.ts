@@ -9,6 +9,8 @@ import { BOKBASEN_ONIX_URL, getBokbasenToken } from "../_shared/bokbasen-auth.ts
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { extractAvailabilityCode, extractPublishingDate } from "../_shared/onix.js";
 import { protectedMessage, protectedTag } from "../_shared/protected.ts";
+import { ensureDuplicates } from "../_shared/duplicate-scan.ts";
+import { duplicateMessage } from "../_shared/duplicates.ts";
 import {
   availabilityDescription, availabilityMetafields, availabilityRule, needsContinuePolicy, type AvailabilityRule,
 } from "../_shared/availability.ts";
@@ -254,6 +256,10 @@ async function processBatch(jobId: string) {
     started_at: job.started_at || new Date().toISOString(),
   }).eq("id", jobId);
 
+  // ISBN med flere produkter (pakke D del 3b): skannes én gang per jobb, så hoppes de over
+  const duplicates = await ensureDuplicates(supabase, job, startTime + 30_000);
+  if (!duplicates) return; // skanningen fortsetter i neste puls
+
   const mode = job.config?.mode || "analyze";
   const cursor: string | null = job.config?.shopify_cursor || null;
   const pageStartIndex: number = job.config?.page_start_index || 0;
@@ -265,6 +271,8 @@ async function processBatch(jobId: string) {
   // Beskyttede produkter (_shared/protected.ts) telles for seg, ikke som «OK»
   const protectedAtStart: number = job.config?.skipped_protected || 0;
   let skippedProtected = protectedAtStart;
+  const duplicateAtStart: number = job.config?.skipped_duplicate || 0;
+  let skippedDuplicate = duplicateAtStart;
 
   try {
     const page = await fetchShopifyProductsPage(userId, cursor);
@@ -290,7 +298,7 @@ async function processBatch(jobId: string) {
           failed,
           skipped,
           current_isbn: null,
-          config: { ...job.config, shopify_cursor: cursor, page_start_index: i, skipped_protected: skippedProtected },
+          config: { ...job.config, shopify_cursor: cursor, page_start_index: i, skipped_protected: skippedProtected, skipped_duplicate: skippedDuplicate },
         }).eq("id", jobId);
         return;
       }
@@ -315,6 +323,16 @@ async function processBatch(jobId: string) {
 
       if (!isbn) {
         skipped++;
+        processed++;
+        continue;
+      }
+
+      if (duplicates[isbn]) {
+        await supabase.from("sync_log").insert({
+          isbn, title: product.handle, action: "availability_check", status: "info",
+          message: duplicateMessage(duplicates[isbn]), shopify_id: product.id, job_id: jobId, user_id: userId,
+        });
+        skippedDuplicate++;
         processed++;
         continue;
       }
@@ -407,11 +425,12 @@ async function processBatch(jobId: string) {
         shopify_cursor: page.endCursor,
         page_start_index: 0,
         skipped_protected: skippedProtected,
+        skipped_duplicate: skippedDuplicate,
       },
       ...(isComplete ? {
         completed_at: new Date().toISOString(),
         total_items: processed,
-        result: { total: processed, processed, succeeded, failed, skipped, skippedProtected },
+        result: { total: processed, processed, succeeded, failed, skipped, skippedProtected, skippedDuplicate },
       } : {}),
     }).eq("id", jobId);
 
@@ -428,7 +447,7 @@ async function processBatch(jobId: string) {
       succeeded,
       failed,
       skipped,
-      config: { ...job.config, shopify_cursor: cursor, page_start_index: pageStartIndex, skipped_protected: protectedAtStart },
+      config: { ...job.config, shopify_cursor: cursor, page_start_index: pageStartIndex, skipped_protected: protectedAtStart, skipped_duplicate: duplicateAtStart },
     }).eq("id", jobId);
   }
 }

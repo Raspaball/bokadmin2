@@ -24,6 +24,8 @@ import { bookSeo, decideSeo, legacySeo, parseSeoAuto, seoMetafields } from "../_
 import { coverAlt, coverChanges, coverFilename, type CoverChange } from "../_shared/book-cover.ts";
 import { cleanBookTags } from "../_shared/book-tags.ts";
 import { protectedMessage, protectedTag } from "../_shared/protected.ts";
+import { BULK_ACTIVE, startBulkMutation } from "../_shared/shopify-bulk.ts";
+import { duplicateCounts, duplicateMessage } from "../_shared/duplicates.ts";
 import { getOnixCached } from "../_shared/onix-cache.ts";
 import {
   SAFE_STORES, MIGRATION_PRODUCTS_QUERY, HANDLE_UPDATE_MUTATION,
@@ -392,6 +394,19 @@ async function findProductByBarcodeOrSku(isbn: string): Promise<Record<string, u
   return nodes.find((n) => extractIsbn(n) === isbn) ?? null;
 }
 
+// Alle produkter med dette ISBN-et (strekkode/SKU, bok.isbn og handle = ISBN).
+// Mer enn ett: duplikat (pakke D del 3b), og push stopper til de er ryddet.
+async function productIdsWithIsbn(isbn: string): Promise<Set<string>> {
+  const ids = new Set<string>();
+  const r = await shopifyGraphQL(PRODUCTS_BY_ISBN_SEARCH_QUERY, { q: `(barcode:${isbn} OR sku:${isbn}) AND (${ALL_PRODUCT_STATUSES})` });
+  for (const n of (r.data?.products?.nodes ?? []) as Record<string, unknown>[]) if (extractIsbn(n) === isbn) ids.add(n.id as string);
+  const byCustom = await findProductByCustomId(isbn);
+  if (byCustom?.id) ids.add(byCustom.id as string);
+  const byHandle = await shopifyGraphQL(PRODUCT_BY_HANDLE_QUERY, { handle: isbn });
+  if (byHandle.data?.productByIdentifier?.id) ids.add(byHandle.data.productByIdentifier.id);
+  return ids;
+}
+
 // Finner et eksisterende produkt for boka, i denne rekkefølgen:
 //   a. shopify_id lagret i books
 //   b. customId: metafeltet bok.isbn (typen «id»)
@@ -458,6 +473,10 @@ async function pushOneBook(
   const fields: BookFields | null = onixXml ? bookFieldsFromOnix(onixXml) : null;
   // Gamle books-rader uten forfatterliste: listen fra ONIX (handle og bok.forfatter)
   if (!book.authors?.length && fields?.authors.length) book = { ...book, authors: fields.authors };
+
+  // Duplikat (samme ISBN på flere produkter): ingenting skrives før de er ryddet
+  const sameIsbn = await productIdsWithIsbn(isbn);
+  if (sameIsbn.size > 1) throw new Error(`${duplicateMessage(sameIsbn.size)}. Rydd duplikatene først (scripts/duplicates.mjs)`);
 
   // Step 1: Finn eksisterende produkt (se findExistingProduct), ellers opprett.
   // Handle settes bare ved opprettelse — eksisterende produkter beholder sin.
@@ -781,6 +800,8 @@ interface FullSyncResult {
     tagErrors: number;
     /** Beskyttet tagg (_shared/protected.ts): aldri tagget */
     skippedProtected: number;
+    /** Samme ISBN på flere produkter: aldri tagget før de er ryddet */
+    skippedDuplicate: number;
   };
   collections: CollectionSyncResult;
 }
@@ -979,9 +1000,15 @@ async function fullSyncCollections(
   // Beskyttede produkter (tagg gave/lokal/lokalhistorie/lokallitteratur) får aldri nye tagger
   const isProtectedProduct = (p: { tags: string[] }) => protectedTag(p.tags) !== null;
   const skippedProtected = allProducts.filter(isProtectedProduct).length;
+  // ISBN med flere produkter (pakke D del 3b) tagges ikke før de er ryddet
+  const perIsbn: Record<string, number> = {};
+  for (const p of allProducts) { const i = extractIsbn(p); if (i) perIsbn[i] = (perIsbn[i] ?? 0) + 1; }
+  const duplicates = duplicateCounts(perIsbn);
+  const isDuplicate = (p: { tags: string[] }) => { const i = extractIsbn(p); return !!i && !!duplicates[i]; };
+  const skippedDuplicate = allProducts.filter((p) => !isProtectedProduct(p) && isDuplicate(p)).length;
 
   for (const product of allProducts) {
-    if (isProtectedProduct(product)) continue;
+    if (isProtectedProduct(product) || isDuplicate(product)) continue;
     const existing = product.tags.find(t => /^bkg-\d{3}$/.test(t));
     if (existing) {
       productToKode.set(product.id, existing.slice(4)); // strip "bkg-"
@@ -1017,6 +1044,10 @@ async function fullSyncCollections(
       console.warn(`[sync-collections ${product.handle}] ${protectedMessage(product.tags)}`);
       continue;
     }
+    if (isDuplicate(product)) {
+      console.warn(`[sync-collections ${product.handle}] ${duplicateMessage(duplicates[extractIsbn(product)!])}`);
+      continue;
+    }
     const kode = productToKode.get(product.id);
     if (!kode) { noKode++; continue; }
 
@@ -1044,7 +1075,7 @@ async function fullSyncCollections(
   const collections = await ensureCollections(koderFound);
 
   return {
-    products: { total: allProducts.length, updated, alreadyTagged, noKode, tagErrors, skippedProtected },
+    products: { total: allProducts.length, updated, alreadyTagged, noKode, tagErrors, skippedProtected, skippedDuplicate },
     collections,
   };
 }
@@ -1570,7 +1601,6 @@ const HANDLE_JOB_TYPE = "handle_migration";
 const HANDLE_LOG_MIGRATE = "handle_migrate";
 const HANDLE_LOG_ROLLBACK = "handle_rollback";
 const HANDLE_PULSE_MS = 40_000;
-const BULK_ACTIVE = ["CREATED", "RUNNING", "CANCELING"];
 
 class HttpError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -1671,27 +1701,8 @@ async function activeHandleChanges(jobId: string): Promise<Array<{ id: string; o
 }
 
 async function startHandleBulk(rows: HandlePlanRow[]): Promise<string> {
-  const staged = await shopifyGraphQL(`mutation { stagedUploadsCreate(input: [{ resource: BULK_MUTATION_VARIABLES, filename: "handles.jsonl", mimeType: "text/jsonl", httpMethod: POST }]) { stagedTargets { url parameters { name value } } userErrors { field message } } }`);
-  const target = staged.data?.stagedUploadsCreate?.stagedTargets?.[0];
-  if (!target) throw new Error(`Opplasting feilet: ${JSON.stringify(staged.data?.stagedUploadsCreate?.userErrors)}`);
-
   const jsonl = rows.map((r) => JSON.stringify({ product: handleUpdateInput(r) })).join("\n");
-  const form = new FormData();
-  for (const p of target.parameters as { name: string; value: string }[]) form.append(p.name, p.value);
-  form.append("file", new Blob([jsonl], { type: "text/jsonl" }), "handles.jsonl");
-  const up = await fetch(target.url, { method: "POST", body: form });
-  if (!up.ok) throw new Error(`Opplasting til Shopify feilet (HTTP ${up.status}).`);
-  const key = (target.parameters as { name: string; value: string }[]).find((p) => p.name === "key")?.value;
-
-  const run = await shopifyGraphQL(
-    `mutation ($mutation: String!, $path: String!) { bulkOperationRunMutation(mutation: $mutation, stagedUploadPath: $path) { bulkOperation { id status } userErrors { field message } } }`,
-    { mutation: HANDLE_UPDATE_MUTATION, path: key });
-  const op = run.data?.bulkOperationRunMutation?.bulkOperation;
-  if (!op?.id) {
-    const errs = run.data?.bulkOperationRunMutation?.userErrors ?? [];
-    throw new Error(`Bulk-jobben startet ikke: ${errs.map((e: { message: string }) => e.message).join("; ") || "ukjent feil"}`);
-  }
-  return op.id;
+  return await startBulkMutation(HANDLE_UPDATE_MUTATION, jsonl, "handles.jsonl");
 }
 
 // POST /handles/migrate

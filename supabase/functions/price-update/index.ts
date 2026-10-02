@@ -13,6 +13,8 @@ import { EGEN_PRIS_FIELD, priceLock, priceLockMessage } from "../_shared/price-l
 import { countMissing, loadCounts, summarizeCounts } from "../_shared/price-summary.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { protectedMessage, protectedTag } from "../_shared/protected.ts";
+import { ensureDuplicates } from "../_shared/duplicate-scan.ts";
+import { duplicateMessage } from "../_shared/duplicates.ts";
 
 const PAGE_SIZE = 250;
 const TIMEOUT_MS = 45_000; // Leave 15s headroom
@@ -197,6 +199,10 @@ async function processBatch(jobId: string) {
     started_at: job.started_at || new Date().toISOString(),
   }).eq("id", jobId);
 
+  // ISBN med flere produkter (pakke D del 3b): skannes én gang per jobb, så hoppes de over
+  const duplicates = await ensureDuplicates(supabase, job, startTime + 30_000);
+  if (!duplicates) return; // skanningen fortsetter i neste puls
+
   const cursor: string | null = job.config?.shopify_cursor || null;
   const pageStartIndex: number = job.config?.page_start_index || 0;
   const userId: string | null = job.user_id || null;
@@ -265,6 +271,17 @@ async function processBatch(jobId: string) {
 
       if (!isbn || !variantId) {
         counts.skippedNoIsbn++;
+        skipped++;
+        processed++;
+        continue;
+      }
+
+      if (duplicates[isbn]) {
+        await supabase.from("sync_log").insert({
+          isbn, title: product.handle, action: "update", status: "info",
+          message: duplicateMessage(duplicates[isbn]), shopify_id: product.id, job_id: jobId, user_id: userId,
+        });
+        counts.skippedDuplicate++;
         skipped++;
         processed++;
         continue;

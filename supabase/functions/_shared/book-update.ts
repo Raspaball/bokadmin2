@@ -165,6 +165,8 @@ export interface BookUpdateCounts {
   skippedNoOnix: number;
   /** Beskyttet tagg (_shared/protected.ts): aldri rørt */
   skippedProtected: number;
+  /** Samme ISBN på flere produkter (_shared/duplicates.ts): hoppes over til de er ryddet */
+  skippedDuplicate: number;
   errors: number;
   /** Per felt: antall bøker, og opptil tre eksempler «handle: fra → til» */
   fields: Record<string, { count: number; examples: string[] }>;
@@ -173,14 +175,14 @@ export interface BookUpdateCounts {
 }
 
 export function emptyBookUpdateCounts(): BookUpdateCounts {
-  return { changed: 0, unchanged: 0, skippedNoIsbn: 0, skippedNoOnix: 0, skippedProtected: 0, errors: 0, fields: {}, notes: {} };
+  return { changed: 0, unchanged: 0, skippedNoIsbn: 0, skippedNoOnix: 0, skippedProtected: 0, skippedDuplicate: 0, errors: 0, fields: {}, notes: {} };
 }
 
 export function loadBookUpdateCounts(v: unknown): BookUpdateCounts {
   const c = emptyBookUpdateCounts();
   if (!v || typeof v !== "object") return c;
   const o = v as Partial<BookUpdateCounts>;
-  for (const k of ["changed", "unchanged", "skippedNoIsbn", "skippedNoOnix", "skippedProtected", "errors"] as const) {
+  for (const k of ["changed", "unchanged", "skippedNoIsbn", "skippedNoOnix", "skippedProtected", "skippedDuplicate", "errors"] as const) {
     if (typeof o[k] === "number") c[k] = o[k] as number;
   }
   if (o.fields && typeof o.fields === "object") c.fields = JSON.parse(JSON.stringify(o.fields));
@@ -200,11 +202,11 @@ export function countPlan(c: BookUpdateCounts, handle: string, plan: BookUpdateP
   for (const n of plan.notes) c.notes[n] = (c.notes[n] ?? 0) + 1;
 }
 
-/** «12 endret, 30 uendret, hoppet over 22 (22 uten ISBN, 0 uten ONIX, 0 beskyttet), 0 feil. Felt: productType 12, …» */
+/** «12 endret, 30 uendret, hoppet over 22 (22 uten ISBN, 0 uten ONIX, 0 beskyttet, 0 DUPLIKAT), 0 feil. Felt: productType 12, …» */
 export function summarizeBookUpdate(c: BookUpdateCounts, mode: "analyze" | "update"): string {
   const fields = Object.entries(c.fields).sort((a, b) => b[1].count - a[1].count).map(([k, v]) => `${k} ${v.count}`).join(", ");
   const notes = Object.entries(c.notes).map(([k, v]) => `${k}: ${v}`).join("; ");
   return `${c.changed} ${mode === "analyze" ? "ville blitt endret" : "endret"}, ${c.unchanged} uendret, ` +
-    `hoppet over ${c.skippedNoIsbn + c.skippedNoOnix + c.skippedProtected} (${c.skippedNoIsbn} uten ISBN, ${c.skippedNoOnix} uten ONIX, ${c.skippedProtected} beskyttet), ${c.errors} feil` +
+    `hoppet over ${c.skippedNoIsbn + c.skippedNoOnix + c.skippedProtected + c.skippedDuplicate} (${c.skippedNoIsbn} uten ISBN, ${c.skippedNoOnix} uten ONIX, ${c.skippedProtected} beskyttet, ${c.skippedDuplicate} DUPLIKAT), ${c.errors} feil` +
     (fields ? `. Felt: ${fields}` : "") + (notes ? `. ${notes}` : "");
 }
