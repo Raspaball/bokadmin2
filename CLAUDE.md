@@ -42,7 +42,12 @@ Prøv i så stor grad som mulig å bruke felles datakilder for viktige data som 
 | Egen pris / tilbud (prisen røres ikke) | `priceLock()` / `EGEN_PRIS_FIELD` i `_shared/price-lock.ts` (metafelt `bok.egen_pris` eller `compareAtPrice`) | price-update, pushOneBook, godkjenning |
 | Prisjobbens sammendrag | `summarizeCounts()` i `_shared/price-summary.ts` → `jobs.result.summary` | price-update, Oppdatering.tsx (viser teksten) |
 | ISBN → bokgruppekode (cache) | Tabellen `bokgruppe_cache` + `books.bokgruppekode` via `loadKodeMap()` i sjangre-sync | sjangre-sync (enrich skriver, tagging leser). **Skriv aldri minimale rader i `books`** — books er arbeidslista på Import-siden, og «Tøm liste» sletter hele tabellen |
-| Bokgruppekode → bkg-tagg-hierarki | `bokgruppeTagsForKode()` i shopify/index.ts | pushOneBook (tagging ved eksport til Shopify) |
+| Bokgruppekode → bkg-tagg-hierarki | `bokgruppeTagsForKode()` / `missingBokgruppeTags()` / `bokgruppeCollectionCodes()` i `_shared/bokgruppe.ts` (flyttet fra shopify og sjangre-sync i pakke E) | pushOneBook, CSV, sync-collections (shopify), sjangre-sync |
+| Hvilke bkg-samlinger som lages/får nytt navn | `bkgCollectionPlan()` i `_shared/collections.ts` (én liste over samlingene, ingen oppslag per kode) | sjangre-sync (bulk og side for side) |
+| Egen tilgjengelighet og arkiverte (pakke E) | `planAvailability()` / `availabilitySkip()` / `ownAvailability()` / `EGEN_TILGJENGELIGHET_FIELD` / `availabilityLogMessage()` i `_shared/availability.ts`. `bok.egen_tilgjengelighet` = true: status, `inventoryPolicy` og `bok.tilgjengelighet` står («Hoppet over: egen tilgjengelighet»). ARCHIVED endres aldri av tilgjengelighetsjobben («Hoppet over: arkivert»). Definisjonen: `scripts/egen-tilgjengelighet-definisjon.mjs` | availability-check (side og bulk), pushOneBook |
+| Statusrapport (ny status før live) | `StatusChangeRow` i `_shared/availability.ts` → `jobs.result.statusChanges`; CSV og visning i `src/app/utils/statusReport.ts` | availability-check, TilgjengelighetTab.tsx, scripts/statusrapport.mjs |
+| Bulk-jobber over hele katalogen | `runBulkJob()` / `emptyBulkJobState()` / `freshOnixIsbns()` / `loadOnixXml()` / `insertLogs()` i `_shared/bulk-job.ts` (spørring → ONIX til `onix_cache` → plan i biter på 1000 → én bulk-mutasjon per type og bit → avslutning). Jobben gir bare spørring, plan og avslutning | availability-check, sjangre-sync (book-update bruker hjelperne, har egne faser) |
+| Tilgjengelighet i bulk | `AVAILABILITY_BULK_QUERY` / `availabilityBulkLines()` i `_shared/availability-bulk.ts` (CONTINUE først, så status + metafelt). ONIX fra cachen bare når den er under 2 timer gammel | availability-check |
 | Handle-regel (tittel-forfatter-ISBN-13) | `buildBookHandle()` i `supabase/functions/_shared/handle.js`, med forfatterlisten (`authors`) — `firstAuthor()` bare som reserve for gamle data | pushOneBook, CSV-eksport, handle-migrering, scripts/migrate-handles.mjs |
 | Standarden for en bok i Shopify (pakke B) | `bookFieldsFromOnix()` / `bookMetafields()` / `bookDescription()` i `_shared/book-standard.ts`; `planBookUpdate()` i `_shared/book-update.ts` (én ren funksjon: ONIX + produkt → endringer) | pushOneBook, book-update (jobben), senere bulk |
 | Forfatterne som liste | `extractContributors()` i `_shared/onix.js` → `books.authors text[]` | bokbasen (import), push, book-update |
@@ -100,9 +105,9 @@ React + TypeScript + Tailwind + shadcn/ui, built with Vite.
 - `Import.tsx` — main work list: ISBN lookup, CSV batch import, date-range Bokbasen extraction, push to Shopify
 - `BokbasenOppslag.tsx` — single ISBN search widget used inside Import
 - `Oppdatering.tsx` — price and availability update jobs
-- `Sjangre.tsx` — genre/collection management
+- `Sjangre.tsx` — genre/collection management («Sjekk» / «Kjør sjangre-synk», one bulk job)
 - `ShopifyKatalog.tsx` — Shopify catalog browser with inline edit
-- `TilgjengelighetTab.tsx` — availability check job UI
+- `TilgjengelighetTab.tsx` — availability check job UI (bulk checkbox, statusrapport with CSV download)
 - `Feeder.tsx` — manual Shopify collections (feeds) with drag-and-drop product ordering and mosaic cover thumbnail
 - `Handles.tsx` — migrate product handles from ISBN to tittel-forfatter-ISBN (analyze, run, verify redirects, undo)
 
@@ -119,9 +124,9 @@ Shared code lives in `supabase/functions/_shared/`. The `.js` modules there (`ha
 | `bokbasen/` | Bokbasen ONIX v2 metadata: ISBN lookup, date-range, enrich-db |
 | `shopify/` | Shopify product push (single + bulk), catalog sync, CSV export, Smart Collections, feeds (manual collections), handle migration (`/handles/*`) |
 | `price-update/` | Long-running job: fetch current prices from Bokbasen and update Shopify variants. Endpoints: `/start` (`mode: analyze|update`, uten mode = `analyze`), `/status/:jobId`, `/cancel/:jobId`, `/resume/:jobId`, `/resume-paused`, `/active`, `/recent`, `/approvals/decide` (`{ ids, decision: approve|reject }`, krever innlogget bruker) |
-| `availability-check/` | Long-running job: check ONIX availability codes and optionally update Shopify. Same endpoints as price-update, plus `start` accepts `mode: analyze|update` |
+| `availability-check/` | Long-running job: check ONIX availability codes and optionally update Shopify. Same endpoints as price-update, plus `start` accepts `mode: analyze|update` (default analyze) and `bulk` (default true: Bulk Operations + `onix_cache` via `_shared/bulk-job.ts`; `bulk: false` = page by page). Skips protected, duplicates and ARCHIVED; respects `bok.egen_tilgjengelighet`. Result has `statusChanges` (statusrapport) and `summary` |
 | `book-update/` | Long-running job «Oppdater eksisterende bøker» (pakke B): applies the book standard (bok.* metafields, productType, category, SEO, cover alt/filename, description, tags) to products that already exist. Never price, status, availability, handle or title. Endpoints: `/start` (`mode: analyze|update`, default analyze; optional `isbns`; `bulk: true` = whole catalog via Bulk Operations: bulk query → ONIX prefetch to `onix_cache` (4 parallel) → plan in chunks of 1000 → one `productUpdate` + one `fileUpdate` bulk mutation per chunk, errors logged per book), `/status/:jobId`, `/cancel/:jobId`, `/resume/:jobId`, `/resume-paused`, `/active`, `/recent` |
-| `sjangre-sync/` | Long-running job: enrich bokgruppekode → tag products → create Smart Collections (and fix titles of existing ones from COLLECTION_NAMES). Endpoints: `/start`, `/resume/:jobId`, `/resume-paused`, `/status/:jobId`, `/analyze`, `/active`, `/recent`, `/catalog-bkg-stats`, `/delete-empty-collections` |
+| `sjangre-sync/` | Long-running job: bokgruppekode (cache, else ONIX) → bkg tags → Smart Collections (and fix titles from COLLECTION_NAMES). `/start { mode, bulk }`: bulk (default) does all three in one job with `tagsAdd`, `mode` default `analyze`; `bulk: false` = old page-by-page tagging (always update, codes only from cache). Other endpoints: `/resume/:jobId`, `/status/:jobId`, `/analyze`, `/active`, `/enrich-start` (old separate Bokbasen lookup), `/catalog-bkg-stats`, `/delete-empty-collections`. Resumed by the page (no pg_cron) |
 
 All functions are called via `callEdgeFunction()` in `api.ts`. Passes the user's JWT (not anon key) so Edge Functions can identify the user (verified with `getCaller()` in `_shared/auth.ts`) and look up their Bokbasen credentials from `user_settings`. Falls back to anon key if no session. Shopify is server-wide (see the Shopify access section below).
 
@@ -187,6 +192,7 @@ Kanonisk kilde: `availabilityRule()` i `supabase/functions/_shared/availability.
 - **30–34** → ACTIVE, `midlertidig_utsolgt`, kan kjøpes (vi bestiller)
 - **43, 46, 49** → ARCHIVED, `utgatt`
 - **Alt annet** (også tom/ukjent kode: 01, 09, 40–42, 44, 45, 47, 48, 50–52, 97–99) → DRAFT, `ikke_tilgjengelig`
+- **Unntak (pakke E):** `bok.egen_tilgjengelighet` = true → status, `inventoryPolicy` og `bok.tilgjengelighet` står (jobben og push); ARCHIVED endres aldri av tilgjengelighetsjobben. Regelen er `planAvailability()`
 - «Kan kjøpes» uansett lager: varianter med sporet lager og `inventoryPolicy: DENY` får `CONTINUE` (`needsContinuePolicy`). Beholdning, sporing og lokasjoner endres aldri. Varianter Bokadmin lager selv spores ikke
 - `bok.utgivelsesdato` (date) fra `extractPublishingDate()` i `_shared/onix.js`: PublishingDate 01 hvis hel dato → MarketDate 01 → PublishingDate 11 → PublicationDate. Hos Bokbasen er PublishingDate 01 alltid bare årstall; kommende bøker har datoen i MarketDate 01
 - Push: ny bok uten godkjent pris er alltid DRAFT (pakke A2). Bokbasen nede og ingen kode i boka: eksisterende bok beholder status, ny blir DRAFT

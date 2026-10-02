@@ -379,7 +379,59 @@ Gjenstår etter pakke B:
 - `FORMAT_OPTIONS` i Import.tsx har feil koder (se del 2) og bør flyttes til `src/app/utils/formatCodes.ts`.
 - Strømmer bruker fortsatt utfasede `collectionAddProducts`/`collectionRemoveProducts`.
 
-## Pakke D: generalprøve (2026-10-02, pågår)
+## Pakke E: etter generalprøve runde 1 (2026-10-02)
+
+Oppgaven: `oppgaver/pakke-e-etter-generalprove.md`. Alt kjørt i Testbutikk (442 produkter). Sikkerhetskopi og diff før og etter hvert steg i `scripts/out/generalprove/` (6–17).
+
+| Del | Commit | Innhold |
+|---|---|---|
+| 1. Push og prisoppdatering | ad935fc (pushet) | Prisjobben i oppdateringsmodus: Prizon UZ 399 → 299 og «Kateterprofetenes opprør» 389 → 400 (Bokbasen endret prisen samme dag, +2,8 %), T6 123 → 429 til godkjenning, 6 beskyttet, 0 feil. T6 ble ved en feil godkjent (prisen ble 429, så godkjenningen virker); satt tilbake til 123, ny jobb, og Eirik avviste. Diff: bare de to variantprisene |
+| 2. Egen tilgjengelighet | b097847 | `bok.egen_tilgjengelighet` (boolean, festet, «Egen tilgjengelighet (Bokadmin endrer ikke status)»), laget med `node scripts/egen-tilgjengelighet-definisjon.mjs --create`. Med feltet krysset av endrer tilgjengelighetsjobben og push ikke status, `inventoryPolicy` eller `bok.tilgjengelighet`; utgivelsesdatoen oppdateres som før. Logg «Hoppet over: egen tilgjengelighet (regelen: …; ville endret …)». Regelen er `planAvailability()` i `_shared/availability.ts` |
+| 3. Arkiverte | 03c597c | Tilgjengelighetsjobben hopper over ARCHIVED før ONIX-oppslaget (`availabilitySkip`), logg «Hoppet over: arkivert». Testet: T6 arkivert → hoppet over, satt tilbake |
+| 4. Statusrapport | 326321b | Jobben samler alle som ville fått ny status i `jobs.result.statusChanges`. Oppdatering-siden (Tilgjengelighet) viser listen med lenke til produktet i Shopify og CSV-nedlasting. `node scripts/statusrapport.mjs` kjører sjekken og lagrer `scripts/out/statusendringer-<dato>.csv` (Tittel; ISBN; ONIX-kode; gammel og ny status; egen tilgjengelighet; handle; lenke) |
+| 5. Bulk | a4eee60 | Sjangersynk og tilgjengelighet med `bulkOperationRunQuery`, `onix_cache` og `bulkOperationRunMutation` (felles driver `_shared/bulk-job.ts`). Sjekkmodus er standard. Se under |
+
+**Test i Testbutikk, del 2:** Steve Jobs (kode 40, var DRAFT etter runde 1) fikk feltet krysset av og status ACTIVE. Sjekk, oppdatering og push lot status stå («Hoppet over: egen tilgjengelighet (regelen: Ikke tilgjengelig (kode 40): DRAFT)»); diff etter push: 0 felt. Boka står fortsatt slik (ACTIVE, egen tilgjengelighet). De 6 andre engelske med kode 40 er fortsatt DRAFT.
+
+**Statusrapporten i Testbutikk:** 1 rad (Steve Jobs, «ja (endres ikke)»), 6 beskyttet, 1 arkivert (T6 under testen). Testbutikk er allerede i takt etter runde 1, så rapporten er først nyttig mot en ny kopi av live (pakke F).
+
+### Del 5: bulk for sjangersynk og tilgjengelighet
+
+- **Tilgjengelighet** (`POST /availability-check/start { mode, bulk }`, bulk er standard, `bulk: false` = side for side): bulk-spørring → ONIX til `onix_cache` → plan med `planAvailability` → `productVariantsBulkUpdate` (CONTINUE) først, så `productUpdate` (status + `bok.tilgjengelighet`/`bok.utgivelsesdato`). ONIX fra cachen brukes bare når den er **under 2 timer** gammel. Med ett døgn ville sjekken rullet tilbake 4 endringer Bokbasen gjorde samme dag (funnet i testen).
+- **Sjangersynk** (`POST /sjangre-sync/start { mode, bulk }`, bulk og sjekk er standard): én jobb for koder (fra `bokgruppe_cache`/`books`, ellers fra ONIX, lagret i `bokgruppe_cache`), bkg-tagger med `tagsAdd` (andre tagger røres ikke) og samlinger (`bkgCollectionPlan`: én liste over samlingene i stedet for ett oppslag per kode). Sjekk lister hva som ville blitt tagget og hvilke samlinger som ville blitt laget eller fått nytt navn. Siden har knappene «Sjekk» og «Kjør sjangre-synk»; tomme samlinger slettes etter oppdatering som før. Henting fra Bokbasen er ikke lenger en egen jobb (`enrich-start` finnes fortsatt).
+- Beskyttede, duplikater, arkiverte og egen tilgjengelighet hoppes over i plan-steget, før JSONL-fila lages.
+- Mutasjonene er validert som bulk-mutasjoner mot Testbutikk (2026-07): `tagsAdd`, `productUpdate` (status + metafelt) og `productVariantsBulkUpdate`.
+
+| Måling (Testbutikk, 442) | Før (runde 1) | Bulk |
+|---|---|---|
+| Bokgrupper, sjekk | finnes ikke | 6 s |
+| Bokgrupper, oppdatering | 176 + 341 s | 12 s (T6 uten bkg-tagger og uten kode i cachen: koden fra ONIX, 1 `tagsAdd`) |
+| Tilgjengelighet, sjekk | 194 s | 7 s med ONIX i cachen, 46 s med fersk ONIX (436 kall på 35 s) |
+| Tilgjengelighet, oppdatering | 336 s | 19 s (T6 satt til DRAFT, feil tilgjengelighet, sporet lager + DENY → ACTIVE, `tilgjengelig`, CONTINUE; 2 operasjoner) |
+| Lette bulk-mutasjoner (`tagsAdd`, `productUpdate` status, uten endring) | – | 435 linjer på 24 s, 436 på 25 s: **17–18 linjer/s**, 0 feil |
+
+Etter testene er katalogen lik før del 5 (diff 0 felt; T6 fikk sporing og lagerinnstilling tilbake). De 6 beskyttede er like i alle felt, også `updatedAt`, gjennom hele økten. Merk: `updatedAt` på dem endret seg kl. 06:34–06:42 og 14:17 i dag, før økten begynte, uten at noen Bokadmin-jobb eller logglinje finnes i tidsrommet. Feltene var like.
+
+**Anslag for overgangen med ~11 000 bøker** (målte rater: ONIX 11–12 kall/s med 4 parallelle; lette bulk-mutasjoner 17–18 linjer/s; bokdata (tung `productUpdate` + omslag) ~0,45 s per bok; handles 369 på 68 s; pris side for side ~0,27 s per bok):
+
+| Steg | Anslag | Merknad |
+|---|---|---|
+| ONIX-henting | ~15–17 min | Én gang, i bokgruppe-steget. Gjenbrukes av bokdata (7 dager) |
+| 1. Bokgrupper | ~25 min | ONIX for koder som mangler + `tagsAdd` for de som mangler bkg-tagger (~5–6 min ved halvparten) + samlinger |
+| 2. Handles | ~30 min | Allerede bulk |
+| 3. Bokdata | ~85 min | Tunge linjer (alle bokfelt og metafelt) + omslag, i biter på 1000 |
+| 4. Tilgjengelighet | ~30–40 min | ONIX hentes på nytt (cachen er da over 2 timer gammel, ~15 min). Første gang får alle bøker `bok.tilgjengelighet` (~11 min) + CONTINUE for sporet lager |
+| 5. Pris, sjekk | ~50 min | Fortsatt side for side med egne Bokbasen-kall |
+| **Sum** | **~4 timer** | Før: bokgrupper og tilgjengelighet alene ~7–8 timer |
+
+Gjenstår / til pakke F:
+- Prisjobben leser fortsatt side for side og bruker ikke `onix_cache` (største gjenværende post, ~50 min).
+- Book-update har sin egen kopi av bulk-fasene; den kan flyttes til `runBulkJob` senere. Hjelpefunksjonene er allerede felles.
+- Sjangersynken gjenopptas av siden (eller `scripts/out/kjor-jobb.mjs`), ikke av pg_cron.
+- Wrendale-beskyttelsen (tillegget i `oppgaver/regel-beskyttede-samlinger.md`) er ikke bygget ennå. Den er pakke F del 2.3.
+- Metafeltdefinisjonen `bok.egen_tilgjengelighet` må lages i livebutikken før live.
+
+## Pakke D: generalprøve (2026-10-02)
 
 ### Del 2: importen av runde 1
 `scripts/data/runde1.csv` (446 produkter fra live) importert av Eirik. Kontroll (`scripts/out/kontroller-import.mjs`): 0 avvik mot fila på tittel, productType, leverandør, tagger, status, pris, strekkode, SKU, SEO, antall bilder og publisering. 378 har ISBN som handle, 68 egendefinert. 444 har bilde på cdn.shopify.com (de 2 uten har heller ikke bilde i fila). Publisert i alle kanaler som push gjør (Online Store, Shop, Point of Sale): 445 i hver; det arkiverte produktet er lagt til i kanalene, men vises ikke så lenge det er arkivert. Beskyttede produkter er ikke publisert på nytt.
@@ -431,8 +483,8 @@ Sikkerhetskopi av alle produkter (alle felt, metafelt, omslag, varianter) og vid
 Beskyttede produkter: alle 6 like i alle felt (også `updatedAt`) fra start til slutt. Produktet med `oppgaver` (T6) ble behandlet som vanlig. Ingen feil i noen jobb.
 
 **Må avgjøres før live:**
-- Engelske bøker med kode 40 i Bokbasen blir utkast. Butikken kjøper dem trolig andre steder. Unntak (f.eks. tagg eller bare norske ISBN-er), eller godta?
-- Arkiverte produkter blir utkast når koden ikke er 43/46/49. Skal jobben la ARCHIVED stå?
+- ~~Engelske bøker med kode 40 i Bokbasen blir utkast.~~ Løst i pakke E del 2: «Egen tilgjengelighet» (`bok.egen_tilgjengelighet`) krysses av der statusen skal stå; statusrapporten (del 4) viser hvilke det gjelder.
+- ~~Arkiverte produkter blir utkast når koden ikke er 43/46/49.~~ Løst i pakke E del 3: tilgjengelighetsjobben endrer aldri ARCHIVED.
 - 68 produkter med egendefinert handle (bl.a. de 10 som ble beholdt etter duplikatene) får ikke ny handle.
 - Appen trenger `read_orders` og `read_all_orders` for duplikatregelen i live.
 
