@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
-import { Loader2, Search, RefreshCw, CheckCircle2, AlertCircle, FileText, Upload, Pause, Plus, Trash2, Play, X } from 'lucide-react';
+import { Loader2, Search, RefreshCw, CheckCircle2, AlertCircle, FileText, Upload, Pause, Plus, Trash2, Play, X, Download, ExternalLink } from 'lucide-react';
 import { availabilityJobs, scheduledTasks, syncLog, type Job, type ScheduledTask, type SyncLogEntry } from '../utils/api';
+import { shopifyAdminUrl, sortStatusChanges, statusChangesCsv, statusLabel, type StatusChangeRow } from '../utils/statusReport';
 import { toast } from 'sonner';
 
 const CRON_PRESETS = [
@@ -18,6 +19,21 @@ const CRON_PRESETS = [
 function skippedSummary(job: Job): string {
   const r = (job.result ?? {}) as { skippedProtected?: number; skippedDuplicate?: number; skippedOwnAvailability?: number; skippedArchived?: number };
   return `${r.skippedProtected ?? 0} beskyttet, ${r.skippedDuplicate ?? 0} DUPLIKAT, ${r.skippedOwnAvailability ?? 0} egen tilgjengelighet, ${r.skippedArchived ?? 0} arkivert`;
+}
+
+// Statusrapporten (pakke E del 4) fra en ferdig sjekk/oppdatering
+function statusReportOf(job: Job | undefined): { rows: StatusChangeRow[]; shopDomain: string | null } | null {
+  const r = job?.result as { statusChanges?: StatusChangeRow[]; shopDomain?: string | null } | null | undefined;
+  return r?.statusChanges ? { rows: r.statusChanges, shopDomain: r.shopDomain ?? null } : null;
+}
+
+function downloadCsv(filename: string, text: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 function formatDuration(start: string, end: string): string {
@@ -238,6 +254,8 @@ export function TilgjengelighetTab() {
     ? Math.min(100, Math.round((activeJob.processed / activeJob.total_items) * 100))
     : 0;
   const activeMode = activeJob ? ((activeJob.config as { mode?: string })?.mode || 'analyze') : null;
+  const reportJob = recentJobs.find(j => j.status === 'completed' && statusReportOf(j));
+  const report = statusReportOf(reportJob);
 
   return (
     <>
@@ -337,6 +355,72 @@ export function TilgjengelighetTab() {
           )}
         </CardContent>
       </Card>
+
+      {/* Statusrapport: produktene som ville fått ny status (pakke E del 4) */}
+      {reportJob && report && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <CardTitle>Statusendringer</CardTitle>
+                <CardDescription>
+                  Fra {((reportJob.config as { mode?: string })?.mode || 'analyze') === 'analyze' ? 'sjekken' : 'oppdateringen'} {new Date(reportJob.created_at).toLocaleString('nb-NO')}:
+                  {' '}{report.rows.filter(r => !r.own).length} ville fått ny status, {report.rows.filter(r => r.own).length} har egen tilgjengelighet.
+                  Kryss av «Egen tilgjengelighet» på produktet i Shopify der statusen skal stå
+                </CardDescription>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={report.rows.length === 0}
+                onClick={() => downloadCsv(`statusendringer-${reportJob.created_at.slice(0, 10)}.csv`, statusChangesCsv(report.rows, report.shopDomain))}
+              >
+                <Download className="size-4 mr-1" />
+                CSV
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {report.rows.length === 0 ? (
+              <p className="text-sm text-gray-500 text-center py-3">Ingen produkter ville fått ny status</p>
+            ) : (
+              <div className="max-h-[400px] overflow-y-auto border rounded-lg">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 text-xs text-gray-500 sticky top-0">
+                    <tr>
+                      <th className="text-left p-2">Tittel</th>
+                      <th className="text-left p-2">ISBN</th>
+                      <th className="text-left p-2">Kode</th>
+                      <th className="text-left p-2">Status</th>
+                      <th className="text-left p-2">Egen</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {sortStatusChanges(report.rows).map(r => {
+                      const href = shopifyAdminUrl(report.shopDomain, r.id);
+                      return (
+                        <tr key={r.id} className={r.own ? 'text-gray-400' : ''}>
+                          <td className="p-2">
+                            {href ? (
+                              <a href={href} target="_blank" rel="noreferrer" className="hover:underline inline-flex items-center gap-1">
+                                {r.title}<ExternalLink className="size-3 flex-shrink-0" />
+                              </a>
+                            ) : r.title}
+                          </td>
+                          <td className="p-2 font-mono text-xs">{r.isbn}</td>
+                          <td className="p-2">{r.code || '–'}</td>
+                          <td className="p-2 whitespace-nowrap">{statusLabel(r.from)} → {statusLabel(r.to)}</td>
+                          <td className="p-2">{r.own ? 'ja (står)' : ''}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Recent Jobs */}
       {recentJobs.length > 0 && (

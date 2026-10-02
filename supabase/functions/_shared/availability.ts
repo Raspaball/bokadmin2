@@ -165,6 +165,23 @@ export interface AvailabilityPlan {
   ownAvailability: boolean;
 }
 
+/**
+ * Én rad i statusrapporten (pakke E del 4): et produkt som ville fått (eller
+ * fikk) ny status. `own` = egen tilgjengelighet, statusen står. Frontend-kopi
+ * av typen og CSV-en i src/app/utils/statusReport.ts.
+ */
+export interface StatusChangeRow {
+  id: string;
+  handle: string;
+  title: string;
+  isbn: string;
+  code: string;
+  from: string;
+  to: string;
+  tilgjengelighet: Tilgjengelighet;
+  own: boolean;
+}
+
 /** Hoppes produktet helt over? Sjekkes før ONIX hentes. */
 export function availabilitySkip(product: { status?: string | null }): "arkivert" | null {
   return product.status === "ARCHIVED" ? "arkivert" : null;

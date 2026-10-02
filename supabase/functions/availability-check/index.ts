@@ -14,7 +14,7 @@ import { duplicateMessage } from "../_shared/duplicates.ts";
 import {
   ARCHIVED_MESSAGE, availabilityLogMessage, availabilityMetafields, availabilityRule, availabilitySkip,
   EGEN_TILGJENGELIGHET_FIELD, planAvailability,
-  type AvailabilityChanges, type AvailabilityRule,
+  type AvailabilityChanges, type AvailabilityRule, type StatusChangeRow,
 } from "../_shared/availability.ts";
 
 const PAGE_SIZE = 250;
@@ -36,6 +36,7 @@ function getSupabase() {
 
 interface ShopifyProduct {
   id: string;
+  title: string;
   status: string;
   handle: string;
   tags: string[];
@@ -79,6 +80,7 @@ async function fetchShopifyProductsPage(
         edges {
           node {
             id
+            title
             status
             handle
             tags
@@ -256,6 +258,9 @@ async function processBatch(jobId: string) {
   let skippedOwn = ownAtStart;
   const archivedAtStart: number = job.config?.skipped_archived || 0;
   let skippedArchived = archivedAtStart;
+  // Statusrapporten (pakke E del 4): alle som ville fått (eller fikk) ny status
+  const statusChangesAtStart: StatusChangeRow[] = job.config?.status_changes || [];
+  const statusChanges: StatusChangeRow[] = [...statusChangesAtStart];
 
   try {
     const page = await fetchShopifyProductsPage(userId, cursor);
@@ -281,7 +286,7 @@ async function processBatch(jobId: string) {
           failed,
           skipped,
           current_isbn: null,
-          config: { ...job.config, shopify_cursor: cursor, page_start_index: i, skipped_protected: skippedProtected, skipped_duplicate: skippedDuplicate, skipped_own: skippedOwn, skipped_archived: skippedArchived },
+          config: { ...job.config, shopify_cursor: cursor, page_start_index: i, skipped_protected: skippedProtected, skipped_duplicate: skippedDuplicate, skipped_own: skippedOwn, skipped_archived: skippedArchived, status_changes: statusChanges },
         }).eq("id", jobId);
         return;
       }
@@ -358,6 +363,13 @@ async function processBatch(jobId: string) {
         const changes = plan.changes;
         const held = Object.keys(plan.heldBack).length > 0;
         if (held) skippedOwn++;
+        const statusChange = plan.changes.status ?? plan.heldBack.status;
+        if (statusChange) {
+          statusChanges.push({
+            id: product.id, handle: product.handle, title: product.title, isbn, code: rule.code,
+            from: statusChange.from, to: statusChange.to, tilgjengelighet: rule.tilgjengelighet, own: plan.ownAvailability,
+          });
+        }
 
         if (Object.keys(changes).length === 0) {
           if (held) {
@@ -432,11 +444,14 @@ async function processBatch(jobId: string) {
         skipped_duplicate: skippedDuplicate,
         skipped_own: skippedOwn,
         skipped_archived: skippedArchived,
+        status_changes: statusChanges,
       },
       ...(isComplete ? {
         completed_at: new Date().toISOString(),
         total_items: processed,
-        result: { total: processed, processed, succeeded, failed, skipped, skippedProtected, skippedDuplicate, skippedOwnAvailability: skippedOwn, skippedArchived },
+        result: { total: processed, processed, succeeded, failed, skipped, skippedProtected, skippedDuplicate, skippedOwnAvailability: skippedOwn, skippedArchived,
+          statusChanges, shopDomain: Deno.env.get("SHOPIFY_SHOP_DOMAIN") ?? null,
+        },
       } : {}),
     }).eq("id", jobId);
 
@@ -453,7 +468,7 @@ async function processBatch(jobId: string) {
       succeeded,
       failed,
       skipped,
-      config: { ...job.config, shopify_cursor: cursor, page_start_index: pageStartIndex, skipped_protected: protectedAtStart, skipped_duplicate: duplicateAtStart, skipped_own: ownAtStart, skipped_archived: archivedAtStart },
+      config: { ...job.config, shopify_cursor: cursor, page_start_index: pageStartIndex, skipped_protected: protectedAtStart, skipped_duplicate: duplicateAtStart, skipped_own: ownAtStart, skipped_archived: archivedAtStart, status_changes: statusChangesAtStart },
     }).eq("id", jobId);
   }
 }
