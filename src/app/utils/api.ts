@@ -760,10 +760,11 @@ export const priceJobs = {
 // ── Availability Check Jobs ──────────────────────────────────────────────────
 
 export const availabilityJobs = {
-  async start(mode: "analyze" | "update" = "analyze"): Promise<{ jobId: string }> {
+  /** bulk (standard): hele katalogen med Shopify Bulk Operations og onix_cache (pakke E del 5) */
+  async start(mode: "analyze" | "update" = "analyze", bulk = true): Promise<{ jobId: string }> {
     const res = await callEdgeFunction("availability-check/start", {
       method: "POST",
-      body: JSON.stringify({ mode }),
+      body: JSON.stringify({ mode, bulk }),
     });
     return res.json();
   },
@@ -845,7 +846,9 @@ export interface SjangreSyncAnalyzeResult {
 
 export interface SjangreSyncJobResult {
   products: { total: number; tagged: number; already_tagged: number; no_product: number; errors: number; skipped_protected?: number; skipped_duplicate?: number };
-  collections: { created: number; existing: number; renamed?: number; errors: number; total: number; details: Array<{ code: string; status: string; error?: string; from?: string; to?: string }> };
+  collections: { created: number; existing: number; renamed?: number; errors: number; total: number; toCreate?: number; toRename?: number; details: Array<{ code: string; status: string; error?: string; from?: string; to?: string }> };
+  /** Bulk-jobben (pakke E del 5): sammendrag med tider */
+  summary?: string;
 }
 
 export const sjangreSync = {
@@ -854,8 +857,9 @@ export const sjangreSync = {
     return res.json();
   },
 
-  async start(): Promise<{ jobId: string; status: string }> {
-    const res = await callEdgeFunction("sjangre-sync/start", { method: "POST" });
+  /** Bulk-jobb: koder fra Bokbasen, bkg-tagger og samlinger. Sjekk (analyze) er standard. */
+  async start(mode: "analyze" | "update" = "analyze"): Promise<{ jobId: string; status: string }> {
+    const res = await callEdgeFunction("sjangre-sync/start", { method: "POST", body: JSON.stringify({ mode, bulk: true }) });
     return res.json();
   },
 

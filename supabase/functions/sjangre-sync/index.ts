@@ -11,8 +11,10 @@ import { extractBokgruppekode } from "../_shared/onix.js";
 import { protectedMessage, protectedTag } from "../_shared/protected.ts";
 import { ensureDuplicates } from "../_shared/duplicate-scan.ts";
 import { duplicateMessage } from "../_shared/duplicates.ts";
-import { COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, collectionTitleFix, tagSources } from "../_shared/collections.ts";
+import { bkgCollectionPlan, type BkgCollectionPlan, COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, tagSources } from "../_shared/collections.ts";
 import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
+import { bokgruppeCollectionCodes, missingBokgruppeTags } from "../_shared/bokgruppe.ts";
+import { emptyBulkJobState, runBulkJob, summarizeBulkStats, type BulkJobContext, type BulkJobSpec, type BulkRef } from "../_shared/bulk-job.ts";
 
 // Felt extractIsbn trenger (bok.isbn, strekkode, SKU) — handle er ikke lenger ISBN
 const PRODUCT_ISBN_FIELDS = `${BOK_ISBN_FIELD} variants(first: 1) { nodes { barcode sku } }`;
@@ -31,28 +33,24 @@ function getSupabase() {
   return createClient(url, key);
 }
 
-
-function bokgruppeTagsForKode(kode: string): string[] {
-  const tags: string[] = [];
-  if (kode.length >= 1) tags.push(`bkg-${kode[0]}`);
-  if (kode.length >= 2) tags.push(`bkg-${kode.slice(0, 2)}`);
-  if (kode.length >= 3) tags.push(`bkg-${kode.slice(0, 3)}`);
-  return tags;
-}
+// bkg-taggene for en kode: bokgruppeTagsForKode() i _shared/bokgruppe.ts
 
 type SupabaseClient = ReturnType<typeof getSupabase>;
 
 // ISBN → bokgruppekode fra books (Import) og bokgruppe_cache (fylt av enrich).
 // Ikke brukerbegrenset — koden er den samme for alle.
+// Biter på 150, så hele katalogen kan slås opp (lange .in()-lister sprenger URL-en).
 async function loadKodeMap(supabase: SupabaseClient, isbns: string[]): Promise<Map<string, string>> {
   const map = new Map<string, string>();
-  if (!isbns.length) return map;
-  const [{ data: cached }, { data: fromBooks }] = await Promise.all([
-    supabase.from("bokgruppe_cache").select("isbn, bokgruppekode").in("isbn", isbns),
-    supabase.from("books").select("isbn, bokgruppekode").in("isbn", isbns).not("bokgruppekode", "is", null),
-  ]);
-  for (const r of [...(cached ?? []), ...(fromBooks ?? [])] as { isbn: string; bokgruppekode: string }[]) {
-    if (r.bokgruppekode) map.set(r.isbn, r.bokgruppekode);
+  for (let i = 0; i < isbns.length; i += 150) {
+    const part = isbns.slice(i, i + 150);
+    const [{ data: cached }, { data: fromBooks }] = await Promise.all([
+      supabase.from("bokgruppe_cache").select("isbn, bokgruppekode").in("isbn", part),
+      supabase.from("books").select("isbn, bokgruppekode").in("isbn", part).not("bokgruppekode", "is", null),
+    ]);
+    for (const r of [...(cached ?? []), ...(fromBooks ?? [])] as { isbn: string; bokgruppekode: string }[]) {
+      if (r.bokgruppekode) map.set(r.isbn, r.bokgruppekode);
+    }
   }
   return map;
 }
@@ -62,58 +60,83 @@ async function loadKodeMap(supabase: SupabaseClient, isbns: string[]): Promise<M
 interface CollectionSyncResult {
   created: number; existing: number; renamed: number; errors: number; total: number;
   details: Array<{ code: string; status: string; error?: string; from?: string; to?: string }>;
+  /** Sjekkmodus: hvor mange som ville blitt laget / fått nytt navn */
+  toCreate?: number; toRename?: number;
+}
+
+/** Eksisterende bkg-samlinger: kode → { id, title } (én paginert liste i stedet for ett oppslag per kode). */
+async function listBkgCollections(): Promise<Map<string, { id: string; title: string }>> {
+  const out = new Map<string, { id: string; title: string }>();
+  let after: string | null = null;
+  for (;;) {
+    const r = await shopifyGraphQL(`
+      query($after: String) {
+        collections(first: 250, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes { id handle title }
+        }
+      }`, { after });
+    const cols = (r.data as Record<string, unknown>)?.collections as {
+      pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: Array<{ id: string; handle: string; title: string }>;
+    } | undefined;
+    for (const c of cols?.nodes ?? []) if (c.handle.startsWith("bkg-")) out.set(c.handle.slice(4), { id: c.id, title: c.title });
+    if (!cols?.pageInfo?.hasNextPage) return out;
+    after = cols.pageInfo.endCursor;
+  }
+}
+
+/**
+ * Lager og retter samlingene i planen (bkgCollectionPlan i _shared/collections.ts)
+ * fra progress.collectionIndex til `deadline`. true = ferdig.
+ */
+async function applyCollectionPlan(
+  plan: BkgCollectionPlan, result: CollectionSyncResult, progress: { collectionIndex?: number }, deadline: number,
+): Promise<boolean> {
+  const items = [
+    ...plan.create.map((x) => ({ ...x, type: "create" as const })),
+    ...plan.rename.map((x) => ({ ...x, type: "rename" as const })),
+  ];
+  let i = progress.collectionIndex ?? 0;
+  while (i < items.length) {
+    if (Date.now() > deadline) { progress.collectionIndex = i; return false; }
+    const it = items[i];
+    try {
+      if (it.type === "create") {
+        const cr = await shopifyGraphQL(COLLECTION_CREATE_MUTATION, {
+          collection: { title: it.title, handle: it.handle, sources: tagSources(`bkg-${it.code}`) },
+        });
+        const ue = (cr.data as Record<string, unknown>)?.collectionCreate as { userErrors: { message: string }[] } | undefined;
+        if (ue?.userErrors?.length) throw new Error(ue.userErrors.map((e) => e.message).join(", "));
+        result.created++;
+        result.details.push({ code: it.code, status: "created" });
+      } else {
+        // Feil navn (f.eks. «Bokgruppe 334» fra før COLLECTION_NAMES var felles): rett tittelen
+        const ur = await shopifyGraphQL(COLLECTION_UPDATE_MUTATION, { collection: { id: it.id, title: it.to } });
+        const ue = (ur.data as Record<string, unknown>)?.collectionUpdate as { userErrors: { message: string }[] } | undefined;
+        if (ue?.userErrors?.length) throw new Error(ue.userErrors.map((e) => e.message).join(", "));
+        result.renamed++;
+        result.details.push({ code: it.code, status: "renamed", from: it.from, to: it.to });
+      }
+    } catch (e) {
+      result.errors++;
+      result.details.push({ code: it.code, status: "error", error: String(e) });
+    }
+    i++;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  progress.collectionIndex = i;
+  return true;
 }
 
 async function ensureCollections(koder: Set<string>): Promise<CollectionSyncResult> {
-  const allCodes = new Set<string>();
-  for (const kode of koder) {
-    if (!kode || kode === "ukjent") continue;
-    const k = kode.trim();
-    if (k.length >= 1) allCodes.add(k[0]);
-    if (k.length >= 2) allCodes.add(k.slice(0, 2));
-    if (k.length >= 3) allCodes.add(k.slice(0, 3));
-  }
-  const sortedCodes = [...allCodes].sort((a, b) => a.length - b.length || a.localeCompare(b));
-
-  let created = 0, existing = 0, errors = 0, renamed = 0;
-  const details: Array<{ code: string; status: string; error?: string; from?: string; to?: string }> = [];
-
-  for (const code of sortedCodes) {
-    const handle = `bkg-${code}`;
-    const title = COLLECTION_NAMES[code] ?? `Bokgruppe ${code}`;
-    try {
-      const r = await shopifyGraphQL(
-        `query($h: String!) { collectionByIdentifier(identifier: { handle: $h }) { id title } }`, { h: handle });
-      const col = (r.data as Record<string, unknown>)?.collectionByIdentifier as { id: string; title: string } | null;
-      if (col?.id) {
-        existing++;
-        // Feil navn (f.eks. «Bokgruppe 334» fra før COLLECTION_NAMES var felles): rett tittelen
-        const fixed = collectionTitleFix(col.title, COLLECTION_NAMES[code]);
-        if (fixed) {
-          const ur = await shopifyGraphQL(COLLECTION_UPDATE_MUTATION, { collection: { id: col.id, title: fixed } });
-          const ue = (ur.data as Record<string, unknown>)?.collectionUpdate as { userErrors: { message: string }[] } | undefined;
-          if (ue?.userErrors?.length) throw new Error(ue.userErrors.map((e) => e.message).join(", "));
-          renamed++;
-          details.push({ code, status: "renamed", from: col.title, to: fixed });
-        } else {
-          details.push({ code, status: "existing" });
-        }
-      } else {
-        const cr = await shopifyGraphQL(COLLECTION_CREATE_MUTATION, {
-          collection: { title, handle, sources: tagSources(`bkg-${code}`) },
-        });
-        const { collection, userErrors } = (cr.data as Record<string, unknown>)?.collectionCreate as { collection: { id: string } | null; userErrors: { message: string }[] } || {};
-        if (userErrors?.length) throw new Error(userErrors.map((e: { message: string }) => e.message).join(", "));
-        created++;
-        details.push({ code, status: "created" });
-      }
-    } catch (e) {
-      errors++;
-      details.push({ code, status: "error", error: String(e) });
-    }
-    await new Promise(r => setTimeout(r, 100));
-  }
-  return { created, existing, renamed, errors, total: sortedCodes.length, details };
+  const codes = bokgruppeCollectionCodes(koder);
+  const plan = bkgCollectionPlan(codes, await listBkgCollections(), COLLECTION_NAMES);
+  const result: CollectionSyncResult = {
+    created: 0, existing: plan.existing.length, renamed: 0, errors: 0, total: codes.length,
+    details: plan.existing.map((code) => ({ code, status: "existing" })),
+  };
+  await applyCollectionPlan(plan, result, {}, Infinity);
+  return result;
 }
 
 // ══ SJANGRE SYNC JOB ═════════════════════════════════════════════════════════
@@ -171,6 +194,8 @@ async function processSyncBatch(jobId: string) {
 
   const { data: job } = await supabase.from("jobs").select("*").eq("id", jobId).single();
   if (!job || (job.status !== "running" && job.status !== "paused")) return;
+  // Bulk-modus (pakke E del 5): koder, tagger og samlinger over hele katalogen
+  if (job.config?.bulk) return runBulkJob(supabase, jobId, SJANGRE_BULK_SPEC, loadSjangreCounts);
 
   await supabase.from("jobs").update({
     status: "running",
@@ -265,8 +290,7 @@ async function processSyncBatch(jobId: string) {
         } else {
           if (!config.koder_found.includes(kode)) config.koder_found.push(kode);
           try {
-            const requiredTags = bokgruppeTagsForKode(kode);
-            const missingTags = requiredTags.filter(t => !product.tags.includes(t));
+            const missingTags = missingBokgruppeTags(product.tags, kode);
             if (missingTags.length === 0) {
               config.already_tagged++;
             } else {
@@ -301,6 +325,187 @@ async function processSyncBatch(jobId: string) {
     await supabase.from("jobs").update({ status: "paused", error_message: String(err), config }).eq("id", jobId);
   }
 }
+
+// ══ BULK-MODUS (pakke E del 5) ════════════════════════════════════════════════
+// Bokgruppekoder, bkg-tagger og samlinger i én jobb over hele katalogen, med
+// samme regler som før: koden fra bokgruppe_cache/books, ellers fra ONIX
+// (onix_cache, hentet i forkant), manglende bkg-tagger legges til med tagsAdd
+// (andre tagger røres ikke), og samlingene lages/får riktig navn til slutt.
+// Sjekkmodus (standard) skriver ingenting til Shopify; koder fra Bokbasen
+// lagres i bokgruppe_cache i begge moduser (det er en kopi av Bokbasen-data).
+// Driveren er runBulkJob() i _shared/bulk-job.ts. Beskyttede og duplikater
+// hoppes over.
+
+const SJANGRE_BULK_QUERY = `{
+  products(query: "${ALL_PRODUCT_STATUSES}") {
+    edges { node {
+      __typename id handle tags
+      bokIsbn: metafield(namespace: "bok", key: "isbn") { value }
+      variants(first: 1) { edges { node { __typename barcode sku } } }
+    } }
+  }
+}`;
+
+const SJANGRE_BULK_TAGS_MUTATION = `mutation sjangreBulkTags($id: ID!, $tags: [String!]!) {
+  tagsAdd(id: $id, tags: $tags) { node { id } userErrors { field message } }
+}`;
+
+interface SjangreCounts {
+  tagged: number; alreadyTagged: number; noKode: number; tagErrors: number;
+  skippedNoIsbn: number; skippedProtected: number; skippedDuplicate: number;
+  kodeFromCache: number; kodeFromOnix: number;
+}
+
+function loadSjangreCounts(raw: unknown): SjangreCounts {
+  const r = (raw ?? {}) as Partial<SjangreCounts>;
+  const n = (k: keyof SjangreCounts) => Number(r[k]) || 0;
+  return {
+    tagged: n("tagged"), alreadyTagged: n("alreadyTagged"), noKode: n("noKode"), tagErrors: n("tagErrors"),
+    skippedNoIsbn: n("skippedNoIsbn"), skippedProtected: n("skippedProtected"), skippedDuplicate: n("skippedDuplicate"),
+    kodeFromCache: n("kodeFromCache"), kodeFromOnix: n("kodeFromOnix"),
+  };
+}
+
+/** Koder fra ONIX (cachen) for ISBN-ene, lagret i bokgruppe_cache og på bøker som mangler koden. */
+async function kodeFromOnix(supabase: SupabaseClient, xmlByIsbn: Map<string, string>): Promise<Map<string, string>> {
+  const found = new Map<string, string>();
+  for (const [isbn, xml] of xmlByIsbn) {
+    const kode = extractBokgruppekode(xml);
+    if (kode) found.set(isbn, kode);
+  }
+  if (found.size) {
+    const now = new Date().toISOString();
+    const rows = [...found].map(([isbn, bokgruppekode]) => ({ isbn, bokgruppekode, updated_at: now }));
+    const { error } = await supabase.from("bokgruppe_cache").upsert(rows, { onConflict: "isbn" });
+    if (error) throw new Error(`bokgruppe_cache: ${error.message}`);
+    // Ingen nye rader i books (arbeidslista på Import-siden), bare kode på bøker som mangler den
+    for (const [isbn, bokgruppekode] of found) {
+      await supabase.from("books").update({ bokgruppekode }).eq("isbn", isbn).is("bokgruppekode", null);
+    }
+  }
+  return found;
+}
+
+/** «12 ville fått bkg-tagger, 400 hadde dem, 5 uten kode, hoppet over …; samlinger: 3 lages, 1 nytt navn» */
+function summarizeSjangre(c: SjangreCounts, mode: "analyze" | "update", col: CollectionSyncResult | undefined): string {
+  const tags = `${c.tagged} ${mode === "update" ? "fikk" : "ville fått"} bkg-tagger, ${c.alreadyTagged} hadde dem, ${c.noKode} uten bokgruppekode, ` +
+    `hoppet over ${c.skippedProtected + c.skippedDuplicate + c.skippedNoIsbn} (${c.skippedProtected} beskyttet, ${c.skippedDuplicate} DUPLIKAT, ` +
+    `${c.skippedNoIsbn} uten ISBN), ${c.tagErrors} feil. Koder: ${c.kodeFromCache} fra cache, ${c.kodeFromOnix} fra Bokbasen`;
+  if (!col) return tags;
+  const colText = mode === "update"
+    ? `${col.created} laget, ${col.renamed} nytt navn, ${col.existing} fantes, ${col.errors} feil`
+    : `${col.toCreate ?? 0} ville blitt laget, ${col.toRename ?? 0} ville fått nytt navn, ${col.existing} fantes`;
+  return `${tags}. Samlinger: ${colText}`;
+}
+
+const SJANGRE_BULK_SPEC: BulkJobSpec<SjangreCounts> = {
+  name: "sjangre-sync (bulk)",
+  query: SJANGRE_BULK_QUERY,
+  slimFields: ["id", "handle", "tags", "bokIsbn"],
+
+  // ONIX bare for ISBN uten kode i bokgruppe_cache/books
+  async onixIsbns(products, ctx) {
+    const isbns = products.filter((p) => !protectedTag(p.tags)).map((p) => extractIsbn(p)).filter((i): i is string => !!i);
+    const known = await loadKodeMap(ctx.supabase, isbns);
+    return isbns.filter((i) => !known.has(i));
+  },
+
+  async planChunk(products, ctx) {
+    const c = ctx.counts;
+    const koder: string[] = (ctx.state.extra.koder ??= []);
+    const isbns = products.filter((p) => !protectedTag(p.tags)).map((p) => extractIsbn(p))
+      .filter((i): i is string => !!i && !ctx.state.duplicates?.[i]);
+    const kodeMap = await loadKodeMap(ctx.supabase, isbns);
+    const missing = isbns.filter((i) => !kodeMap.has(i));
+    const fromOnix = missing.length ? await kodeFromOnix(ctx.supabase, await ctx.loadXml(missing)) : new Map<string, string>();
+    c.kodeFromCache += kodeMap.size;
+    c.kodeFromOnix += fromOnix.size;
+
+    const logs: Record<string, unknown>[] = [];
+    const lines: unknown[] = [];
+    const refs: BulkRef[] = [];
+    for (const product of products) {
+      const isbn = extractIsbn(product);
+      const base = { isbn, title: product.handle, action: "sjangre_sync", shopify_id: product.id, job_id: ctx.jobId, user_id: ctx.userId };
+      // Beskyttet (tagg gave/lokal/lokalhistorie/lokallitteratur): får aldri nye tagger
+      if (protectedTag(product.tags)) {
+        c.skippedProtected++;
+        logs.push({ ...base, status: "info", message: protectedMessage(product.tags) });
+        continue;
+      }
+      if (!isbn) { c.skippedNoIsbn++; continue; }
+      const dup = ctx.state.duplicates?.[isbn];
+      if (dup) {
+        c.skippedDuplicate++;
+        logs.push({ ...base, status: "info", message: duplicateMessage(dup) });
+        continue;
+      }
+      const kode = kodeMap.get(isbn) ?? fromOnix.get(isbn);
+      if (!kode) { c.noKode++; continue; }
+      if (!koder.includes(kode)) koder.push(kode);
+      const add = missingBokgruppeTags(product.tags, kode);
+      if (!add.length) { c.alreadyTagged++; continue; }
+      c.tagged++;
+      logs.push({ ...base, status: "success", message: `${ctx.mode === "update" ? "La til" : "Ville lagt til"} ${add.join(", ")} (bokgruppe ${kode})` });
+      if (ctx.mode === "update") {
+        lines.push({ id: product.id, tags: add });
+        refs.push({ id: product.id, isbn, handle: product.handle });
+      }
+    }
+    return { logs, ops: [{ kind: "tags", mutation: SJANGRE_BULK_TAGS_MUTATION, field: "tagsAdd", lines, refs, filename: "sjangre-tags.jsonl" }] };
+  },
+
+  onLineError(ctx, _kind, ref, error) {
+    ctx.counts.tagErrors++;
+    ctx.counts.tagged = Math.max(0, ctx.counts.tagged - 1);
+    return { isbn: ref.isbn, title: ref.handle, action: "sjangre_sync", status: "error", message: `Feil i bulk (tagger): ${error}`, shopify_id: ref.id, job_id: ctx.jobId, user_id: ctx.userId };
+  },
+
+  // Samlinger: planen lages én gang; i oppdateringsmodus lages/rettes de til tiden er ute
+  async finish(ctx) {
+    const extra = ctx.state.extra;
+    if (!extra.collectionPlan) {
+      const codes = bokgruppeCollectionCodes(extra.koder ?? []);
+      extra.collectionPlan = bkgCollectionPlan(codes, await listBkgCollections(), COLLECTION_NAMES);
+      extra.collectionResult = {
+        created: 0, existing: extra.collectionPlan.existing.length, renamed: 0, errors: 0, total: codes.length, details: [],
+        toCreate: extra.collectionPlan.create.length, toRename: extra.collectionPlan.rename.length,
+      } as CollectionSyncResult;
+      extra.collectionIndex = 0;
+      if (ctx.mode !== "update") {
+        const r = extra.collectionResult as CollectionSyncResult;
+        r.details = [
+          ...extra.collectionPlan.create.map((x: { code: string; title: string }) => ({ code: x.code, status: "would_create", to: x.title })),
+          ...extra.collectionPlan.rename.map((x: { code: string; from: string; to: string }) => ({ code: x.code, status: "would_rename", from: x.from, to: x.to })),
+        ];
+        return true;
+      }
+    }
+    if (ctx.mode !== "update") return true;
+    const done = await applyCollectionPlan(extra.collectionPlan, extra.collectionResult, extra, ctx.deadline);
+    return done;
+  },
+
+  totals(ctx: BulkJobContext<SjangreCounts>) {
+    const c = ctx.counts;
+    return { succeeded: c.tagged, skipped: c.alreadyTagged + c.noKode + c.skippedNoIsbn, failed: c.tagErrors };
+  },
+
+  result(ctx) {
+    const c = ctx.counts;
+    const col = ctx.state.extra.collectionResult as CollectionSyncResult | undefined;
+    return {
+      counts: c,
+      products: {
+        total: (ctx.state.totalProducts ?? 0), tagged: c.tagged, already_tagged: c.alreadyTagged, no_product: c.noKode,
+        errors: c.tagErrors, skipped_protected: c.skippedProtected, skipped_duplicate: c.skippedDuplicate,
+      },
+      collections: col,
+      skippedProtected: c.skippedProtected, skippedDuplicate: c.skippedDuplicate,
+      summary: `${summarizeSjangre(c, ctx.mode, col)}. ${summarizeBulkStats(ctx.state.stats)}`,
+    };
+  },
+};
 
 // ══ SHOPIFY ENRICH JOB (Shopify → Bokbasen → local cache) ════════════════════
 
@@ -528,8 +733,13 @@ serve(async (req) => {
       }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
-    // POST /sjangre-sync/start
+    // POST /sjangre-sync/start  { mode?: "analyze" | "update", bulk?: boolean }
+    // Bulk (standard): koder + tagger + samlinger i én jobb, sjekkmodus som standard.
+    // bulk: false = den gamle side-for-side-taggingen (alltid oppdatering, uten koder fra Bokbasen).
     if (path === "start" && req.method === "POST") {
+      const body = await req.json().catch(() => ({}));
+      const bulk = body.bulk !== false;
+      const mode = body.mode === "update" ? "update" : "analyze";
       let exQ = supabase.from("jobs").select("id, status")
         .eq("type", "sjangre_sync").in("status", ["running", "paused", "pending"]).limit(1);
       if (userId) exQ = exQ.eq("user_id", userId); else exQ = exQ.is("user_id", null);
@@ -542,12 +752,14 @@ serve(async (req) => {
       const { data: job, error } = await supabase.from("jobs").insert({
         type: "sjangre_sync", status: "running", user_id: userId,
         started_at: new Date().toISOString(), total_items: totalProducts, processed: 0,
-        config: { phase: "tagging", cursor: null, total_products: totalProducts, koder_found: [], tagged: 0, already_tagged: 0, no_kode: 0, tag_errors: 0, processed: 0 },
+        config: bulk
+          ? { mode, bulk: emptyBulkJobState(), counts: {} }
+          : { phase: "tagging", cursor: null, total_products: totalProducts, koder_found: [], tagged: 0, already_tagged: 0, no_kode: 0, tag_errors: 0, processed: 0 },
       }).select().single();
 
       if (error || !job) return new Response(JSON.stringify({ error: "Kunne ikke opprette jobb" }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
-      const response = new Response(JSON.stringify({ jobId: job.id, status: "running" }), { status: 202, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      const response = new Response(JSON.stringify({ jobId: job.id, status: "running", mode: bulk ? mode : "update", bulk }), { status: 202, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       // @ts-ignore
       EdgeRuntime.waitUntil(processSyncBatch(job.id));
       return response;

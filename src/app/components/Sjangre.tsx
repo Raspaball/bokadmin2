@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Button } from './ui/button';
-import { Tags, ChevronDown, ChevronRight, Loader2, CheckCircle2, AlertCircle, RefreshCw, Menu, FileText } from 'lucide-react';
+import { Tags, ChevronDown, ChevronRight, Loader2, CheckCircle2, RefreshCw, Menu, FileText, Search } from 'lucide-react';
 import { Input } from './ui/input';
-import { shopify, sjangreSync, shopifyEnrich, syncLog, type SjangreSyncJobResult, type ShopifyEnrichJobResult, type SyncLogEntry } from '../utils/api';
+import { shopify, sjangreSync, syncLog, type Job, type SjangreSyncJobResult, type SyncLogEntry } from '../utils/api';
 import { toast } from 'sonner';
 
 // ── Forleggerforeningen bokgruppekode lookup ──────────────────────────────────
@@ -260,13 +260,34 @@ interface KategoriGroup {
 }
 
 type SyncResult = SjangreSyncJobResult;
-type EnrichResult = ShopifyEnrichJobResult;
-type PipelinePhase = 'idle' | 'enriching' | 'syncing' | 'cleaning' | 'done' | 'error';
+type PipelinePhase = 'idle' | 'checking' | 'syncing' | 'cleaning' | 'done' | 'error';
 
 interface PipelineResult {
-  enrich?: EnrichResult;
+  mode: 'analyze' | 'update';
   sync?: SyncResult;
   deletedCollections?: number;
+}
+
+// Bulk-jobben (pakke E del 5): faser fra jobs.config.bulk.phase
+const BULK_PHASE_LABEL: Record<string, string> = {
+  query: 'Leser katalogen',
+  onix: 'Henter bokgruppekoder fra Bokbasen',
+  plan: 'Regner ut bkg-tagger',
+  apply: 'Shopify legger til tagger',
+  finish: 'Samlinger',
+};
+const BULK_PHASE_PCT: Record<string, number> = { query: 5, onix: 20, plan: 50, apply: 70, finish: 90 };
+
+function jobPhaseLabel(job: Job): { label: string; pct: number } {
+  const bulk = (job.config as { bulk?: { phase?: string } } | null)?.bulk;
+  if (bulk) {
+    const ph = bulk.phase ?? 'query';
+    const count = ph === 'plan' || ph === 'apply' ? ` ${job.processed ?? 0} / ${job.total_items ?? '?'}` : '';
+    return { label: `${BULK_PHASE_LABEL[ph] ?? ph}…${count}`, pct: BULK_PHASE_PCT[ph] ?? 50 };
+  }
+  // Side-for-side-jobben (bulk: false)
+  const pct = job.total_items ? Math.min(90, Math.round((job.processed / job.total_items) * 90)) : 0;
+  return { label: (job.config as { phase?: string })?.phase === 'collections' ? 'Oppretter samlinger…' : `Tagger produkter… ${job.processed ?? 0} / ${job.total_items ?? '?'}`, pct };
 }
 
 export function Sjangre() {
@@ -275,14 +296,12 @@ export function Sjangre() {
   const [isLoading, setIsLoading] = useState(true);
   const [expandedHoved, setExpandedHoved] = useState<Set<string>>(new Set());
 
-  // Unified pipeline state
+  // Én jobb: koder fra Bokbasen, bkg-tagger og samlinger (sjekk eller oppdatering)
   const [phase, setPhase] = useState<PipelinePhase>('idle');
   const [progress, setProgress] = useState(0);
   const [phaseLabel, setPhaseLabel] = useState('');
-  const [enrichJobId, setEnrichJobId] = useState<string | null>(null);
   const [syncJobId, setSyncJobId] = useState<string | null>(null);
   const [pipelineResult, setPipelineResult] = useState<PipelineResult | null>(null);
-  const resultRef = useRef<PipelineResult>({});
 
   // Menu state
   const [isBuildingMenu, setIsBuildingMenu] = useState(false);
@@ -295,14 +314,9 @@ export function Sjangre() {
   const [isLoadingLog, setIsLoadingLog] = useState(false);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const enrichPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const stopPoll = useCallback(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-  }, []);
-
-  const stopEnrichPoll = useCallback(() => {
-    if (enrichPollRef.current) { clearInterval(enrichPollRef.current); enrichPollRef.current = null; }
   }, []);
 
   const loadCatalogStats = useCallback(() => {
@@ -318,19 +332,12 @@ export function Sjangre() {
 
   useEffect(() => { loadCatalogStats(); }, [loadCatalogStats]);
 
-  // Resume active jobs on mount
+  // Resume active job on mount
   useEffect(() => {
-    shopifyEnrich.getActive().then(job => {
-      if (job && (job.status === 'running' || job.status === 'paused')) {
-        setPhase('enriching');
-        setEnrichJobId(job.id);
-      } else {
-        sjangreSync.getActive().then(syncJob => {
-          if (syncJob && (syncJob.status === 'running' || syncJob.status === 'paused')) {
-            setPhase('syncing');
-            setSyncJobId(syncJob.id);
-          }
-        }).catch(() => {});
+    sjangreSync.getActive().then(syncJob => {
+      if (syncJob && (syncJob.status === 'running' || syncJob.status === 'paused')) {
+        setPhase((syncJob.config as { mode?: string })?.mode === 'analyze' ? 'checking' : 'syncing');
+        setSyncJobId(syncJob.id);
       }
     }).catch(() => {});
   }, []);
@@ -343,13 +350,10 @@ export function Sjangre() {
     const poll = async () => {
       try {
         const job = await sjangreSync.getStatus(syncJobId);
-        const rawPct = job.total_items ? Math.min(46, Math.round((job.processed / job.total_items) * 46)) : 0;
-        setProgress(job.status === 'completed' ? 96 : 50 + rawPct);
-        setPhaseLabel(
-          job.config?.phase === 'collections'
-            ? 'Fase 2/2: Oppretter Smart Collections…'
-            : `Fase 2/2: Tagger produkter i Shopify… ${job.processed ?? 0} / ${job.total_items ?? '?'}`
-        );
+        const mode: 'analyze' | 'update' = (job.config as { mode?: string })?.mode === 'analyze' ? 'analyze' : 'update';
+        const { label, pct } = jobPhaseLabel(job);
+        setProgress(job.status === 'completed' ? 96 : pct);
+        setPhaseLabel(`${mode === 'analyze' ? 'Sjekk' : 'Synk'}: ${label}`);
 
         if (job.status === 'paused') {
           await sjangreSync.resume(syncJobId);
@@ -357,32 +361,35 @@ export function Sjangre() {
           stopPoll();
           setSyncJobId(null);
           const r = job.result as unknown as SyncResult;
-          resultRef.current = { ...resultRef.current, sync: r };
+          const result: PipelineResult = { mode, sync: r };
           syncLog.add({
-            isbn: null, title: 'Synk sjangre til Shopify',
+            isbn: null, title: mode === 'analyze' ? 'Sjekk sjangre (bulk)' : 'Synk sjangre til Shopify',
             action: 'sjangre_sync', status: 'success',
-            message: `${r?.products?.tagged ?? 0} tagget, ${r?.products?.already_tagged ?? 0} hadde tags, ${r?.products?.skipped_protected ?? 0} beskyttet, ${r?.products?.skipped_duplicate ?? 0} DUPLIKAT, ${r?.collections?.created ?? 0} kolleksjoner opprettet`,
+            message: r?.summary ?? `${r?.products?.tagged ?? 0} tagget, ${r?.products?.already_tagged ?? 0} hadde tags, ${r?.products?.skipped_protected ?? 0} beskyttet, ${r?.products?.skipped_duplicate ?? 0} DUPLIKAT, ${r?.collections?.created ?? 0} kolleksjoner opprettet`,
             shopify_id: null, job_id: syncJobId,
           }).catch(console.error);
 
-          // Delete empty collections
-          setPhase('cleaning');
-          setProgress(97);
-          setPhaseLabel('Sletter tomme samlinger…');
-          try {
-            const { deleted } = await sjangreSync.deleteEmptyCollections();
-            resultRef.current = { ...resultRef.current, deletedCollections: deleted };
-            if (deleted > 0) toast.success(`${deleted} tomme samlinger slettet`);
-          } catch (e) {
-            console.error('Sletting av tomme samlinger feilet:', e);
+          // Etter oppdatering: slett tomme bkg-samlinger (som før)
+          if (mode === 'update') {
+            setPhase('cleaning');
+            setProgress(97);
+            setPhaseLabel('Sletter tomme samlinger…');
+            try {
+              const { deleted } = await sjangreSync.deleteEmptyCollections();
+              result.deletedCollections = deleted;
+              if (deleted > 0) toast.success(`${deleted} tomme samlinger slettet`);
+            } catch (e) {
+              console.error('Sletting av tomme samlinger feilet:', e);
+            }
+            toast.success(`${r?.products?.tagged ?? 0} produkter tagget, ${r?.collections?.created ?? 0} kolleksjoner opprettet`);
+          } else {
+            toast.success(`Sjekk ferdig: ${r?.products?.tagged ?? 0} ville fått bkg-tagger, ${r?.collections?.toCreate ?? 0} samlinger ville blitt laget`);
           }
-
-          setPipelineResult({ ...resultRef.current });
-          toast.success(`${r?.products?.tagged ?? 0} produkter tagget, ${r?.collections?.created ?? 0} kolleksjoner opprettet`);
+          setPipelineResult(result);
           setProgress(100);
           setPhase('done');
           setPhaseLabel('Ferdig!');
-          loadCatalogStats();
+          if (mode === 'update') loadCatalogStats();
         } else if (job.status === 'failed') {
           stopPoll();
           setSyncJobId(null);
@@ -405,74 +412,15 @@ export function Sjangre() {
     return stopPoll;
   }, [syncJobId, stopPoll, loadCatalogStats]);
 
-  // Poll enrich job
-  useEffect(() => {
-    if (!enrichJobId) return;
-    stopEnrichPoll();
-
-    const poll = async () => {
-      try {
-        const job = await shopifyEnrich.getStatus(enrichJobId);
-        const pct = job.total_items ? Math.min(48, Math.round((job.processed / job.total_items) * 48)) : 0;
-        setProgress(job.status === 'completed' ? 50 : pct);
-        setPhaseLabel(`Fase 1/2: Slår opp i Bokbasen… ${job.processed ?? 0} / ${job.total_items ?? '?'}`);
-
-        if (job.status === 'paused') {
-          await shopifyEnrich.resume(enrichJobId);
-        } else if (job.status === 'completed') {
-          stopEnrichPoll();
-          setEnrichJobId(null);
-          const r = job.result as unknown as EnrichResult;
-          resultRef.current = { enrich: r };
-          syncLog.add({
-            isbn: null, title: 'Hent bokgruppekoder fra Bokbasen',
-            action: 'sjangre_enrich', status: 'success',
-            message: `${r?.found_kode ?? 0} nye koder, ${r?.already_cached ?? 0} allerede cachet, ${r?.no_data ?? 0} uten kode, ${r?.errors ?? 0} feil`,
-            shopify_id: null, job_id: enrichJobId,
-          }).catch(console.error);
-
-          // Auto-start sync phase
-          setPhase('syncing');
-          setProgress(50);
-          setPhaseLabel('Fase 2/2: Starter synk…');
-          try {
-            const { jobId } = await sjangreSync.start();
-            setSyncJobId(jobId);
-          } catch (e) {
-            setPhase('error');
-            toast.error('Feil ved start av synk: ' + (e as Error).message);
-          }
-        } else if (job.status === 'failed') {
-          stopEnrichPoll();
-          setEnrichJobId(null);
-          setPhase('error');
-          toast.error('Henting feilet: ' + job.error_message);
-          syncLog.add({
-            isbn: null, title: 'Hent bokgruppekoder fra Bokbasen',
-            action: 'sjangre_enrich', status: 'error',
-            message: job.error_message ?? 'Ukjent feil',
-            shopify_id: null, job_id: enrichJobId,
-          }).catch(console.error);
-        }
-      } catch (e) {
-        console.error('Enrich poll error:', e);
-      }
-    };
-
-    poll();
-    enrichPollRef.current = setInterval(poll, 3000);
-    return stopEnrichPoll;
-  }, [enrichJobId, stopEnrichPoll]);
-
-  const handleRunPipeline = async () => {
+  const handleRunPipeline = async (mode: 'analyze' | 'update') => {
+    if (mode === 'update' && !confirm('Legge til bkg-tagger og lage samlinger i Shopify? Beskyttede produkter og duplikater hoppes over, og andre tagger røres ikke.')) return;
     setPipelineResult(null);
-    resultRef.current = {};
-    setPhase('enriching');
+    setPhase(mode === 'analyze' ? 'checking' : 'syncing');
     setProgress(0);
-    setPhaseLabel('Fase 1/2: Starter henting fra Bokbasen…');
+    setPhaseLabel(mode === 'analyze' ? 'Sjekk: starter…' : 'Synk: starter…');
     try {
-      const { jobId } = await shopifyEnrich.start();
-      setEnrichJobId(jobId);
+      const { jobId } = await sjangreSync.start(mode);
+      setSyncJobId(jobId);
     } catch (e) {
       setPhase('error');
       toast.error('Feil ved start: ' + (e as Error).message);
@@ -519,7 +467,7 @@ export function Sjangre() {
     }
   };
 
-  const isRunning = phase === 'enriching' || phase === 'syncing' || phase === 'cleaning';
+  const isRunning = phase === 'checking' || phase === 'syncing' || phase === 'cleaning';
 
   // Build hierarchy from Shopify catalog bkg-counts
   const hierarchy = Object.entries(bkgCounts)
@@ -550,11 +498,22 @@ export function Sjangre() {
             </CardTitle>
             <div className="flex items-center gap-2 flex-wrap">
               <Button
-                onClick={handleRunPipeline}
+                onClick={() => handleRunPipeline('analyze')}
+                disabled={isRunning || isLoading}
+                size="sm"
+                variant="outline"
+              >
+                {phase === 'checking'
+                  ? <><Loader2 className="size-4 mr-2 animate-spin" />Sjekker…</>
+                  : <><Search className="size-4 mr-2" />Sjekk</>
+                }
+              </Button>
+              <Button
+                onClick={() => handleRunPipeline('update')}
                 disabled={isRunning || isLoading}
                 size="sm"
               >
-                {isRunning
+                {phase === 'syncing' || phase === 'cleaning'
                   ? <><Loader2 className="size-4 mr-2 animate-spin" />Kjører…</>
                   : <><RefreshCw className="size-4 mr-2" />Kjør sjangre-synk</>
                 }
@@ -675,33 +634,17 @@ export function Sjangre() {
               {/* Pipeline result */}
               {pipelineResult && (
                 <div className="mb-4 p-3 rounded-md border bg-gray-50 text-sm space-y-2">
-                  {pipelineResult.enrich && (
-                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-                      <span className="text-xs font-medium text-gray-500 uppercase tracking-wide w-full">Bokbasen-oppslag</span>
-                      <span className="flex items-center gap-1 text-blue-700">
-                        <CheckCircle2 className="size-3.5" />{pipelineResult.enrich.found_kode} av {pipelineResult.enrich.total} fikk kode
-                      </span>
-                      {pipelineResult.enrich.already_cached > 0 && (
-                        <span className="text-gray-500">{pipelineResult.enrich.already_cached} allerede cachet</span>
-                      )}
-                      {pipelineResult.enrich.no_data > 0 && (
-                        <span className="text-gray-500">{pipelineResult.enrich.no_data} ikke i Bokbasen</span>
-                      )}
-                      {pipelineResult.enrich.errors > 0 && (
-                        <span className="flex items-center gap-1 text-red-500">
-                          <AlertCircle className="size-3.5" />{pipelineResult.enrich.errors} feil
-                        </span>
-                      )}
-                    </div>
-                  )}
                   {pipelineResult.sync && (
                     <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-                      <span className="text-xs font-medium text-gray-500 uppercase tracking-wide w-full">Shopify-synk</span>
+                      <span className="text-xs font-medium text-gray-500 uppercase tracking-wide w-full">{pipelineResult.mode === 'analyze' ? 'Sjekk (ingenting endret)' : 'Shopify-synk'}</span>
                       <span className="text-gray-700">{pipelineResult.sync.products.total} behandlet</span>
                       {pipelineResult.sync.products.tagged > 0 && (
                         <span className="flex items-center gap-1 text-green-600">
-                          <CheckCircle2 className="size-3.5" />{pipelineResult.sync.products.tagged} tagget nå
+                          <CheckCircle2 className="size-3.5" />{pipelineResult.sync.products.tagged} {pipelineResult.mode === 'analyze' ? 'ville fått bkg-tagger' : 'tagget nå'}
                         </span>
+                      )}
+                      {pipelineResult.mode === 'analyze' && (
+                        <span className="text-gray-700">{pipelineResult.sync.collections?.toCreate ?? 0} samlinger ville blitt laget, {pipelineResult.sync.collections?.toRename ?? 0} ville fått nytt navn</span>
                       )}
                       <span className="text-gray-400">{pipelineResult.sync.products.already_tagged} hadde tags</span>
                       <span className="text-gray-400">{pipelineResult.sync.products.skipped_protected ?? 0} beskyttet</span>
@@ -718,6 +661,9 @@ export function Sjangre() {
                       )}
                       {(pipelineResult.deletedCollections ?? 0) > 0 && (
                         <span className="text-amber-600">{pipelineResult.deletedCollections} tomme samlinger slettet</span>
+                      )}
+                      {pipelineResult.sync.summary && (
+                        <span className="text-xs text-gray-500 w-full">{pipelineResult.sync.summary}</span>
                       )}
                     </div>
                   )}

@@ -19,12 +19,13 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL, waitForShopifyBudget } from "../_shared/shopify.ts";
 import { getCaller } from "../_shared/auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
-import { getOnixCached, ONIX_CACHE_MAX_AGE_DAYS } from "../_shared/onix-cache.ts";
+import { getOnixCached } from "../_shared/onix-cache.ts";
 import {
   BULK_COVER_MUTATION, BULK_PRODUCT_UPDATE_MUTATION, BULK_PRODUCTS_QUERY, BulkProductAssembler,
   bulkCoverLine, bulkUpdateLine, parseBulkResult, toJsonl,
 } from "../_shared/book-bulk.ts";
 import { BULK_ACTIVE, fetchBulkText, startBulkMutation, startBulkQuery, streamJsonlLines, waitForBulkOperation } from "../_shared/shopify-bulk.ts";
+import { freshOnixIsbns, insertLogs, loadOnixXml } from "../_shared/bulk-job.ts";
 import { protectedMessage, protectedTag } from "../_shared/protected.ts";
 import { ensureDuplicates } from "../_shared/duplicate-scan.ts";
 import { duplicateCounts, duplicateMessage } from "../_shared/duplicates.ts";
@@ -306,34 +307,7 @@ function summarizeBulk(s: BulkState["stats"]): string {
     `ONIX: ${s.onixCalls} kall på ${Math.round(s.onixMs / 1000)} s (${s.onixOk} hentet, ${s.onixMissing} mangler), ${s.onixCached} fra cache`;
 }
 
-// deno-lint-ignore no-explicit-any
-async function insertLogs(supabase: any, rows: Record<string, unknown>[]) {
-  for (let i = 0; i < rows.length; i += 500) await supabase.from("sync_log").insert(rows.slice(i, i + 500));
-}
-
-/** ISBN-ene som har fersk ONIX i cachen (bare ISBN, ikke XML). */
-// deno-lint-ignore no-explicit-any
-async function freshOnixIsbns(supabase: any, isbns: string[]): Promise<Set<string>> {
-  const since = new Date(Date.now() - ONIX_CACHE_MAX_AGE_DAYS * 86_400_000).toISOString();
-  const fresh = new Set<string>();
-  for (let i = 0; i < isbns.length; i += 150) {
-    const { data, error } = await supabase.from("onix_cache").select("isbn").in("isbn", isbns.slice(i, i + 150)).gte("fetched_at", since);
-    if (error) throw new Error(`onix_cache: ${error.message}`);
-    for (const r of data ?? []) fresh.add(r.isbn);
-  }
-  return fresh;
-}
-
-// deno-lint-ignore no-explicit-any
-async function loadOnixXml(supabase: any, isbns: string[]): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
-  for (let i = 0; i < isbns.length; i += 100) {
-    const { data, error } = await supabase.from("onix_cache").select("isbn, xml").in("isbn", isbns.slice(i, i + 100));
-    if (error) throw new Error(`onix_cache: ${error.message}`);
-    for (const r of data ?? []) if (r.xml) out.set(r.isbn, r.xml);
-  }
-  return out;
-}
+// insertLogs, freshOnixIsbns og loadOnixXml: felles i _shared/bulk-job.ts
 
 async function processBulk(jobId: string) {
   const supabase = getSupabase();

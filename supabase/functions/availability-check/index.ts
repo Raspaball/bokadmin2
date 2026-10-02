@@ -11,6 +11,11 @@ import { extractAvailabilityCode, extractPublishingDate } from "../_shared/onix.
 import { protectedMessage, protectedTag } from "../_shared/protected.ts";
 import { ensureDuplicates } from "../_shared/duplicate-scan.ts";
 import { duplicateMessage } from "../_shared/duplicates.ts";
+import { emptyBulkJobState, runBulkJob, summarizeBulkStats, type BulkJobContext, type BulkJobSpec, type BulkRef } from "../_shared/bulk-job.ts";
+import {
+  AVAILABILITY_BULK_PRODUCT_MUTATION, AVAILABILITY_BULK_QUERY, AVAILABILITY_BULK_VARIANT_MUTATION, AVAILABILITY_SLIM_FIELDS,
+  availabilityBulkLines,
+} from "../_shared/availability-bulk.ts";
 import {
   ARCHIVED_MESSAGE, availabilityLogMessage, availabilityMetafields, availabilityRule, availabilitySkip,
   EGEN_TILGJENGELIGHET_FIELD, planAvailability,
@@ -230,6 +235,8 @@ async function processBatch(jobId: string) {
   if (job.status !== "running" && job.status !== "paused") {
     return;
   }
+  // Bulk-modus (pakke E del 5): hele katalogen med Shopify Bulk Operations og onix_cache
+  if (job.config?.bulk) return runBulkJob(supabase, jobId, AVAILABILITY_BULK_SPEC, loadAvailabilityCounts);
 
   await supabase.from("jobs").update({
     status: "running",
@@ -473,6 +480,158 @@ async function processBatch(jobId: string) {
   }
 }
 
+// ── Bulk-modus (pakke E del 5) ──────────────────────────────────────────────
+// Samme regel (availabilityRule + planAvailability), men katalogen leses med
+// bulkOperationRunQuery, ONIX kommer fra onix_cache (hentes i forkant, høyst
+// 2 timer gammel), og endringene sendes som JSONL: først
+// productVariantsBulkUpdate (CONTINUE), så productUpdate (status + metafelt).
+// Driveren er runBulkJob() i _shared/bulk-job.ts. Beskyttede, arkiverte og
+// duplikater hoppes over; egen tilgjengelighet som i side-for-side-modus.
+
+interface AvailabilityCounts {
+  changed: number; unchanged: number; errors: number;
+  skippedNoIsbn: number; skippedNoOnix: number; skippedProtected: number; skippedDuplicate: number;
+  skippedOwnAvailability: number; skippedArchived: number;
+}
+
+function loadAvailabilityCounts(raw: unknown): AvailabilityCounts {
+  const r = (raw ?? {}) as Partial<AvailabilityCounts>;
+  const n = (k: keyof AvailabilityCounts) => Number(r[k]) || 0;
+  return {
+    changed: n("changed"), unchanged: n("unchanged"), errors: n("errors"), skippedNoIsbn: n("skippedNoIsbn"),
+    skippedNoOnix: n("skippedNoOnix"), skippedProtected: n("skippedProtected"), skippedDuplicate: n("skippedDuplicate"),
+    skippedOwnAvailability: n("skippedOwnAvailability"), skippedArchived: n("skippedArchived"),
+  };
+}
+
+/** «12 ville endret, 420 uendret, hoppet over 10 (6 beskyttet, 1 arkivert, …), 1 egen tilgjengelighet, 0 feil» */
+function summarizeAvailability(c: AvailabilityCounts, mode: "analyze" | "update"): string {
+  const skipped = c.skippedProtected + c.skippedArchived + c.skippedDuplicate + c.skippedNoIsbn + c.skippedNoOnix;
+  return `${c.changed} ${mode === "update" ? "endret" : "ville endret"}, ${c.unchanged} uendret, hoppet over ${skipped} ` +
+    `(${c.skippedProtected} beskyttet, ${c.skippedArchived} arkivert, ${c.skippedDuplicate} DUPLIKAT, ${c.skippedNoIsbn} uten ISBN, ` +
+    `${c.skippedNoOnix} fant ikke boka i Bokbasen), ${c.skippedOwnAvailability} egen tilgjengelighet, ${c.errors} feil`;
+}
+
+const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
+  name: "availability-check (bulk)",
+  query: AVAILABILITY_BULK_QUERY,
+  slimFields: AVAILABILITY_SLIM_FIELDS,
+  // Tilgjengelighet endrer seg i løpet av dagen (Testbutikk 02.10.2026: ONIX fra natten
+  // ville rullet tilbake 4 endringer fra Bokbasen samme dag). Cachen brukes bare når den
+  // er under 2 timer gammel, f.eks. rett etter bokdata-jobben ved overgangen.
+  onixMaxAgeDays: 2 / 24,
+
+  onixIsbns(products) {
+    return products
+      .filter((p) => !protectedTag(p.tags) && !availabilitySkip(p as { status?: string }))
+      .map((p) => extractIsbn(p))
+      .filter((i): i is string => !!i);
+  },
+
+  async planChunk(products, ctx) {
+    const c = ctx.counts;
+    const statusChanges: StatusChangeRow[] = (ctx.state.extra.statusChanges ??= []);
+    const eligible = products.filter((p) => !protectedTag(p.tags) && !availabilitySkip(p as { status?: string }));
+    const xmlByIsbn = await ctx.loadXml(eligible.map((p) => extractIsbn(p)).filter((i): i is string => !!i && !ctx.state.duplicates?.[i]));
+    const logs: Record<string, unknown>[] = [];
+    const variantLines: unknown[] = [], variantRefs: BulkRef[] = [];
+    const productLines: unknown[] = [], productRefs: BulkRef[] = [];
+
+    for (const product of products) {
+      // deno-lint-ignore no-explicit-any
+      const p = product as any;
+      const isbn = extractIsbn(product);
+      const base = { isbn, title: product.handle, action: "availability_check", shopify_id: product.id, job_id: ctx.jobId, user_id: ctx.userId };
+      if (protectedTag(product.tags)) {
+        c.skippedProtected++;
+        logs.push({ ...base, status: "info", message: protectedMessage(product.tags) });
+        continue;
+      }
+      if (availabilitySkip(p) === "arkivert") {
+        c.skippedArchived++;
+        logs.push({ ...base, status: "info", message: ARCHIVED_MESSAGE });
+        continue;
+      }
+      if (!isbn) { c.skippedNoIsbn++; continue; }
+      const dup = ctx.state.duplicates?.[isbn];
+      if (dup) {
+        c.skippedDuplicate++;
+        logs.push({ ...base, status: "info", message: duplicateMessage(dup) });
+        continue;
+      }
+      const xml = xmlByIsbn.get(isbn);
+      if (!xml) {
+        c.skippedNoOnix++;
+        logs.push({ ...base, status: "error", message: "Kunne ikke hente tilgjengelighet fra Bokbasen" });
+        continue;
+      }
+      const rule = availabilityRule(extractAvailabilityCode(xml));
+      const date = extractPublishingDate(xml);
+      const plan = planAvailability({ ...p, variant: p.variants?.nodes?.[0] }, rule, date);
+      const statusChange = plan.changes.status ?? plan.heldBack.status;
+      if (statusChange) {
+        statusChanges.push({
+          id: product.id, handle: product.handle, title: p.title ?? product.handle, isbn, code: rule.code,
+          from: statusChange.from, to: statusChange.to, tilgjengelighet: rule.tilgjengelighet, own: plan.ownAvailability,
+        });
+      }
+      if (Object.keys(plan.heldBack).length) c.skippedOwnAvailability++;
+      const message = availabilityLogMessage(plan, rule, date, ctx.mode === "update" ? "Endret" : "Ville endret");
+      if (!Object.keys(plan.changes).length) {
+        c.unchanged++;
+        if (message) logs.push({ ...base, status: "info", message });
+        continue;
+      }
+      c.changed++;
+      logs.push({ ...base, action: ctx.mode === "update" ? "availability_update" : "availability_check", status: "success", message });
+      if (ctx.mode !== "update") continue;
+      const lines = availabilityBulkLines(p, rule, date, plan);
+      const ref = { id: product.id, isbn, handle: product.handle };
+      if (lines.variant) { variantLines.push(lines.variant); variantRefs.push(ref); }
+      if (lines.product) { productLines.push(lines.product); productRefs.push(ref); }
+    }
+    return {
+      logs,
+      ops: [
+        // CONTINUE først: blir boka aktiv, er den da allerede kjøpbar
+        { kind: "variant", mutation: AVAILABILITY_BULK_VARIANT_MUTATION, field: "productVariantsBulkUpdate", lines: variantLines, refs: variantRefs, filename: "availability-variants.jsonl" },
+        { kind: "product", mutation: AVAILABILITY_BULK_PRODUCT_MUTATION, field: "productUpdate", lines: productLines, refs: productRefs, filename: "availability-products.jsonl" },
+      ],
+    };
+  },
+
+  onLineError(ctx, kind, ref, error) {
+    // Én bok kan ha to linjer (variant og produkt): telles som én feil
+    const failed: string[] = (ctx.state.extra.failedIds ??= []);
+    if (!failed.includes(ref.id)) {
+      failed.push(ref.id);
+      ctx.counts.errors++;
+      ctx.counts.changed = Math.max(0, ctx.counts.changed - 1);
+    }
+    return {
+      isbn: ref.isbn, title: ref.handle, action: "availability_update", status: "error",
+      message: `Feil i bulk (${kind === "variant" ? "salg uten lager" : "status/metafelt"}): ${error}`,
+      shopify_id: ref.id, job_id: ctx.jobId, user_id: ctx.userId,
+    };
+  },
+
+  totals(ctx: BulkJobContext<AvailabilityCounts>) {
+    const c = ctx.counts;
+    return { succeeded: c.changed, skipped: c.unchanged + c.skippedNoIsbn + c.skippedNoOnix, failed: c.errors };
+  },
+
+  result(ctx) {
+    const c = ctx.counts;
+    return {
+      counts: c,
+      skippedProtected: c.skippedProtected, skippedDuplicate: c.skippedDuplicate,
+      skippedOwnAvailability: c.skippedOwnAvailability, skippedArchived: c.skippedArchived,
+      statusChanges: ctx.state.extra.statusChanges ?? [], shopDomain: Deno.env.get("SHOPIFY_SHOP_DOMAIN") ?? null,
+      summary: `${summarizeAvailability(c, ctx.mode)}. ${summarizeBulkStats(ctx.state.stats)}`,
+    };
+  },
+};
+
 // ── Main handler ────────────────────────────────────────────────────────────
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -492,7 +651,9 @@ serve(async (req) => {
       const body = await req.json().catch(() => ({}));
       // pg_cron (anon-nøkkel) sender user_id: godtas bare for brukere med aktiv planlagt oppgave
       const userId = jwtUserId ?? await scheduledUserId(supabase, body.user_id, "availability_check");
-      const mode = body.mode || "analyze";
+      const mode = body.mode === "update" ? "update" : "analyze";
+      // Bulk er standard (pakke E del 5); bulk: false gir side-for-side-modus
+      const bulk = body.bulk !== false;
 
       let existingQuery = supabase
         .from("jobs")
@@ -529,7 +690,7 @@ serve(async (req) => {
           user_id: userId,
           started_at: new Date().toISOString(),
           total_items: totalProducts,
-          config: { mode, shopify_cursor: null },
+          config: { mode, shopify_cursor: null, ...(bulk ? { bulk: emptyBulkJobState(), counts: {} } : {}) },
         })
         .select()
         .single();
@@ -541,7 +702,7 @@ serve(async (req) => {
         });
       }
 
-      const response = new Response(JSON.stringify({ jobId: job.id, status: "running", mode }), {
+      const response = new Response(JSON.stringify({ jobId: job.id, status: "running", mode, bulk }), {
         status: 202,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });

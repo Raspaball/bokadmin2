@@ -17,6 +17,7 @@ import { csvPriceAndStatus, decidePushPrice, validPrice, type PushPriceDecision 
 import { approvalMessage, checkPriceChange } from "../_shared/price-guard.ts";
 import { getMaxPriceChangePct, recordPendingApproval } from "../_shared/price-approvals.ts";
 import { EGEN_PRIS_FIELD, priceLock, priceLockMessage } from "../_shared/price-lock.ts";
+import { bokgruppeTagsForKode } from "../_shared/bokgruppe.ts";
 import { COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, collectionTitleFix, tagSources } from "../_shared/collections.ts";
 import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
 import { bookDescription, bookFieldsFromOnix, bookMetafields, type BookFields } from "../_shared/book-standard.ts";
@@ -94,14 +95,7 @@ interface BookMetadata {
 
 // Bokgruppekode → samlingsnavn: COLLECTION_NAMES i _shared/collection-names.ts
 
-// Derive all tag codes for a given bokgruppekode (1-digit, 2-digit, 3-digit)
-function bokgruppeTagsForKode(kode: string): string[] {
-  const tags: string[] = [];
-  if (kode.length >= 1) tags.push(`bkg-${kode[0]}`);
-  if (kode.length >= 2) tags.push(`bkg-${kode.slice(0, 2)}`);
-  if (kode.length >= 3) tags.push(`bkg-${kode}`);
-  return tags;
-}
+// bkg-taggene for en bokgruppekode: bokgruppeTagsForKode() i _shared/bokgruppe.ts
 
 // ── Product mutations ────────────────────────────────────────────────────────
 

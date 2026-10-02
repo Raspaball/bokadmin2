@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Button } from './ui/button';
+import { Checkbox } from './ui/checkbox';
+import { Label } from './ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Loader2, Search, RefreshCw, CheckCircle2, AlertCircle, FileText, Upload, Pause, Plus, Trash2, Play, X, Download, ExternalLink } from 'lucide-react';
 import { availabilityJobs, scheduledTasks, syncLog, type Job, type ScheduledTask, type SyncLogEntry } from '../utils/api';
@@ -19,6 +21,13 @@ const CRON_PRESETS = [
 function skippedSummary(job: Job): string {
   const r = (job.result ?? {}) as { skippedProtected?: number; skippedDuplicate?: number; skippedOwnAvailability?: number; skippedArchived?: number };
   return `${r.skippedProtected ?? 0} beskyttet, ${r.skippedDuplicate ?? 0} DUPLIKAT, ${r.skippedOwnAvailability ?? 0} egen tilgjengelighet, ${r.skippedArchived ?? 0} arkivert`;
+}
+
+// Bulk-modus (pakke E del 5): fasen fra jobs.config.bulk
+const BULK_PHASES: Record<string, string> = { query: 'leser katalogen', onix: 'henter ONIX', plan: 'regner ut endringer', apply: 'Shopify oppdaterer', finish: 'avslutter' };
+function bulkPhase(job: Job): string | null {
+  const b = (job.config as { bulk?: { phase?: string } } | null)?.bulk;
+  return b ? BULK_PHASES[b.phase ?? 'query'] ?? b.phase ?? '' : null;
 }
 
 // Statusrapporten (pakke E del 4) fra en ferdig sjekk/oppdatering
@@ -48,6 +57,7 @@ export function TilgjengelighetTab() {
   const [activeJob, setActiveJob] = useState<Job | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const [startMode, setStartMode] = useState<'analyze' | 'update' | null>(null);
+  const [bulk, setBulk] = useState(true);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isResumingRef = useRef(false);
 
@@ -230,7 +240,7 @@ export function TilgjengelighetTab() {
     setIsStarting(true);
     setStartMode(mode);
     try {
-      const { jobId } = await availabilityJobs.start(mode);
+      const { jobId } = await availabilityJobs.start(mode, bulk);
       const job = await availabilityJobs.getStatus(jobId);
       setActiveJob(job);
       startPolling(jobId);
@@ -279,6 +289,7 @@ export function TilgjengelighetTab() {
                   )}
                   <span className="text-sm font-medium">
                     {activeMode === 'analyze' ? 'Analyserer' : 'Oppdaterer'}
+                    {bulkPhase(activeJob) ? ` i bulk (${bulkPhase(activeJob)})` : ''}
                     {activeJob.status === 'running' ? '...' : ' (pauset)'}
                   </span>
                 </div>
@@ -327,7 +338,7 @@ export function TilgjengelighetTab() {
               </div>
             </div>
           ) : (
-            <div className="flex gap-3">
+            <div className="flex gap-3 items-center flex-wrap">
               <Button
                 variant="outline"
                 onClick={() => handleStart('analyze')}
@@ -351,6 +362,10 @@ export function TilgjengelighetTab() {
                 )}
                 Oppdater Shopify
               </Button>
+              <div className="flex items-center gap-2">
+                <Checkbox id="tilg-bulk" checked={bulk} onCheckedChange={v => setBulk(v === true)} />
+                <Label htmlFor="tilg-bulk" className="text-sm font-normal">Bulk (hele katalogen med Shopify Bulk Operations)</Label>
+              </div>
             </div>
           )}
         </CardContent>
@@ -446,6 +461,7 @@ export function TilgjengelighetTab() {
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-medium">
                             {mode === 'analyze' ? 'Analyse' : 'Oppdatering'}
+                            {bulkPhase(job) !== null ? ' (bulk)' : ''}
                             {' — '}
                             {job.status === 'completed' ? 'Fullfort' : 'Feilet'}
                             {job.started_at && job.completed_at && (
@@ -461,6 +477,9 @@ export function TilgjengelighetTab() {
                             {`, ${skippedSummary(job)}`}
                             {job.failed > 0 && `, ${job.failed} feilet`}
                           </p>
+                          {(job.result as { summary?: string } | null)?.summary && (
+                            <p className="text-xs text-gray-400">{(job.result as { summary?: string }).summary}</p>
+                          )}
                         </div>
                         <Button
                           variant="outline"

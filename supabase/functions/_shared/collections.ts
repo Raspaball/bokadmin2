@@ -35,6 +35,38 @@ export function collectionTitleFix(currentTitle: string | null | undefined, want
   return (currentTitle ?? "").trim() === wantedTitle ? null : wantedTitle;
 }
 
+export interface BkgCollectionPlan {
+  create: Array<{ code: string; handle: string; title: string }>;
+  rename: Array<{ code: string; id: string; from: string; to: string }>;
+  /** Finnes med riktig tittel */
+  existing: string[];
+}
+
+/**
+ * Hvilke bkg-samlinger som må lages eller få ny tittel (pakke E del 5).
+ * @param codes   kodene (med overordnede nivåer, se bokgruppeCollectionCodes)
+ * @param current eksisterende samlinger: kode → { id, title } (handle bkg-<kode>)
+ * @param names   COLLECTION_NAMES
+ */
+export function bkgCollectionPlan(
+  codes: readonly string[],
+  current: ReadonlyMap<string, { id: string; title: string }>,
+  names: Record<string, string>,
+): BkgCollectionPlan {
+  const plan: BkgCollectionPlan = { create: [], rename: [], existing: [] };
+  for (const code of codes) {
+    const col = current.get(code);
+    if (!col) {
+      plan.create.push({ code, handle: `bkg-${code}`, title: names[code] ?? `Bokgruppe ${code}` });
+      continue;
+    }
+    const fixed = collectionTitleFix(col.title, names[code]);
+    if (fixed) plan.rename.push({ code, id: col.id, from: col.title, to: fixed });
+    else plan.existing.push(code);
+  }
+  return plan;
+}
+
 /** Smart samling: produkter med taggen (tilsvarer ruleSet TAG EQUALS <tag>). */
 export function tagSources(tag: string) {
   return [{

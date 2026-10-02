@@ -60,13 +60,14 @@ export class BulkProductAssembler {
   private readonly byId = new Map<string, BulkProduct>();
   /**
    * @param keep hvilke produkter (indeks) som tas vare på
-   * @param slim behold bare id, handle, tagger og ISBN-feltene (for ONIX-fasen)
+   * @param slim behold bare id, handle, tagger og ISBN-feltene (for ONIX-fasen),
+   *             eller bare feltene i listen (variantene tas alltid med)
    */
   private readonly keep: (index: number) => boolean;
-  private readonly slim: boolean;
-  constructor(keep: (index: number) => boolean = () => true, slim = false) {
+  private readonly slim: readonly string[] | null;
+  constructor(keep: (index: number) => boolean = () => true, slim: boolean | readonly string[] = false) {
     this.keep = keep;
-    this.slim = slim;
+    this.slim = slim === true ? ["id", "handle", "tags", "bokIsbn"] : slim === false ? null : slim;
   }
 
   add(line: string): void {
@@ -78,7 +79,7 @@ export class BulkProductAssembler {
       const index = this.count++;
       if (!this.keep(index)) return;
       delete o.__typename;
-      const base = this.slim ? { id: o.id, handle: o.handle, tags: o.tags, bokIsbn: o.bokIsbn } : o;
+      const base = this.slim ? Object.fromEntries(this.slim.map((k) => [k, o[k]])) : o;
       const p = { ...base, media: { nodes: [] }, variants: { nodes: [] } } as BulkProduct;
       this.products.push(p);
       this.byId.set(p.id, p);
@@ -130,7 +131,7 @@ export interface BulkLineResult {
  * Resultatfila fra en bulk-mutasjon: én linje per inndatalinje (__lineNumber, fra 0).
  * Linjer som mangler i fila (f.eks. ved partialDataUrl) regnes som feil av kalleren.
  */
-export function parseBulkResult(text: string, field: "productUpdate" | "fileUpdate"): BulkLineResult[] {
+export function parseBulkResult(text: string, field: string): BulkLineResult[] {
   const out: BulkLineResult[] = [];
   for (const raw of text.split("\n")) {
     const t = raw.trim();
