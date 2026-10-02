@@ -8,3 +8,6 @@ dist/
 # Supabase CLI-lenke (må aldri peke på live-prosjektet)
 supabase/.temp/
 supabase/functions/deno.lock
+
+# Data fra livebutikken (pakke D) – aldri i git
+scripts/data/
