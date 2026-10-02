@@ -71,3 +71,8 @@ test("utgivelsesdato bare som hel dato", () => {
   const plan = planAvailability(product(), availabilityRule("21"), "2026");
   assert.deepEqual(plan.changes, { continuePolicy: true });
 });
+
+test("arkivert: hoppes alltid over, også når regelen sier ARCHIVED eller ACTIVE", () => {
+  assert.equal(availabilitySkip({ status: "ARCHIVED" }), "arkivert");
+  for (const s of ["ACTIVE", "DRAFT", "", null, undefined]) assert.equal(availabilitySkip({ status: s }), null, String(s));
+});

@@ -16,8 +16,8 @@ const CRON_PRESETS = [
 
 // «6 beskyttet, 0 DUPLIKAT, 7 egen tilgjengelighet»: hoppet over fra jobbens sammendrag
 function skippedSummary(job: Job): string {
-  const r = (job.result ?? {}) as { skippedProtected?: number; skippedDuplicate?: number; skippedOwnAvailability?: number };
-  return `${r.skippedProtected ?? 0} beskyttet, ${r.skippedDuplicate ?? 0} DUPLIKAT, ${r.skippedOwnAvailability ?? 0} egen tilgjengelighet`;
+  const r = (job.result ?? {}) as { skippedProtected?: number; skippedDuplicate?: number; skippedOwnAvailability?: number; skippedArchived?: number };
+  return `${r.skippedProtected ?? 0} beskyttet, ${r.skippedDuplicate ?? 0} DUPLIKAT, ${r.skippedOwnAvailability ?? 0} egen tilgjengelighet, ${r.skippedArchived ?? 0} arkivert`;
 }
 
 function formatDuration(start: string, end: string): string {
@@ -246,7 +246,7 @@ export function TilgjengelighetTab() {
         <CardHeader>
           <CardTitle>Tilgjengelighetssjekk</CardTitle>
           <CardDescription>
-            Sjekker tilgjengelighet i Bokbasen og oppdaterer status, bok.tilgjengelighet og bok.utgivelsesdato i Shopify. Kommende og midlertidig utsolgte bøker er aktive og kan kjøpes. Bøker med «Egen tilgjengelighet» krysset av i Shopify beholder status og lagerinnstilling
+            Sjekker tilgjengelighet i Bokbasen og oppdaterer status, bok.tilgjengelighet og bok.utgivelsesdato i Shopify. Kommende og midlertidig utsolgte bøker er aktive og kan kjøpes. Bøker med «Egen tilgjengelighet» krysset av i Shopify beholder status og lagerinnstilling. Arkiverte produkter endres aldri
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
