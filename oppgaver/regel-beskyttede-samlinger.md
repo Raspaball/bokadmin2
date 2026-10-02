@@ -32,3 +32,13 @@ Lag 4–6 testprodukter (med og uten ISBN) med taggene over i ulike skrivemåter
 
 ## Til orientering
 I live styres samlingene «Gaveartikler» (83) og «Lokalhistorie» (63) av slike tagger. Rapporter hvilke av de beskyttede taggene som finnes i live-eksporten, og hvor mange produkter som har dem.
+
+## Tillegg 02.10.2026: manuelle samlinger som er beskyttet
+Den manuelle samlingen **«Wrendale Designs»** i live (57 produkter, «Diverse produkter fra Wrendale Designs by Hannah Dale», 7 kanaler) skal ikke røres under noen omstendigheter, verken samlingen eller produktene i den. Manuelle samlinger følger ikke med i produkteksporten, så tagg-regelen dekker den ikke.
+
+1. **Produktene beskyttes på to måter (begge gjelder):**
+   - **Leverandør:** produkter der `vendor` inneholder «wrendale» (uten hensyn til store og små bokstaver) er beskyttet. I live heter leverandøren «Wrendale Design ltd» (sett 02.10.2026). Kontroller i live-eksporten hvor mange som treffer, og rapporter avvik mot de 57 i samlingen.
+   - **Medlemskap:** produkter i en manuell samling med handle på listen `PROTECTED_COLLECTION_HANDLES` i `_shared/protected.ts` (fast i koden: `wrendale`, bekreftet av Eirik 02.10.2026) er beskyttet. Lista over produkt-ID-er hentes ved start av hver jobb; finnes ikke samlingen, stopper jobben.
+2. **Samlingen selv:** ingen funksjon i Bokadmin (sjangersynk, megameny, strømmer, opprydding) skal endre, sortere, legge til, fjerne eller slette produkter i en beskyttet samling, eller endre selve samlingen. **Unntaket for strømmer gjelder ikke beskyttede samlinger.** Strømmer-siden skal bare vise og endre samlinger Bokadmin selv har laget som strømmer.
+3. **Test i Testbutikk:** lag en manuell samling med samme handle og noen produkter (minst ett med ISBN), og vis at verken samlingen eller produktene endres i generalprøven.
+4. **Avklart av Eirik 02.10.2026:** bare disse tre samlingene skal beskyttes: «Wrendale Designs» (manuell, handle `wrendale`), «Gaveartikler» (smart, regel «Tag er lik gave») og «Lokalhistorie» (smart, taggene lokal, LOKALHISTORIE og tre til). Kontroll: tell produkter med de beskyttede taggene i live-eksporten og sammenlign med 83 og 63. Er tallet for Lokalhistorie lavere enn 63, finnes det en tagg i regelen som ikke er på lista. Stopp da og spør Eirik om de tre siste verdiene.
