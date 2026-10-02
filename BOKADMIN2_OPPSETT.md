@@ -654,3 +654,18 @@ Feil funnet i sjangersynken (arvet fra live, finnes trolig der også):
 3. «Tøm liste» på Import-siden sletter hele `books`, også bokgruppekodene. Med `bokgruppe_cache` mister sjangersynken ikke lenger kodene sine.
 
 Fortsatt ikke testet i 2.0: tilgjengelighetssjekk i oppdateringsmodus, megamenyen (`build-menu`), strømmer (opprette, legge til, fjerne, sortere, slette), planlagte oppgaver via pg_cron, CSV-eksport og øyeblikksbilder av katalogen.
+
+## Pakke F: status (2026-10-02)
+
+Oppgaven: `oppgaver/pakke-f-fullkatalog.md`. Beslutninger fra eier: alle 102 Wrendale-produkter med riktig leverandør er beskyttet; ingen merking legges inn (sperren for beskyttede samlinger holder, strømmene fra gamle Bokadmin vises fortsatt); kart (ProductForm C*) regnes som ikke-bok inntil videre; del 2.5 tas etter testen som egen pakke.
+
+**Gjort**
+- Del 1–3 og 2.4 i kode, committet (`e3fc40d`) og pushet til `main`: logg per produkt (`sync_log.outcome/reason/fields`), livstegn (`jobs.heartbeat_at/last_isbn`), `JobHealth.tsx`, `bok.bokgruppe`, bare bøker (`isBookForm`), lager går foran Bokbasen, beskyttede produkter inkl. Wrendale, duplikater, `scripts/snapshot.mjs` / `snapshot-diff.mjs`. 225 tester grønne.
+- Metafeltdefinisjonen `bok.bokgruppe` er laget i Testbutikk (`node scripts/bokgruppe-definisjon.mjs --create`, festet). På Windows her måtte skriptet kjøres med `NODE_OPTIONS="--dns-result-order=ipv4first --no-network-family-autoselection"` (IPv6 nådde ikke Shopify).
+
+**Gjenstår før importen (ikke gjort, tillatelsen ble avslått i økten)**
+1. Kjør migrasjonen `supabase/migrations/20261002150000_job_log_outcome.sql` i 2.0-prosjektet (`chwpqwblqummlufqdefe`), f.eks. ved å lime inn i SQL Editor. Uten den feiler funksjonene som skriver `outcome/reason/fields`.
+2. Deretter deploy de fem funksjonene (fra prosjektroten, alltid med 2.0-ref): `shopify`, `price-update`, `availability-check`, `book-update`, `sjangre-sync`:
+   `supabase functions deploy <navn> --no-verify-jwt --use-api --project-ref chwpqwblqummlufqdefe`
+
+**Gjenstår av pakken:** del 4–6 (se oppgavefila), og del 2.5 som egen pakke etter testen.
