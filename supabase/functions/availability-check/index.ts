@@ -12,7 +12,8 @@ import { protectedMessage, protectedTag } from "../_shared/protected.ts";
 import { ensureDuplicates } from "../_shared/duplicate-scan.ts";
 import { duplicateMessage } from "../_shared/duplicates.ts";
 import {
-  availabilityDescription, availabilityMetafields, availabilityRule, needsContinuePolicy, type AvailabilityRule,
+  availabilityLogMessage, availabilityMetafields, availabilityRule, EGEN_TILGJENGELIGHET_FIELD, planAvailability,
+  type AvailabilityChanges, type AvailabilityRule,
 } from "../_shared/availability.ts";
 
 const PAGE_SIZE = 250;
@@ -40,6 +41,7 @@ interface ShopifyProduct {
   bokIsbn?: { value: string } | null;
   tilgjengelighet?: { value: string } | null;
   utgivelsesdato?: { value: string } | null;
+  egenTilgjengelighet?: { value: string } | null;
   variants: {
     edges: Array<{
       node: {
@@ -82,6 +84,7 @@ async function fetchShopifyProductsPage(
             ${BOK_ISBN_FIELD}
             tilgjengelighet: metafield(namespace: "bok", key: "tilgjengelighet") { value }
             utgivelsesdato: metafield(namespace: "bok", key: "utgivelsesdato") { value }
+            ${EGEN_TILGJENGELIGHET_FIELD}
             variants(first: 1) {
               edges {
                 node {
@@ -147,35 +150,8 @@ async function fetchBokbasenAvailability(isbn: string, userId: string | null): P
   return { code: extractAvailabilityCode(xml), date: extractPublishingDate(xml) };
 }
 
-interface AvailabilityChanges {
-  status?: { from: string; to: string };
-  tilgjengelighet?: { from: string | null; to: string };
-  utgivelsesdato?: { from: string | null; to: string };
-  /** inventoryPolicy DENY → CONTINUE (sporet lager), slik at boka kan kjøpes uansett lager */
-  continuePolicy?: boolean;
-}
-
-/** Hva som må endres på produktet for å følge regelen. Tomt objekt = ingenting. */
-function availabilityChanges(product: ShopifyProduct, rule: AvailabilityRule, date: string | null): AvailabilityChanges {
-  const changes: AvailabilityChanges = {};
-  if (product.status !== rule.status) changes.status = { from: product.status || "ukjent", to: rule.status };
-  const currentTilg = product.tilgjengelighet?.value ?? null;
-  if (currentTilg !== rule.tilgjengelighet) changes.tilgjengelighet = { from: currentTilg, to: rule.tilgjengelighet };
-  const currentDate = product.utgivelsesdato?.value ?? null;
-  if (date && currentDate !== date) changes.utgivelsesdato = { from: currentDate, to: date };
-  if (needsContinuePolicy(rule, product.variants?.edges?.[0]?.node)) changes.continuePolicy = true;
-  return changes;
-}
-
-/** «status DRAFT → ACTIVE, tilgjengelighet → kommer, utgivelsesdato → 15.11.2026, salg uten lager» */
-function describeChanges(c: AvailabilityChanges): string {
-  const parts: string[] = [];
-  if (c.status) parts.push(`status ${c.status.from} → ${c.status.to}`);
-  if (c.tilgjengelighet) parts.push(`tilgjengelighet ${c.tilgjengelighet.from ?? "mangler"} → ${c.tilgjengelighet.to}`);
-  if (c.utgivelsesdato) parts.push(`utgivelsesdato ${c.utgivelsesdato.from ?? "mangler"} → ${c.utgivelsesdato.to}`);
-  if (c.continuePolicy) parts.push("salg uten lager (inventoryPolicy CONTINUE)");
-  return parts.join(", ");
-}
+// Hva som skal endres (også egen tilgjengelighet): planAvailability() i
+// _shared/availability.ts, felles med push.
 
 /** Gjør endringene i Shopify. Kaster med Shopifys feilmelding hvis noe feiler. */
 async function applyAvailabilityChanges(
@@ -184,6 +160,7 @@ async function applyAvailabilityChanges(
   date: string | null,
   c: AvailabilityChanges,
 ): Promise<void> {
+  // Bare feltene i c skrives: med egen tilgjengelighet er det bare utgivelsesdatoen
   const errs = (list: Array<{ message: string }> | undefined) => (list ?? []).map((e) => e.message).join(", ");
 
   if (c.continuePolicy) {
@@ -209,7 +186,7 @@ async function applyAvailabilityChanges(
           userErrors { field message }
         }
       }`,
-      { metafields: availabilityMetafields(product.id, rule, date) },
+      { metafields: availabilityMetafields(product.id, rule, c.utgivelsesdato ? date : null, !!c.tilgjengelighet) },
     );
     const e = errs(data.metafieldsSet?.userErrors);
     if (e) throw new Error(`metafelt: ${e}`);
@@ -273,6 +250,9 @@ async function processBatch(jobId: string) {
   let skippedProtected = protectedAtStart;
   const duplicateAtStart: number = job.config?.skipped_duplicate || 0;
   let skippedDuplicate = duplicateAtStart;
+  // Egen tilgjengelighet: regelen ville endret status/tilgjengelighet/lager, men det står
+  const ownAtStart: number = job.config?.skipped_own || 0;
+  let skippedOwn = ownAtStart;
 
   try {
     const page = await fetchShopifyProductsPage(userId, cursor);
@@ -298,7 +278,7 @@ async function processBatch(jobId: string) {
           failed,
           skipped,
           current_isbn: null,
-          config: { ...job.config, shopify_cursor: cursor, page_start_index: i, skipped_protected: skippedProtected, skipped_duplicate: skippedDuplicate },
+          config: { ...job.config, shopify_cursor: cursor, page_start_index: i, skipped_protected: skippedProtected, skipped_duplicate: skippedDuplicate, skipped_own: skippedOwn },
         }).eq("id", jobId);
         return;
       }
@@ -358,16 +338,24 @@ async function processBatch(jobId: string) {
 
         const rule = availabilityRule(bokbasenAvailability.code);
         const date = bokbasenAvailability.date;
-        const changes = availabilityChanges(product, rule, date);
+        // Egen tilgjengelighet (bok.egen_tilgjengelighet): status, bok.tilgjengelighet
+        // og inventoryPolicy står; bare utgivelsesdatoen kan endres
+        const plan = planAvailability({ ...product, variant: product.variants?.edges?.[0]?.node }, rule, date);
+        const changes = plan.changes;
+        const held = Object.keys(plan.heldBack).length > 0;
+        if (held) skippedOwn++;
 
         if (Object.keys(changes).length === 0) {
+          if (held) {
+            await supabase.from("sync_log").insert({
+              isbn, title: product.handle, action: "availability_check", status: "info",
+              message: availabilityLogMessage(plan, rule, date, "Ville endret"), shopify_id: product.id, job_id: jobId, user_id: userId,
+            });
+          }
           skipped++;
           processed++;
           continue;
         }
-
-        // «Kommer 15.11.2026: ACTIVE, kan forhåndsbestilles (status DRAFT → ACTIVE, …)»
-        const what = `${availabilityDescription(rule, date)} (${describeChanges(changes)})`;
 
         if (mode === "analyze") {
           await supabase.from("sync_log").insert({
@@ -375,7 +363,8 @@ async function processBatch(jobId: string) {
             title: product.handle,
             action: "availability_check",
             status: "success",
-            message: `Ville endret: ${what}`,
+            // «Ville endret: Kommer 15.11.2026: ACTIVE, kan forhåndsbestilles (status DRAFT → ACTIVE, …)»
+            message: availabilityLogMessage(plan, rule, date, "Ville endret"),
             shopify_id: product.id,
             job_id: jobId,
             user_id: userId,
@@ -389,12 +378,13 @@ async function processBatch(jobId: string) {
             error = e instanceof Error ? e.message : String(e);
           }
 
+          const what = availabilityLogMessage(plan, rule, date, "Endret")!;
           await supabase.from("sync_log").insert({
             isbn,
             title: product.handle,
             action: "availability_update",
             status: error ? "error" : "success",
-            message: error ? `Endring feilet: ${what}. ${error}` : `Endret: ${what}`,
+            message: error ? `Endring feilet: ${what.replace(/^Endret: /, "")}. ${error}` : what,
             shopify_id: product.id,
             job_id: jobId,
             user_id: userId,
@@ -426,11 +416,12 @@ async function processBatch(jobId: string) {
         page_start_index: 0,
         skipped_protected: skippedProtected,
         skipped_duplicate: skippedDuplicate,
+        skipped_own: skippedOwn,
       },
       ...(isComplete ? {
         completed_at: new Date().toISOString(),
         total_items: processed,
-        result: { total: processed, processed, succeeded, failed, skipped, skippedProtected, skippedDuplicate },
+        result: { total: processed, processed, succeeded, failed, skipped, skippedProtected, skippedDuplicate, skippedOwnAvailability: skippedOwn },
       } : {}),
     }).eq("id", jobId);
 
@@ -447,7 +438,7 @@ async function processBatch(jobId: string) {
       succeeded,
       failed,
       skipped,
-      config: { ...job.config, shopify_cursor: cursor, page_start_index: pageStartIndex, skipped_protected: protectedAtStart, skipped_duplicate: duplicateAtStart },
+      config: { ...job.config, shopify_cursor: cursor, page_start_index: pageStartIndex, skipped_protected: protectedAtStart, skipped_duplicate: duplicateAtStart, skipped_own: ownAtStart },
     }).eq("id", jobId);
   }
 }

@@ -9,7 +9,8 @@ import { buildBookHandle, normalizeIsbn } from "../_shared/handle.js";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { extractAvailabilityCode, extractBokgruppekode, extractDescription, extractPublishingDate } from "../_shared/onix.js";
 import {
-  availabilityDescription, availabilityMetafields, availabilityRule, needsContinuePolicy, type AvailabilityRule,
+  availabilityDescription, availabilityMetafields, availabilityRule, EGEN_TILGJENGELIGHET_FIELD, needsContinuePolicy,
+  OWN_AVAILABILITY_MESSAGE, ownAvailability, type AvailabilityRule,
 } from "../_shared/availability.ts";
 import { chooseValidPrice } from "../_shared/price.ts";
 import { csvPriceAndStatus, decidePushPrice, validPrice, type PushPriceDecision } from "../_shared/push-price.ts";
@@ -108,6 +109,7 @@ function bokgruppeTagsForKode(kode: string): string[] {
 const PUSH_PRODUCT_FIELDS = `
   id title handle tags
   ${EGEN_PRIS_FIELD}
+  ${EGEN_TILGJENGELIGHET_FIELD}
   variants(first: 1) { edges { node { id sku price compareAtPrice inventoryPolicy inventoryItem { tracked } } } }
   media(first: 1) { edges { node { id alt ... on MediaImage { image { url } } } } }
   seoTitleMf: metafield(namespace: "global", key: "title_tag") { value }
@@ -136,6 +138,7 @@ const PRODUCTS_BY_ISBN_SEARCH_QUERY = `
         id title handle tags
         ${BOK_ISBN_FIELD}
         ${EGEN_PRIS_FIELD}
+        ${EGEN_TILGJENGELIGHET_FIELD}
         variants(first: 1) { edges { node { id sku price compareAtPrice barcode inventoryPolicy inventoryItem { tracked } } } }
         media(first: 1) { edges { node { id alt ... on MediaImage { image { url } } } } }
         seoTitleMf: metafield(namespace: "global", key: "title_tag") { value }
@@ -545,13 +548,19 @@ async function pushOneBook(
   }
   // null = ukjent (Bokbasen svarte ikke og boka hadde ingen kode)
   const availRule: AvailabilityRule | null = availKnown ? availabilityRule(availCode) : null;
-  const availabilityNote = availRule
+  // Egen tilgjengelighet (bok.egen_tilgjengelighet) på en eksisterende bok: status,
+  // inventoryPolicy og bok.tilgjengelighet står. Alt annet oppdateres som før.
+  const ownAvail = isUpdate && ownAvailability(existing?.egenTilgjengelighet);
+  const availabilityNote = ownAvail
+    ? `${OWN_AVAILABILITY_MESSAGE}${availRule ? ` (regelen: ${availabilityDescription(availRule, pubDate)})` : ""}`
+    : availRule
     ? availabilityDescription(availRule, pubDate)
     : (isUpdate ? "Tilgjengelighet ukjent (Bokbasen svarte ikke): status ikke endret" : "Tilgjengelighet ukjent (Bokbasen svarte ikke): opprettet som utkast");
 
   // Status: ny bok uten godkjent pris → alltid utkast (pakke A2). Ellers etter
-  // regelen. Ukjent tilgjengelighet: eksisterende bok beholder statusen, ny blir utkast.
-  const status = priceDecision.draft ? "DRAFT" : availRule ? availRule.status : (isUpdate ? null : "DRAFT");
+  // regelen. Ukjent tilgjengelighet eller egen tilgjengelighet: eksisterende bok
+  // beholder statusen, ny blir utkast.
+  const status = priceDecision.draft ? "DRAFT" : ownAvail ? null : availRule ? availRule.status : (isUpdate ? null : "DRAFT");
 
   // Beskrivelse: forlagsteksten med avsnitt (<p>), ellers reservebeskrivelse fra
   // feltene (_shared/book-standard.ts). Forlagsteksten fra ONIX går foran boka vi fikk.
@@ -622,7 +631,7 @@ async function pushOneBook(
         // Uten godkjent pris sendes ikke pris: eksisterende pris blir stående
         ...(priceDecision.price !== null ? { price: priceDecision.price } : {}),
         // Kjøpbar uansett lager: sporet lager med DENY får CONTINUE (beholdningen røres ikke)
-        ...(availRule && needsContinuePolicy(availRule, existingVariantNode as Parameters<typeof needsContinuePolicy>[1])
+        ...(availRule && !ownAvail && needsContinuePolicy(availRule, existingVariantNode as Parameters<typeof needsContinuePolicy>[1])
           ? { inventoryPolicy: "CONTINUE" } : {}),
         taxable: false,
       }],
@@ -714,8 +723,10 @@ async function pushOneBook(
     }
   }
 
-  // Step 3c: bok.tilgjengelighet og bok.utgivelsesdato (bare når tilgjengeligheten er kjent)
-  if (availRule) {
+  // Step 3c: bok.tilgjengelighet og bok.utgivelsesdato (bare når tilgjengeligheten er kjent).
+  // Egen tilgjengelighet: bare utgivelsesdatoen.
+  const availFields = availRule ? availabilityMetafields(product.id as string, availRule, pubDate, !ownAvail) : [];
+  if (availFields.length) {
     try {
       const mf = await shopifyGraphQL(`
         mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
@@ -724,7 +735,7 @@ async function pushOneBook(
             userErrors { field message }
           }
         }
-      `, { metafields: availabilityMetafields(product.id as string, availRule, pubDate) });
+      `, { metafields: availFields });
       const errs = mf.data?.metafieldsSet?.userErrors as { message: string }[] | undefined;
       if (errs?.length) warning = [warning, `Tilgjengelighet ble ikke satt: ${errs.map(e => e.message).join(", ")}`].filter(Boolean).join(". ");
     } catch (e) {

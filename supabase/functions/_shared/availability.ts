@@ -98,13 +98,127 @@ export function availabilityDescription(rule: AvailabilityRule, publishingDate?:
 /**
  * metafieldsSet-input for bok.tilgjengelighet og bok.utgivelsesdato.
  * Utgivelsesdatoen tas bare med når den er en hel dato (YYYY-MM-DD).
+ * `withTilgjengelighet: false` (egen tilgjengelighet) gir bare datoen.
  */
-export function availabilityMetafields(ownerId: string, rule: AvailabilityRule, publishingDate?: string | null) {
-  const fields: Array<{ ownerId: string; namespace: string; key: string; type: string; value: string }> = [
-    { ownerId, namespace: "bok", key: "tilgjengelighet", type: "single_line_text_field", value: rule.tilgjengelighet },
-  ];
+export function availabilityMetafields(
+  ownerId: string,
+  rule: AvailabilityRule,
+  publishingDate?: string | null,
+  withTilgjengelighet = true,
+) {
+  const fields: Array<{ ownerId: string; namespace: string; key: string; type: string; value: string }> = [];
+  if (withTilgjengelighet) {
+    fields.push({ ownerId, namespace: "bok", key: "tilgjengelighet", type: "single_line_text_field", value: rule.tilgjengelighet });
+  }
   if (publishingDate && /^\d{4}-\d{2}-\d{2}$/.test(publishingDate)) {
     fields.push({ ownerId, namespace: "bok", key: "utgivelsesdato", type: "date", value: publishingDate });
   }
   return fields;
+}
+
+// ── Egen tilgjengelighet og arkiverte produkter (pakke E del 2 og 3) ─────────
+//
+// bok.egen_tilgjengelighet = true («Egen tilgjengelighet (Bokadmin endrer ikke
+// status)»): butikken styrer selv om boka er synlig og kan kjøpes, f.eks.
+// engelske bøker som har kode 40 i Bokbasen, men kjøpes fra andre leverandører.
+// Tilgjengelighetsjobben og push endrer da ikke status, inventoryPolicy eller
+// bok.tilgjengelighet. Alt annet (også bok.utgivelsesdato) oppdateres som før.
+// Definisjonen lages med scripts/egen-tilgjengelighet-definisjon.mjs.
+//
+// Arkiverte produkter (ARCHIVED) endres aldri av tilgjengelighetsjobben.
+
+/** GraphQL-felt på produktet */
+export const EGEN_TILGJENGELIGHET_FIELD =
+  `egenTilgjengelighet: metafield(namespace: "bok", key: "egen_tilgjengelighet") { value }`;
+
+export const OWN_AVAILABILITY_MESSAGE = "Hoppet over: egen tilgjengelighet";
+export const ARCHIVED_MESSAGE = "Hoppet over: arkivert";
+
+/** Er bok.egen_tilgjengelighet krysset av? Godtar `"true"`, `true` eller `{ value }`. */
+export function ownAvailability(value: unknown): boolean {
+  const v = value && typeof value === "object" && "value" in value ? (value as { value: unknown }).value : value;
+  return v === true || String(v).trim().toLowerCase() === "true";
+}
+
+export interface AvailabilityChanges {
+  status?: { from: string; to: string };
+  tilgjengelighet?: { from: string | null; to: string };
+  utgivelsesdato?: { from: string | null; to: string };
+  /** inventoryPolicy DENY → CONTINUE (sporet lager), slik at boka kan kjøpes uansett lager */
+  continuePolicy?: boolean;
+}
+
+/** Det tilgjengelighetsjobben trenger å vite om produktet i Shopify. */
+export interface AvailabilityProduct {
+  status: string;
+  tilgjengelighet?: { value: string } | null;
+  utgivelsesdato?: { value: string } | null;
+  egenTilgjengelighet?: { value: string } | null;
+  variant?: { inventoryPolicy?: string | null; inventoryItem?: { tracked?: boolean | null } | null } | null;
+}
+
+export interface AvailabilityPlan {
+  /** Det som skal endres (tomt objekt = ingenting) */
+  changes: AvailabilityChanges;
+  /** Egen tilgjengelighet: det regelen ville endret, men som står (tomt = ingenting holdt tilbake) */
+  heldBack: AvailabilityChanges;
+  ownAvailability: boolean;
+}
+
+/** Hoppes produktet helt over? Sjekkes før ONIX hentes. */
+export function availabilitySkip(product: { status?: string | null }): "arkivert" | null {
+  return product.status === "ARCHIVED" ? "arkivert" : null;
+}
+
+/**
+ * Hva som må endres for å følge regelen. Med egen tilgjengelighet flyttes
+ * status, bok.tilgjengelighet og inventoryPolicy til `heldBack`; bare
+ * utgivelsesdatoen endres. Arkiverte produkter: se availabilitySkip.
+ */
+export function planAvailability(product: AvailabilityProduct, rule: AvailabilityRule, date: string | null): AvailabilityPlan {
+  const all: AvailabilityChanges = {};
+  if (product.status !== rule.status) all.status = { from: product.status || "ukjent", to: rule.status };
+  const currentTilg = product.tilgjengelighet?.value ?? null;
+  if (currentTilg !== rule.tilgjengelighet) all.tilgjengelighet = { from: currentTilg, to: rule.tilgjengelighet };
+  const currentDate = product.utgivelsesdato?.value ?? null;
+  if (date && /^\d{4}-\d{2}-\d{2}$/.test(date) && currentDate !== date) all.utgivelsesdato = { from: currentDate, to: date };
+  if (needsContinuePolicy(rule, product.variant)) all.continuePolicy = true;
+
+  const own = ownAvailability(product.egenTilgjengelighet);
+  if (!own) return { changes: all, heldBack: {}, ownAvailability: false };
+  const { utgivelsesdato, ...heldBack } = all;
+  return { changes: utgivelsesdato ? { utgivelsesdato } : {}, heldBack, ownAvailability: true };
+}
+
+/** «status DRAFT → ACTIVE, tilgjengelighet → kommer, utgivelsesdato → 2026-11-15, salg uten lager» */
+export function describeAvailabilityChanges(c: AvailabilityChanges): string {
+  const parts: string[] = [];
+  if (c.status) parts.push(`status ${c.status.from} → ${c.status.to}`);
+  if (c.tilgjengelighet) parts.push(`tilgjengelighet ${c.tilgjengelighet.from ?? "mangler"} → ${c.tilgjengelighet.to}`);
+  if (c.utgivelsesdato) parts.push(`utgivelsesdato ${c.utgivelsesdato.from ?? "mangler"} → ${c.utgivelsesdato.to}`);
+  if (c.continuePolicy) parts.push("salg uten lager (inventoryPolicy CONTINUE)");
+  return parts.join(", ");
+}
+
+/**
+ * Loggteksten for én bok, eller null når ingenting endres eller holdes tilbake.
+ *   «Ville endret: Kommer 15.11.2026: ACTIVE, kan forhåndsbestilles (status DRAFT → ACTIVE)»
+ *   «Hoppet over: egen tilgjengelighet (regelen: Ikke tilgjengelig (kode 40): DRAFT; ville endret status ACTIVE → DRAFT)»
+ *   «Endret: utgivelsesdato … → …. Hoppet over: egen tilgjengelighet (…)»
+ */
+export function availabilityLogMessage(
+  plan: AvailabilityPlan,
+  rule: AvailabilityRule,
+  date: string | null,
+  verb: "Ville endret" | "Endret",
+): string | null {
+  const parts: string[] = [];
+  if (Object.keys(plan.changes).length) {
+    const changed = describeAvailabilityChanges(plan.changes);
+    parts.push(plan.ownAvailability ? `${verb}: ${changed}` : `${verb}: ${availabilityDescription(rule, date)} (${changed})`);
+  }
+  if (Object.keys(plan.heldBack).length) {
+    parts.push(`${OWN_AVAILABILITY_MESSAGE} (regelen: ${availabilityDescription(rule, date)}; ville endret ${describeAvailabilityChanges(plan.heldBack)})`);
+  }
+  return parts.length ? parts.join(". ") : null;
 }
