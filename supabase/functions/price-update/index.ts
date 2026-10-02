@@ -4,6 +4,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
+import { getCaller, scheduledUserId } from "../_shared/auth.ts";
 import { BOKBASEN_ONIX_URL, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { choosePrice, type PriceChoice } from "../_shared/price.ts";
 import { approvalMessage, checkPriceChange, fixMessage } from "../_shared/price-guard.ts";
@@ -56,15 +57,6 @@ interface ShopifyPage {
   endCursor: string | null;
 }
 
-function getUserIdFromJWT(authHeader: string): string | null {
-  try {
-    const token = authHeader.replace("Bearer ", "");
-    const payload = JSON.parse(atob(token.split(".")[1]));
-    return payload.sub ?? null;
-  } catch {
-    return null;
-  }
-}
 
 // userId-parameterne beholdes for jobbenes kallsignatur. Shopify-tilgangen er
 // felles for hele serveren (se _shared/shopify.ts).
@@ -157,14 +149,6 @@ async function getVariantPrice(variantId: string): Promise<{ price: number | nul
   return { price: Number.isFinite(p) ? p : null, lock: priceLock(v.product?.egenPris, v.compareAtPrice), tags: v.product?.tags ?? [] };
 }
 
-function getEmailFromJWT(authHeader: string): string | null {
-  try {
-    const payload = JSON.parse(atob(authHeader.replace("Bearer ", "").split(".")[1]));
-    return payload.email ?? null;
-  } catch {
-    return null;
-  }
-}
 
 async function updateShopifyPrice(
   _userId: string | null,
@@ -477,7 +461,9 @@ serve(async (req) => {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^\/price-update\/?/, "");
     const supabase = getSupabase();
-    const jwtUserId = getUserIdFromJWT(req.headers.get("Authorization") ?? "");
+    // Verifisert bruker (auth.getUser i _shared/auth.ts), aldri lest rett fra tokenet
+    const caller = await getCaller(req);
+    const jwtUserId = caller.userId;
 
     // POST /price-update/approvals/decide  { ids: string[], decision: "approve" | "reject" }
     // Godkjenner (setter ny pris i Shopify) eller avviser ventende prisendringer
@@ -491,7 +477,7 @@ serve(async (req) => {
       const ids: string[] = Array.isArray(body.ids) ? body.ids.filter((x: unknown) => typeof x === "string") : [];
       const decision = body.decision === "approve" ? "approve" : body.decision === "reject" ? "reject" : null;
       if (!ids.length || !decision) return json({ error: "Mangler ids eller decision (approve/reject)" }, 400);
-      const who = getEmailFromJWT(req.headers.get("Authorization") ?? "") ?? jwtUserId;
+      const who = caller.email ?? jwtUserId;
 
       const { data: rows, error } = await supabase.from("price_approvals").select("*").in("id", ids).eq("status", "pending");
       if (error) return json({ error: error.message }, 500);
@@ -542,7 +528,8 @@ serve(async (req) => {
     if (path === "start" && req.method === "POST") {
       // Accept user_id from body when called from pg_cron (anon JWT, no sub claim)
       const body = await req.json().catch(() => ({}));
-      const userId = jwtUserId ?? (body.user_id as string | null | undefined) ?? null;
+      // pg_cron (anon-nøkkel) sender user_id: godtas bare for brukere med aktiv planlagt oppgave
+      const userId = jwtUserId ?? await scheduledUserId(supabase, body.user_id, "price_update");
 
       let existingQuery = supabase
         .from("jobs")

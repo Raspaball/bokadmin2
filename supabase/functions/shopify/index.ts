@@ -3,6 +3,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { ALL_PRODUCT_STATUSES, getShopDomain, shopifyGraphQL } from "../_shared/shopify.ts";
+import { getCaller } from "../_shared/auth.ts";
 import { BOKBASEN_ONIX_URL, type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { buildBookHandle, normalizeIsbn } from "../_shared/handle.js";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
@@ -1382,15 +1383,6 @@ async function buildMegaMenu(
 // ── Credential helpers ────────────────────────────────────────────────────────
 
 // Decode JWT payload without verification (server-side, acceptable)
-function getUserIdFromJWT(authHeader: string): string | null {
-  try {
-    const token = authHeader.replace("Bearer ", "");
-    const payload = JSON.parse(atob(token.split(".")[1]));
-    return payload.sub ?? null;
-  } catch {
-    return null;
-  }
-}
 
 // ── Feed (Manual Collection) management ──────────────────────────────────────
 
@@ -1862,6 +1854,8 @@ async function rollbackHandleJob(jobId: string | null, userId: string | null) {
   const pending = await activeHandleChanges(job.id);
   const started = Date.now();
   let restored = 0, failed = 0, skippedProtected = 0, timedOut = false;
+  // Beskyttede produkter som beholder ny handle (og videresendingen) — kjøringen blir «delvis angret»
+  const protectedKept: Array<{ id: string; title: string; isbn: string; handle: string; oldHandle: string; tag: string }> = [];
   const errors: string[] = [];
   const log: Record<string, unknown>[] = [];
 
@@ -1876,6 +1870,7 @@ async function rollbackHandleJob(jobId: string | null, userId: string | null) {
       // Logges som info, så endringen står som aktiv i sync_log.
       if (protectedTag(cur.data.product.tags)) {
         skippedProtected++;
+        protectedKept.push({ id: c.id, title: c.title, isbn: c.isbn, handle: c.newHandle, oldHandle: c.oldHandle, tag: protectedTag(cur.data.product.tags)! });
         log.push({ isbn: c.isbn, title: c.title, action: HANDLE_LOG_ROLLBACK, status: "info", message: `${c.newHandle}: ${protectedMessage(cur.data.product.tags)}`, shopify_id: c.id, job_id: job.id, user_id: userId });
         continue;
       }
@@ -1901,12 +1896,16 @@ async function rollbackHandleJob(jobId: string | null, userId: string | null) {
   }
   await insertSyncLog(log);
 
-  // Beskyttede produkter blir stående med ny handle; de regnes ikke som gjenstående
+  // Beskyttede produkter blir stående med ny handle; de regnes ikke som gjenstående.
+  // Siste puls ser alle som gjenstår, så protectedKept er da hele listen.
   const remaining = pending.length - restored - skippedProtected;
+  const rollbackStatus = protectedKept.length ? "partial" : "full";
   if (!timedOut && remaining === 0) {
-    await patchHandleJob(job.id, { result: { ...(job.result ?? {}), rolledBackAt: new Date().toISOString() } });
+    await patchHandleJob(job.id, { result: {
+      ...(job.result ?? {}), rolledBackAt: new Date().toISOString(), rollbackStatus, protectedKept,
+    } });
   }
-  return { jobId: job.id, total: pending.length, restored, failed, skippedProtected, remaining, timedOut, errors: errors.slice(0, 20) };
+  return { jobId: job.id, total: pending.length, restored, failed, skippedProtected, protectedKept, rollbackStatus, remaining, timedOut, errors: errors.slice(0, 20) };
 }
 
 // Katalogprodukt til frontend (katalog, katalogsøk). isbn kommer fra extractIsbn —
@@ -1946,7 +1945,8 @@ serve(async (req: Request) => {
     const path = url.pathname.replace(/^\/shopify\/?/, "");
     const body = req.method !== "GET" ? await req.json().catch(() => ({})) : {};
 
-    const userId = getUserIdFromJWT(req.headers.get("Authorization") ?? "");
+    // Verifisert bruker (auth.getUser i _shared/auth.ts), aldri lest rett fra tokenet
+    const userId = (await getCaller(req)).userId;
     const bokbasen = await getBokbasenCredentials(userId);
 
     // POST /shopify/test — verify the server's Shopify connection (Dev Dashboard app,

@@ -17,6 +17,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL, waitForShopifyBudget } from "../_shared/shopify.ts";
+import { getCaller } from "../_shared/auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { getOnixCached } from "../_shared/onix-cache.ts";
 import { protectedMessage, protectedTag } from "../_shared/protected.ts";
@@ -43,13 +44,6 @@ function getSupabase() {
   return createClient(url, key);
 }
 
-function getUserIdFromJWT(authHeader: string): string | null {
-  try {
-    return JSON.parse(atob(authHeader.replace("Bearer ", "").split(".")[1])).sub ?? null;
-  } catch {
-    return null;
-  }
-}
 
 // ── Shopify ─────────────────────────────────────────────────────────────────
 
@@ -260,12 +254,14 @@ serve(async (req) => {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^\/book-update\/?/, "");
     const supabase = getSupabase();
-    const jwtUserId = getUserIdFromJWT(req.headers.get("Authorization") ?? "");
+    // Verifisert bruker (auth.getUser i _shared/auth.ts), aldri lest rett fra tokenet
+    const jwtUserId = (await getCaller(req)).userId;
 
     // POST /start { mode?, isbns? } — uten mode: sjekk
     if (path === "start" && req.method === "POST") {
       const body = await req.json().catch(() => ({}));
-      const userId = jwtUserId ?? (body.user_id as string | null | undefined) ?? null;
+      // Ingen planlagte oppgaver for denne jobben: user_id i body godtas ikke
+      const userId = jwtUserId;
       const mode = body.mode === "update" ? "update" : "analyze";
       const isbns = Array.isArray(body.isbns) ? body.isbns.map(String).filter((s: string) => /^\d{13}$/.test(s)) : null;
 

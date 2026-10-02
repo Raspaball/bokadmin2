@@ -57,6 +57,7 @@ Prøv i så stor grad som mulig å bruke felles datakilder for viktige data som 
 | Bokgruppekode fra ONIX (skjema 37) | `extractBokgruppekode()` i `supabase/functions/_shared/onix.js` | bokbasen, shopify, sjangre-sync |
 | Bokbasen-innlogging (legitimasjon, token-cache, ONIX-URL) | `getBokbasenCredentials()` / `getBokbasenToken()` / `BOKBASEN_ONIX_URL` i `supabase/functions/_shared/bokbasen-auth.ts` | bokbasen, shopify, price-update, availability-check, sjangre-sync |
 | Beskyttede produkter (fast regel 2026-10-02) | `PROTECTED_TAGS` / `isProtected()` / `protectedTag()` i `_shared/protected.ts` (taggene gave, lokal, lokalhistorie, lokallitteratur; hel tagg, uten store/små bokstaver). Ligger fast i koden, ingen innstilling. Se `oppgaver/regel-beskyttede-samlinger.md` | book-update, price-update (jobb + godkjenning), availability-check, sjangre-sync, push/push-bulk, samlingstagging, handle-plan/-tilbakeføring, katalogredigering, CSV-eksport, `planBookUpdate`, `cleanBookTags`, scripts (clean-tags, migrate-handles, isbn-definition). Hver ny skriver til Shopify må hente `tags` og sjekke |
+| Hvem som kaller (brukeridentitet) | `getCaller(req)` i `_shared/auth.ts` (verifiserer tokenet med `auth.getUser`; funksjonene kjører med `--no-verify-jwt`). `scheduledUserId()` godtar `user_id` i body fra pg_cron bare for brukere med aktiv planlagt oppgave av samme type. **Les aldri `sub`/`email` rett fra tokenet** | alle Edge Functions |
 | Formatfilter (ONIX ProductForm) | `FORMAT_OPTIONS` i Import.tsx | Kun Import.tsx — kan flyttes til utils/ hvis det trengs andre steder |
 
 ### Regel for nye datatyper
@@ -119,7 +120,7 @@ Shared code lives in `supabase/functions/_shared/`. The `.js` modules there (`ha
 | `book-update/` | Long-running job «Oppdater eksisterende bøker» (pakke B): applies the book standard (bok.* metafields, productType, category, SEO, cover alt/filename, description, tags) to products that already exist. Never price, status, availability, handle or title. Endpoints: `/start` (`mode: analyze|update`, default analyze; optional `isbns`), `/status/:jobId`, `/cancel/:jobId`, `/resume/:jobId`, `/resume-paused`, `/active`, `/recent` |
 | `sjangre-sync/` | Long-running job: enrich bokgruppekode → tag products → create Smart Collections (and fix titles of existing ones from COLLECTION_NAMES). Endpoints: `/start`, `/resume/:jobId`, `/resume-paused`, `/status/:jobId`, `/analyze`, `/active`, `/recent`, `/catalog-bkg-stats`, `/delete-empty-collections` |
 
-All functions are called via `callEdgeFunction()` in `api.ts`. Passes the user's JWT (not anon key) so Edge Functions can identify the user and look up their Bokbasen credentials from `user_settings`. Falls back to anon key if no session. Shopify is server-wide (see the Shopify access section below).
+All functions are called via `callEdgeFunction()` in `api.ts`. Passes the user's JWT (not anon key) so Edge Functions can identify the user (verified with `getCaller()` in `_shared/auth.ts`) and look up their Bokbasen credentials from `user_settings`. Falls back to anon key if no session. Shopify is server-wide (see the Shopify access section below).
 
 ### Database tables (Supabase PostgreSQL)
 

@@ -322,6 +322,8 @@ async function rollback() {
   const restoredIds = new Set(restored.map((r) => r.id));
   writeFileSync(doneFile, JSON.stringify(all.filter((d) => !restoredIds.has(d.id)), null, 2));
   console.log(`\n✔ ${restored.length} av ${done.length} satt tilbake.\n`);
+  const kept = all.length - done.length;
+  if (kept) console.log(`Delvis angret: ${kept} beskyttede produkter beholder ny handle og videresending (se over). De står igjen i ${doneFile}.\n`);
 }
 
 // ── Start ──────────────────────────────────────────────────────────────────

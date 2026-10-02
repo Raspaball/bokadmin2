@@ -4,6 +4,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
+import { getCaller, scheduledUserId } from "../_shared/auth.ts";
 import { BOKBASEN_ONIX_URL, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { extractAvailabilityCode, extractPublishingDate } from "../_shared/onix.js";
@@ -56,15 +57,6 @@ interface ShopifyPage {
   endCursor: string | null;
 }
 
-function getUserIdFromJWT(authHeader: string): string | null {
-  try {
-    const token = authHeader.replace("Bearer ", "");
-    const payload = JSON.parse(atob(token.split(".")[1]));
-    return payload.sub ?? null;
-  } catch {
-    return null;
-  }
-}
 
 // userId-parameterne beholdes for jobbenes kallsignatur. Shopify-tilgangen er
 // felles for hele serveren (se _shared/shopify.ts).
@@ -451,13 +443,15 @@ serve(async (req) => {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^\/availability-check\/?/, "");
     const supabase = getSupabase();
-    const jwtUserId = getUserIdFromJWT(req.headers.get("Authorization") ?? "");
+    // Verifisert bruker (auth.getUser i _shared/auth.ts), aldri lest rett fra tokenet
+    const jwtUserId = (await getCaller(req)).userId;
 
     // POST /availability-check/start
     if (path === "start" && req.method === "POST") {
       // Accept user_id from body when called from pg_cron (anon JWT, no sub claim)
       const body = await req.json().catch(() => ({}));
-      const userId = jwtUserId ?? (body.user_id as string | null | undefined) ?? null;
+      // pg_cron (anon-nøkkel) sender user_id: godtas bare for brukere med aktiv planlagt oppgave
+      const userId = jwtUserId ?? await scheduledUserId(supabase, body.user_id, "availability_check");
       const mode = body.mode || "analyze";
 
       let existingQuery = supabase

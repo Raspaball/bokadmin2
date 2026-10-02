@@ -4,6 +4,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
+import { getCaller } from "../_shared/auth.ts";
 import { BOKBASEN_ONIX_URL, clearBokbasenToken, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
 import { extractBokgruppekode } from "../_shared/onix.js";
@@ -28,15 +29,6 @@ function getSupabase() {
   return createClient(url, key);
 }
 
-function getUserIdFromJWT(authHeader: string): string | null {
-  try {
-    const token = authHeader.replace("Bearer ", "");
-    const payload = JSON.parse(atob(token.split(".")[1]));
-    return payload.sub ?? null;
-  } catch {
-    return null;
-  }
-}
 
 function bokgruppeTagsForKode(kode: string): string[] {
   const tags: string[] = [];
@@ -450,7 +442,8 @@ serve(async (req) => {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^\/sjangre-sync\/?/, "");
     const supabase = getSupabase();
-    const userId = getUserIdFromJWT(req.headers.get("Authorization") ?? "");
+    // Verifisert bruker (auth.getUser i _shared/auth.ts), aldri lest rett fra tokenet
+    const userId = (await getCaller(req)).userId;
 
     // ── Sjangre sync ──────────────────────────────────────────────────────────
 

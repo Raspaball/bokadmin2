@@ -8,7 +8,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Loader2, Search, Link2, ShieldCheck, ShieldAlert, Undo2, CheckCircle2, AlertCircle, FileText } from 'lucide-react';
 import {
   handles, syncLog, isBlockingHandleFlag,
-  type HandleAnalyzeResult, type HandleJob, type HandleVerifyResult, type SyncLogEntry,
+  type HandleAnalyzeResult, type HandleJob, type HandleVerifyResult, type SyncLogEntry, type HandleProtectedKept,
 } from '../utils/api';
 import { toast } from 'sonner';
 
@@ -27,7 +27,7 @@ export function Handles() {
   const [starting, setStarting] = useState(false);
   const [verify, setVerify] = useState<HandleVerifyResult | null>(null);
   const [verifying, setVerifying] = useState(false);
-  const [rollback, setRollback] = useState<{ running: boolean; restored: number; failed: number; total: number; errors: string[] } | null>(null);
+  const [rollback, setRollback] = useState<{ running: boolean; restored: number; failed: number; total: number; errors: string[]; protectedKept?: HandleProtectedKept[] } | null>(null);
   const [logEntries, setLogEntries] = useState<SyncLogEntry[] | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -136,11 +136,11 @@ export function Handles() {
         if (!jobId) total = r.total; // første puls ser alle som gjenstår
         jobId = r.jobId;
         restored += r.restored;
-        setRollback({ running: r.timedOut, restored, failed: r.failed, total, errors: r.errors });
+        setRollback({ running: r.timedOut, restored, failed: r.failed, total, errors: r.errors, protectedKept: r.protectedKept });
         if (!r.timedOut) {
           if (r.failed) toast.error(`${r.failed} kunne ikke settes tilbake`);
           else toast.success(`${restored} handles satt tilbake`);
-          if (r.skippedProtected) toast.info(`${r.skippedProtected} beskyttede produkter (gave/lokal) er ikke rørt`);
+          if (r.protectedKept?.length) toast.warning(`Delvis angret: ${r.protectedKept.length} beskyttede produkter (gave/lokal) beholder ny handle`);
           break;
         }
       }
@@ -168,7 +168,9 @@ export function Handles() {
   }, [analysis, onlyFlagged]);
 
   const isTestStore = shop?.shopDomain === 'testbutikk-9434.myshopify.com';
-  const jobResult = job?.result as { changed?: number; errors?: number; mismatched?: unknown[]; rolledBackAt?: string } | undefined;
+  const jobResult = job?.result as { changed?: number; errors?: number; mismatched?: unknown[]; rolledBackAt?: string; rollbackStatus?: 'full' | 'partial'; protectedKept?: HandleProtectedKept[] } | undefined;
+  // Beskyttede som beholdt ny handle ved angring (fra siste angring, ellers fra jobben)
+  const protectedKept = rollback?.protectedKept?.length ? rollback.protectedKept : jobResult?.protectedKept ?? [];
 
   return (
     <div className="space-y-6">
@@ -258,7 +260,7 @@ export function Handles() {
                       Siste kjøring: {job.status === 'completed' ? `${job.succeeded} endret` : 'feilet'}
                       {job.failed > 0 && `, ${job.failed} feilet`}
                       {job.skipped > 0 && `, ${job.skipped} hoppet over`}
-                      {jobResult?.rolledBackAt && ' — angret'}
+                      {jobResult?.rolledBackAt && (jobResult.rollbackStatus === 'partial' ? ' — delvis angret' : ' — angret')}
                     </p>
                     <p className="text-xs text-gray-500">
                       {new Date(job.created_at).toLocaleString('nb-NO')}
@@ -296,6 +298,16 @@ export function Handles() {
                 Angre: {rollback.restored} av {rollback.total} satt tilbake{rollback.failed > 0 && `, ${rollback.failed} feilet`}
               </p>
               {rollback.errors.map(err => <p key={err} className="text-xs text-red-600 font-mono break-all">{err}</p>)}
+            </div>
+          )}
+
+          {protectedKept.length > 0 && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm space-y-1">
+              <p className="font-medium">Delvis angret: {protectedKept.length} beskyttede produkter beholder ny handle og videresending</p>
+              <p className="text-xs text-gray-600">De har taggen gave, lokal, lokalhistorie eller lokallitteratur, og Bokadmin endrer dem ikke. Sett handlen tilbake i Shopify admin om det trengs.</p>
+              {protectedKept.map(p => (
+                <p key={p.id} className="text-xs font-mono break-all">{p.title} (tagg: {p.tag}): /products/{p.handle} ← /products/{p.oldHandle}</p>
+              ))}
             </div>
           )}
 

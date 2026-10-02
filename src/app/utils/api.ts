@@ -1054,6 +1054,10 @@ export interface HandleVerifyResult {
   }>;
 }
 
+export interface HandleProtectedKept {
+  id: string; title: string; isbn: string; handle: string; oldHandle: string; tag: string;
+}
+
 export interface HandleRollbackResult {
   jobId: string;
   total: number;
@@ -1061,6 +1065,9 @@ export interface HandleRollbackResult {
   failed: number;
   /** Beskyttet (tagg gave/lokal/…): handle og videresending røres ikke */
   skippedProtected?: number;
+  /** Beskyttede produkter som beholdt ny handle: kjøringen er da «delvis angret» */
+  protectedKept?: HandleProtectedKept[];
+  rollbackStatus?: "full" | "partial";
   remaining: number;
   timedOut: boolean;
   errors: string[];

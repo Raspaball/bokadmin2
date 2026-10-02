@@ -3,6 +3,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
+import { getCaller } from "../_shared/auth.ts";
 import {
   extractAvailabilityCode, extractBokgruppekode, extractContributors, extractDescription, extractProductForm,
   extractPublishingDate, extractTitle, onixText,
@@ -17,15 +18,6 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-function getUserIdFromJWT(authHeader: string): string | null {
-  try {
-    const token = authHeader.replace("Bearer ", "");
-    const payload = JSON.parse(atob(token.split(".")[1]));
-    return payload.sub ?? null;
-  } catch {
-    return null;
-  }
-}
 
 // ── ONIX XML parser ──────────────────────────────────────────────────────────
 
@@ -523,7 +515,8 @@ serve(async (req) => {
   try {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^\/bokbasen\/?/, "");
-    const userId = getUserIdFromJWT(req.headers.get("Authorization") ?? "");
+    // Verifisert bruker (auth.getUser i _shared/auth.ts), aldri lest rett fra tokenet
+    const userId = (await getCaller(req)).userId;
     const credentials = await getBokbasenCredentials(userId);
 
     // /bokbasen/isbn/9788202693985  (add ?raw=true to get raw ONIX XML)
