@@ -7,6 +7,7 @@
 // Endrer aldri pris, status, tilgjengelighet, handle eller produkttittel.
 
 import { extractDescription, extractInvertedNames, extractPublisher, extractTitle } from "./onix.js";
+import { shownFormat } from "./book-format.ts";
 import { bookDescription, bookFieldsFromOnix, bookMetafields, canReplaceDescription, sameMetafieldValue } from "./book-standard.ts";
 import { bookSeo, decideSeo, legacySeo, parseSeoAuto, seoMetafields } from "./book-seo.ts";
 import { coverAlt, coverChanges, coverFilename, fileNameFromUrl, type CoverChange } from "./book-cover.ts";
@@ -129,6 +130,11 @@ export function planBookUpdate(product: ShopifyBookProduct, xml: string): BookUp
     metafieldDeletes.push({ ownerId: product.id, namespace: "bok", key: "forfatter" });
     changes.push({ field: "bok.forfatter", from: short(currentForfatter.join(", ")), to: "(fjernet: institusjon)" });
   }
+  if (!shownFormat(f.format) && (product.mf_format as { value?: string } | null | undefined)?.value === "Annet") {
+    metafieldDeletes.push({ ownerId: product.id, namespace: "bok", key: "format" });
+    changes.push({ field: "bok.format", from: "Annet", to: "(fjernet)" });
+  }
+
   // SEO (del 4). Manuelle endringer står.
   const description = extractDescription(xml);
   const wantedSeo = bookSeo({ title, authors: f.authors, format: f.format, year: f.year, description });

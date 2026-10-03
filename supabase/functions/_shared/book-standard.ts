@@ -11,7 +11,7 @@ import {
   extractAudienceAge, extractBokgruppekode, extractContributors, extractLanguage, extractPages, extractProductForm,
   extractPublicationYear, extractSeries, extractThema,
 } from "./onix.js";
-import { bookFormat, type BookFormat, type BookProductType } from "./book-format.ts";
+import { bookFormat, shownFormat, type BookFormat, type BookProductType } from "./book-format.ts";
 import { BOKGRUPPE_METAFIELD } from "./bokgruppe.ts";
 import { personAuthors } from "./contributors.js";
 
@@ -75,7 +75,7 @@ export function bookMetafields(f: BookFields): BookMetafield[] {
   };
   const people = personAuthors(f.authors);
   add("forfatter", "list.single_line_text_field", people.length ? JSON.stringify(people) : null);
-  add("format", "single_line_text_field", f.format);
+  add("format", "single_line_text_field", shownFormat(f.format));
   add("sider", "number_integer", f.pages !== null ? String(f.pages) : null);
   add("utgivelsesaar", "number_integer", f.year !== null ? String(f.year) : null);
   add("spraak", "single_line_text_field", f.language);
@@ -115,7 +115,7 @@ export function fallbackDescription(title: string, f: Pick<BookFields, "authors"
   const author = personAuthors(f.authors)[0];
   const first = author ? `${main} av ${author}.` : `${main}.`;
   const parts: string[] = [];
-  if (f.format && f.format !== "Annet") parts.push(f.format);
+  if (shownFormat(f.format)) parts.push(shownFormat(f.format));
   if (f.pages) parts.push(`${f.pages} sider`);
   const published = [f.year ? `utgitt ${f.year}` : "", publisher?.trim() ? `på ${publisher.trim()}` : ""].filter(Boolean).join(" ");
   if (published) parts.push(published);

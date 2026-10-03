@@ -14,6 +14,7 @@
 // forlagsteksten kuttet på 320 tegn).
 
 import { personAuthors } from "./contributors.js";
+import { shownFormat } from "./book-format.ts";
 import { mainTitle } from "./handle.js";
 
 export const SEO_TITLE_MAX = 60;
@@ -54,7 +55,7 @@ export function cutAtWord(text: string, max: number): string {
 export function seoTitle({ title, authors, format }: SeoInput): string {
   const main = plainOneLine(mainTitle(title)) || plainOneLine(title);
   const author = personAuthors(authors)[0] || "";
-  const fmt = format?.trim() || "";
+  const fmt = shownFormat(format);
   const withFormat = (s: string) => (fmt ? `${s} (${fmt})` : s);
   const byline = author ? ` – ${author}` : "";
 
@@ -84,7 +85,7 @@ function cutText(text: string, max: number): string {
 export function metaDescription({ title, authors, format, year, description }: SeoInput): string {
   const main = plainOneLine(mainTitle(title)) || plainOneLine(title);
   const author = personAuthors(authors)[0] || "";
-  const details = [format?.trim(), year ? String(year) : ""].filter(Boolean).join(", ");
+  const details = [shownFormat(format), year ? String(year) : ""].filter(Boolean).join(", ");
   const prefix = `${main}${author ? ` av ${author}` : ""}${details ? ` (${details})` : ""}.`;
   const body = plainOneLine(description);
   if (prefix.length >= SEO_DESCRIPTION_MAX) return cutText(prefix, SEO_DESCRIPTION_MAX);

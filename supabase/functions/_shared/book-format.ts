@@ -68,6 +68,15 @@ export function bookFormat(form: string | null | undefined, details: readonly st
   return info("Annet", "Bok");
 }
 
+/**
+ * Formatet slik det vises og lagres (bok.format, SEO-tittel, metabeskrivelse):
+ * «Annet» sier ingenting til kunden og tas ikke med (pakke G del 4a). Tom streng = ingen visning.
+ */
+export function shownFormat(format: string | null | undefined): string {
+  const f = String(format ?? "").trim();
+  return f && f !== "Annet" ? f : "";
+}
+
 // ── Bare bøker (pakke F del 2.2) ─────────────────────────────────────────────
 // Bokadmin behandler bare produkter med ISBN, treff i Bokbasen og bokformat:
 // ProductForm B* (trykt bok), A* (lydbok) eller E* (e-bok). Alt annet (kalendere,
