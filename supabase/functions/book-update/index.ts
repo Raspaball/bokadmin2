@@ -14,6 +14,7 @@
 //
 // Deploy: supabase functions deploy book-update --no-verify-jwt --use-api --project-ref chwpqwblqummlufqdefe
 
+import { resumableJobFilter } from "../_shared/job-resume.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL, waitForShopifyBudget } from "../_shared/shopify.ts";
@@ -648,7 +649,7 @@ serve(async (req) => {
     // POST /resume-paused — pg_cron (anon-nøkkel, ingen bruker): gjenoppta EN pauset
     // jobb uansett user_id; processBatch leser user_id fra jobbens egen rad.
     if (path === "resume-paused" && req.method === "POST") {
-      let q = supabase.from("jobs").select("id").eq("type", JOB_TYPE).eq("status", "paused").order("created_at", { ascending: false }).limit(1);
+      let q = supabase.from("jobs").select("id").eq("type", JOB_TYPE).or(resumableJobFilter()).order("created_at", { ascending: false }).limit(1);
       if (userId) q = q.eq("user_id", userId);
       const { data: paused } = await q;
       if (!paused?.length) return json({ status: "no_paused_jobs" });

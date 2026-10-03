@@ -1,6 +1,7 @@
 // supabase/functions/availability-check/index.ts
 // Deploy: supabase functions deploy availability-check --no-verify-jwt
 
+import { resumableJobFilter } from "../_shared/job-resume.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
@@ -838,7 +839,7 @@ serve(async (req) => {
         .from("jobs")
         .select("id")
         .eq("type", "availability_check")
-        .eq("status", "paused")
+        .or(resumableJobFilter())
         .order("created_at", { ascending: false })
         .limit(1);
 
