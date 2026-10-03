@@ -9,11 +9,12 @@
 // (testet i Testbutikk 2026-10-02: samme media-ID, fortsatt koblet til
 // produktet, ny URL). Like filnavn er tillatt.
 
+import { personAuthors } from "./contributors.js";
 import { mainTitle } from "./handle.js";
 
 export function coverAlt(title: string, authors: readonly string[]): string {
   const main = String(mainTitle(title) || title || "").replace(/\s+/g, " ").trim();
-  const author = authors[0]?.trim();
+  const author = personAuthors(authors)[0];
   return author ? `Omslag: ${main} av ${author}` : `Omslag: ${main}`;
 }
 

@@ -13,6 +13,7 @@
 // eller lik den gamle automatikken (title_tag = tittelen, description_tag =
 // forlagsteksten kuttet på 320 tegn).
 
+import { personAuthors } from "./contributors.js";
 import { mainTitle } from "./handle.js";
 
 export const SEO_TITLE_MAX = 60;
@@ -52,7 +53,7 @@ export function cutAtWord(text: string, max: number): string {
 
 export function seoTitle({ title, authors, format }: SeoInput): string {
   const main = plainOneLine(mainTitle(title)) || plainOneLine(title);
-  const author = authors[0]?.trim() || "";
+  const author = personAuthors(authors)[0] || "";
   const fmt = format?.trim() || "";
   const withFormat = (s: string) => (fmt ? `${s} (${fmt})` : s);
   const byline = author ? ` – ${author}` : "";
@@ -82,7 +83,7 @@ function cutText(text: string, max: number): string {
 
 export function metaDescription({ title, authors, format, year, description }: SeoInput): string {
   const main = plainOneLine(mainTitle(title)) || plainOneLine(title);
-  const author = authors[0]?.trim() || "";
+  const author = personAuthors(authors)[0] || "";
   const details = [format?.trim(), year ? String(year) : ""].filter(Boolean).join(", ");
   const prefix = `${main}${author ? ` av ${author}` : ""}${details ? ` (${details})` : ""}.`;
   const body = plainOneLine(description);

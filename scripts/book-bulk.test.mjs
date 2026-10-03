@@ -95,8 +95,8 @@ test("beskyttede produkter gir aldri en linje", () => {
 });
 
 test("ingen endring: ingen linje", () => {
-  assert.equal(bulkUpdateLine({ id: P1, tags: [] }, { product: {}, metafields: [], cover: null, changes: [], notes: [] }), null);
-  assert.equal(bulkCoverLine({ tags: [] }, { product: {}, metafields: [], cover: null, changes: [], notes: [] }), null);
+  assert.equal(bulkUpdateLine({ id: P1, tags: [] }, { product: {}, metafields: [], metafieldDeletes: [], cover: null, changes: [], notes: [] }), null);
+  assert.equal(bulkCoverLine({ tags: [] }, { product: {}, metafields: [], metafieldDeletes: [], cover: null, changes: [], notes: [] }), null);
 });
 
 test("resultatfila: ok, userErrors og GraphQL-feil per linje", () => {

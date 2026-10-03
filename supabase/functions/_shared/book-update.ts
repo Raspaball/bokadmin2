@@ -11,6 +11,7 @@ import { bookDescription, bookFieldsFromOnix, bookMetafields, canReplaceDescript
 import { bookSeo, decideSeo, legacySeo, parseSeoAuto, seoMetafields } from "./book-seo.ts";
 import { coverAlt, coverChanges, coverFilename, fileNameFromUrl, type CoverChange } from "./book-cover.ts";
 import { cleanBookTags } from "./book-tags.ts";
+import { isInstitutionName } from "./contributors.js";
 import { protectedProduct, protectedProductMessage } from "./protected.ts";
 
 /** Metafeltnøklene i bok som jobben setter (aliasene i produktspørringen er mf_<nøkkel>). */
@@ -59,11 +60,25 @@ export interface BookUpdatePlan {
   product: Record<string, unknown>;
   /** Til metafieldsSet (bok.* og SEO) */
   metafields: Array<{ ownerId: string; namespace: string; key: string; type: string; value: string }>;
+  /** Metafelt som skal slettes (metafieldsDelete): verdier ONIX ikke lenger gir, f.eks. «Norge» som forfatter */
+  metafieldDeletes: Array<{ ownerId: string; namespace: string; key: string }>;
   /** Til fileUpdate på omslaget, eller null */
   cover: { mediaId: string; change: CoverChange } | null;
   changes: FieldChange[];
+  /** Bidragsyterne ONIX har som institusjon (ikke forfattere, pakke G del 3): til kontroll-CSV-en */
+  institutions: Array<{ name: string; role: string | null; reason: string }>;
   /** Ting som ikke ble endret med vilje, f.eks. «SEO-tittel endret manuelt, ikke overskrevet» */
   notes: string[];
+}
+
+/** Metafeltverdi for en liste (JSON) → tekster, ellers tom liste. */
+function parseList(value: string | null | undefined): string[] {
+  try {
+    const v = JSON.parse(String(value ?? ""));
+    return Array.isArray(v) ? v.map(String) : [];
+  } catch {
+    return [];
+  }
 }
 
 const short = (s: string | null | undefined, n = 60) => {
@@ -77,7 +92,7 @@ const short = (s: string | null | undefined, n = 60) => {
 export function planBookUpdate(product: ShopifyBookProduct, xml: string): BookUpdatePlan {
   // Beskyttet produkt (tagg, leverandør, samling): ingen endringer, uansett hva ONIX sier (kallerne sjekker også selv)
   if (protectedProduct(product)) {
-    return { product: {}, metafields: [], cover: null, changes: [], notes: [protectedProductMessage(product)] };
+    return { product: {}, metafields: [], metafieldDeletes: [], cover: null, changes: [], institutions: [], notes: [protectedProductMessage(product)] };
   }
   const f = bookFieldsFromOnix(xml);
   const onixTitle = extractTitle(xml);
@@ -86,6 +101,7 @@ export function planBookUpdate(product: ShopifyBookProduct, xml: string): BookUp
   const notes: string[] = [];
   const productInput: Record<string, unknown> = {};
   const metafields: BookUpdatePlan["metafields"] = [];
+  const metafieldDeletes: BookUpdatePlan["metafieldDeletes"] = [];
 
   // productType og kategori (del 2 og 3)
   if ((product.productType ?? "") !== f.productType) {
@@ -106,6 +122,13 @@ export function planBookUpdate(product: ShopifyBookProduct, xml: string): BookUp
     }
   }
 
+  // Verdier som ikke lenger skal stå (pakke G): bok.forfatter som bare har institusjoner
+  // («Norge») når ONIX ikke har noen person, og bok.format «Annet». Manuelt satte verdier røres ikke.
+  const currentForfatter = parseList((product.mf_forfatter as { value?: string } | null | undefined)?.value);
+  if (!f.authors.length && currentForfatter.length && currentForfatter.every(isInstitutionName)) {
+    metafieldDeletes.push({ ownerId: product.id, namespace: "bok", key: "forfatter" });
+    changes.push({ field: "bok.forfatter", from: short(currentForfatter.join(", ")), to: "(fjernet: institusjon)" });
+  }
   // SEO (del 4). Manuelle endringer står.
   const description = extractDescription(xml);
   const wantedSeo = bookSeo({ title, authors: f.authors, format: f.format, year: f.year, description });
@@ -157,7 +180,7 @@ export function planBookUpdate(product: ShopifyBookProduct, xml: string): BookUp
     changes.push({ field: "tags", from: tags.removed.join(", "), to: "(fjernet)" });
   }
 
-  return { product: productInput, metafields, cover, changes, notes };
+  return { product: productInput, metafields, metafieldDeletes, cover, changes, institutions: f.institutions, notes };
 }
 
 // ── Sammendrag ───────────────────────────────────────────────────────────────
@@ -178,10 +201,14 @@ export interface BookUpdateCounts {
   fields: Record<string, { count: number; examples: string[] }>;
   /** Notater (f.eks. manuelt endret SEO-tittel) med antall */
   notes: Record<string, number>;
+  /** Institusjoner blant bidragsyterne (pakke G del 3): navn → årsak, roller, antall bøker og noen ISBN. CSV: institutionsCsv() */
+  institutions: Record<string, InstitutionCount>;
 }
 
+export interface InstitutionCount { reason: string; roles: string[]; count: number; isbns: string[] }
+
 export function emptyBookUpdateCounts(): BookUpdateCounts {
-  return { changed: 0, unchanged: 0, skippedNoIsbn: 0, skippedNoOnix: 0, skippedNotBook: 0, skippedProtected: 0, skippedDuplicate: 0, errors: 0, fields: {}, notes: {} };
+  return { changed: 0, unchanged: 0, skippedNoIsbn: 0, skippedNoOnix: 0, skippedNotBook: 0, skippedProtected: 0, skippedDuplicate: 0, errors: 0, fields: {}, notes: {}, institutions: {} };
 }
 
 export function loadBookUpdateCounts(v: unknown): BookUpdateCounts {
@@ -193,11 +220,12 @@ export function loadBookUpdateCounts(v: unknown): BookUpdateCounts {
   }
   if (o.fields && typeof o.fields === "object") c.fields = JSON.parse(JSON.stringify(o.fields));
   if (o.notes && typeof o.notes === "object") c.notes = { ...o.notes };
+  if (o.institutions && typeof o.institutions === "object") c.institutions = JSON.parse(JSON.stringify(o.institutions));
   return c;
 }
 
 /** Legger planen for én bok inn i tellingene. */
-export function countPlan(c: BookUpdateCounts, handle: string, plan: BookUpdatePlan): void {
+export function countPlan(c: BookUpdateCounts, handle: string, plan: BookUpdatePlan, isbn?: string | null): void {
   if (plan.changes.length) c.changed++;
   else c.unchanged++;
   for (const ch of plan.changes) {
@@ -206,13 +234,21 @@ export function countPlan(c: BookUpdateCounts, handle: string, plan: BookUpdateP
     if (entry.examples.length < 3) entry.examples.push(`${handle}: ${ch.from || "(tom)"} → ${ch.to}`);
   }
   for (const n of plan.notes) c.notes[n] = (c.notes[n] ?? 0) + 1;
+  for (const inst of plan.institutions) {
+    const e = (c.institutions[inst.name] ??= { reason: inst.reason, roles: [], count: 0, isbns: [] });
+    e.count++;
+    if (inst.role && !e.roles.includes(inst.role)) e.roles.push(inst.role);
+    if (isbn && e.isbns.length < 5 && !e.isbns.includes(isbn)) e.isbns.push(isbn);
+  }
 }
 
 /** «12 endret, 30 uendret, hoppet over 22 (22 uten ISBN, 0 uten ONIX, 0 beskyttet, 0 DUPLIKAT), 0 feil. Felt: productType 12, …» */
 export function summarizeBookUpdate(c: BookUpdateCounts, mode: "analyze" | "update"): string {
   const fields = Object.entries(c.fields).sort((a, b) => b[1].count - a[1].count).map(([k, v]) => `${k} ${v.count}`).join(", ");
   const notes = Object.entries(c.notes).map(([k, v]) => `${k}: ${v}`).join("; ");
+  const inst = Object.values(c.institutions);
+  const instText = inst.length ? `Institusjoner (ikke forfatter): ${inst.length} navn på ${inst.reduce((n, i) => n + i.count, 0)} bøker` : "";
   return `${c.changed} ${mode === "analyze" ? "ville blitt endret" : "endret"}, ${c.unchanged} uendret, ` +
     `hoppet over ${c.skippedNoIsbn + c.skippedNoOnix + c.skippedNotBook + c.skippedProtected + c.skippedDuplicate} (${c.skippedNoIsbn} uten ISBN, ${c.skippedNoOnix} uten ONIX, ${c.skippedNotBook} ikke bok, ${c.skippedProtected} beskyttet, ${c.skippedDuplicate} DUPLIKAT), ${c.errors} feil` +
-    (fields ? `. Felt: ${fields}` : "") + (notes ? `. ${notes}` : "");
+    (fields ? `. Felt: ${fields}` : "") + (notes ? `. ${notes}` : "") + (instText ? `. ${instText}` : "");
 }

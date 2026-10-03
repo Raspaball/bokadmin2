@@ -85,6 +85,22 @@ const METAFIELDS_SET = `
   }
 `;
 
+const METAFIELDS_DELETE = `
+  mutation bookUpdateMetafieldsDelete($metafields: [MetafieldIdentifierInput!]!) {
+    metafieldsDelete(metafields: $metafields) { deletedMetafields { key namespace ownerId } userErrors { field message } }
+  }
+`;
+
+/** Sletter metafelt (pakke G: «Norge» som forfatter, format «Annet»). Kaster med Shopifys melding ved feil. */
+async function deleteMetafields(list: BookUpdatePlan["metafieldDeletes"]): Promise<void> {
+  for (let i = 0; i < list.length; i += 25) {
+    const r = await shopifyGraphQL(METAFIELDS_DELETE, { metafields: list.slice(i, i + 25) });
+    const e = (r.data?.metafieldsDelete?.userErrors ?? []).map((x: { message: string }) => x.message).join(", ");
+    if (e) throw new Error(`metafieldsDelete: ${e}`);
+    await waitForShopifyBudget(r.extensions, 100);
+  }
+}
+
 const FILE_UPDATE = `
   mutation bookUpdateCover($files: [FileUpdateInput!]!) {
     fileUpdate(files: $files) { files { id } userErrors { field message code } }
@@ -123,6 +139,7 @@ async function applyPlan(productId: string, plan: BookUpdatePlan): Promise<void>
     if (e) throw new Error(`metafieldsSet: ${e}`);
     await waitForShopifyBudget(r.extensions, 100);
   }
+  if (plan.metafieldDeletes.length) await deleteMetafields(plan.metafieldDeletes);
   if (plan.cover) {
     const r = await shopifyGraphQL(FILE_UPDATE, { files: [{ id: plan.cover.mediaId, ...plan.cover.change }] });
     const e = errs(r.data?.fileUpdate?.userErrors);
@@ -240,7 +257,7 @@ async function processBatch(jobId: string) {
 
         const plan = planBookUpdate(product, onix.xml);
         if (plan.changes.length && mode === "update") await applyPlan(product.id, plan);
-        countPlan(counts, product.handle, plan);
+        countPlan(counts, product.handle, plan, isbn);
         await log(bookUpdatePlanRow(base, plan, mode === "update" ? "Endret" : "Ville endret"));
       } catch (err) {
         counts.errors++;
@@ -468,7 +485,7 @@ async function processBulk(jobId: string) {
             continue;
           }
           const plan = planBookUpdate(product, xml);
-          countPlan(counts, product.handle, plan);
+          countPlan(counts, product.handle, plan, isbn);
           logs.push(bookUpdatePlanRow(base, plan, mode === "update" ? "Sendt i bulk" : "Ville endret"));
           if (!plan.changes.length || mode !== "update") continue;
           const ref = { id: product.id, isbn, handle: product.handle };
@@ -476,6 +493,14 @@ async function processBulk(jobId: string) {
           if (pl) { productLines.push(pl); productRefs.push(ref); }
           const cl = bulkCoverLine(product, plan);
           if (cl) { coverLines.push(cl); coverRefs.push(ref); }
+          // Sletting av metafelt (få, ikke i bulk): egen vanlig mutasjon per bok
+          if (plan.metafieldDeletes.length) {
+            try { await deleteMetafields(plan.metafieldDeletes); } catch (e) {
+              counts.errors++;
+              counts.changed = Math.max(0, counts.changed - 1);
+              logs.push(errorRow(base, `Feil ved sletting av metafelt: ${String(e)}`));
+            }
+          }
         }
         await clearChunkLogs(supabase, jobId, a.products.map((p) => p.id));
         await insertLogs(supabase, logs);

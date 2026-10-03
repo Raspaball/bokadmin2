@@ -16,6 +16,8 @@
 //   - mangler forfatter: <tittel>-<ISBN-13>
 //   - handle lages én gang og endres ikke senere av Bokadmin
 
+import { personAuthors } from "./contributors.js";
+
 export const TITLE_MAX_LENGTH = 60;
 
 const SPECIAL_CHARS = {
@@ -63,7 +65,8 @@ export function mainTitle(title) {
 }
 
 /**
- * Første forfatter som «Fornavn Etternavn».
+ * Første forfatter som «Fornavn Etternavn». Institusjoner («Norge», departementer,
+ * se contributors.js) regnes ikke som forfatter og hoppes over.
  * Godtar enten en liste (fra metafeltet bok.forfatter, allerede «Fornavn Etternavn»)
  * eller dagens productType-format «Etternavn, Fornavn, Etternavn2, Fornavn2».
  * @param {string[] | string | null | undefined} authors
@@ -71,20 +74,20 @@ export function mainTitle(title) {
  */
 export function firstAuthor(authors) {
   if (!authors) return "";
-  if (Array.isArray(authors)) return String(authors[0] ?? "").trim();
+  if (Array.isArray(authors)) return personAuthors(authors)[0] ?? "";
   const text = String(authors).trim();
   if (!text) return "";
   // bok.forfatter kan komme som JSON-streng fra metafeltet
   if (text.startsWith("[")) {
     try {
       const list = JSON.parse(text);
-      if (Array.isArray(list)) return String(list[0] ?? "").trim();
+      if (Array.isArray(list)) return personAuthors(list.map(String))[0] ?? "";
     } catch { /* ikke JSON, fortsett */ }
   }
   const parts = text.split(",").map((p) => p.trim()).filter(Boolean);
-  if (parts.length === 1) return parts[0];
+  if (parts.length === 1) return personAuthors(parts)[0] ?? "";
   // «Etternavn, Fornavn» → «Fornavn Etternavn»
-  return `${parts[1]} ${parts[0]}`.trim();
+  return personAuthors([`${parts[1]} ${parts[0]}`.trim()])[0] ?? "";
 }
 
 /**

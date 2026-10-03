@@ -13,10 +13,14 @@ import {
 } from "./onix.js";
 import { bookFormat, type BookFormat, type BookProductType } from "./book-format.ts";
 import { BOKGRUPPE_METAFIELD } from "./bokgruppe.ts";
+import { personAuthors } from "./contributors.js";
 
 /** Feltene fra ONIX som standarden bygger på. */
 export interface BookFields {
+  /** Bare personer (institusjoner som «Norge» er sortert ut, se contributors.js) */
   authors: string[];
+  /** Institusjonene ONIX har som bidragsytere (ikke forfattere): til kontroll og CSV */
+  institutions: Array<{ name: string; role: string | null; reason: string }>;
   /** A01, ellers rollen til første bidragsyter (f.eks. B01 redaktør) */
   authorRole: string | null;
   format: BookFormat;
@@ -33,11 +37,12 @@ export interface BookFields {
 }
 
 export function bookFieldsFromOnix(xml: string): BookFields {
-  const { authors, role } = extractContributors(xml);
+  const { authors, role, institutions } = extractContributors(xml);
   const { form, details } = extractProductForm(xml);
   const f = bookFormat(form, details);
   return {
     authors,
+    institutions,
     authorRole: role,
     format: f.format,
     productType: f.productType,
@@ -68,7 +73,8 @@ export function bookMetafields(f: BookFields): BookMetafield[] {
   const add = (key: string, type: string, value: string | null | undefined) => {
     if (value !== null && value !== undefined && value !== "") out.push({ namespace: "bok", key, type, value });
   };
-  add("forfatter", "list.single_line_text_field", f.authors.length ? JSON.stringify(f.authors) : null);
+  const people = personAuthors(f.authors);
+  add("forfatter", "list.single_line_text_field", people.length ? JSON.stringify(people) : null);
   add("format", "single_line_text_field", f.format);
   add("sider", "number_integer", f.pages !== null ? String(f.pages) : null);
   add("utgivelsesaar", "number_integer", f.year !== null ? String(f.year) : null);
@@ -106,7 +112,8 @@ export function descriptionHtml(text: string | null | undefined): string {
  */
 export function fallbackDescription(title: string, f: Pick<BookFields, "authors" | "format" | "pages" | "year">, publisher?: string | null): string {
   const main = String(title.split(":")[0] ?? title).trim();
-  const first = f.authors[0] ? `${main} av ${f.authors[0]}.` : `${main}.`;
+  const author = personAuthors(f.authors)[0];
+  const first = author ? `${main} av ${author}.` : `${main}.`;
   const parts: string[] = [];
   if (f.format && f.format !== "Annet") parts.push(f.format);
   if (f.pages) parts.push(`${f.pages} sider`);

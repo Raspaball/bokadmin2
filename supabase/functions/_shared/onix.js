@@ -10,6 +10,8 @@
 // titler, alle typer), skjema 23 («Publisher's own category code») i ingen.
 // Derfor ingen reserve til 23. 38 er varegrupper (5 sifre), ikke bokgrupper.
 
+import { institutionReason } from "./contributors.js";
+
 export const BOKGRUPPE_SCHEME = "37";
 
 /** Fjerner xmlns-attributter og navneromsprefikser (<onix:Product> → <Product>). */
@@ -201,46 +203,66 @@ export function uninvertName(inverted) {
   return [first, last].filter(Boolean).join(" ");
 }
 
-/** Navnet på én <Contributor>-blokk som «Fornavn Etternavn», eller "". */
-function contributorName(block) {
+/**
+ * Én <Contributor>-blokk: navnet som «Fornavn Etternavn» og om det er en institusjon
+ * (CorporateName uten personnavn, eller kjent institusjonsnavn,
+ * se contributors.js). Tomt navn gir name "".
+ */
+function parseContributor(block) {
   const tag = (t) => decodeXmlText(block.match(new RegExp("<" + t + "(?:\\s[^>]*)?>([\\s\\S]*?)</" + t + ">", "i"))?.[1] ?? "").trim();
+  const nameType = block.match(/<NameType[^>]*>\s*([^<]+?)\s*<\/NameType>/i)?.[1] ?? null;
   const person = tag("PersonName");
-  if (person) return person;
   const inverted = tag("PersonNameInverted");
-  if (inverted) return uninvertName(inverted);
   const before = tag("NamesBeforeKey");
   const key = tag("KeyNames");
-  if (before || key) return [before, key].filter(Boolean).join(" ");
-  return tag("CorporateName");
+  let name = person || (inverted ? uninvertName(inverted) : "") || (before || key ? [before, key].filter(Boolean).join(" ") : "");
+  const corporate = !name;
+  if (corporate) name = tag("CorporateName");
+  return { name, corporate, nameType, reason: name ? institutionReason({ name, corporate }) : null };
 }
 
 /**
- * Forfatterne i rekkefølge (SequenceNumber, ellers rekkefølgen i ONIX), som
- * «Fornavn Etternavn»: PersonName, ellers snudd PersonNameInverted, ellers
- * NamesBeforeKey + KeyNames, ellers CorporateName.
- * Bare rolle A01 (forfatter). Finnes ingen A01, brukes første bidragsyter
- * uansett rolle (f.eks. B01 redaktør), og rollen står i `role`.
- * Hos Bokbasen (103 poster, 2026-10-02) står navnene nesten alltid som
- * PersonNameInverted («Brochmann, Nina»).
+ * Alle bidragsytere i ONIX (personer og institusjoner) i rekkefølge
+ * (SequenceNumber, ellers rekkefølgen i ONIX): { role, name, order, institution }.
+ * `institution` er årsaken («CorporateName» …) eller null for personer.
  * @param {string} xml
- * @returns {{ authors: string[], role: string | null }}
+ * @returns {{ role: string | null, name: string, order: number, institution: string | null }[]}
  */
-export function extractContributors(xml) {
+export function extractAllContributors(xml) {
   const list = [];
   let index = 0;
   for (const m of stripNamespaces(xml).matchAll(/<Contributor(?:\s[^>]*)?>[\s\S]*?<\/Contributor>/gi)) {
     const block = m[0];
     const role = block.match(/<ContributorRole[^>]*>\s*([^<]+?)\s*<\/ContributorRole>/i)?.[1] ?? null;
     const seq = parseInt(block.match(/<SequenceNumber[^>]*>\s*(\d+)\s*<\/SequenceNumber>/i)?.[1] ?? "", 10);
-    const name = contributorName(block);
-    if (name) list.push({ role, name, order: Number.isFinite(seq) ? seq : 100000 + index });
+    const c = parseContributor(block);
+    if (c.name) list.push({ role, name: c.name, order: Number.isFinite(seq) ? seq : 100000 + index, institution: c.reason });
     index++;
   }
   list.sort((a, b) => a.order - b.order);
-  const authors = list.filter((c) => c.role === "A01").map((c) => c.name);
-  if (authors.length) return { authors, role: "A01" };
-  if (list.length) return { authors: [list[0].name], role: list[0].role };
-  return { authors: [], role: null };
+  return list;
+}
+
+/**
+ * Forfatterne i rekkefølge, som «Fornavn Etternavn»: PersonName, ellers snudd
+ * PersonNameInverted, ellers NamesBeforeKey + KeyNames. BARE PERSONER (pakke G del 3):
+ * institusjoner (CorporateName, kjente navn som «Norge») tas ikke med
+ * og returneres i `institutions`. En bok som bare har institusjon, får tom liste.
+ * Bare rolle A01 (forfatter). Finnes ingen A01-person, brukes første person uansett
+ * rolle (f.eks. B01 redaktør), og rollen står i `role`.
+ * Hos Bokbasen (103 poster, 2026-10-02) står navnene nesten alltid som
+ * PersonNameInverted («Brochmann, Nina»).
+ * @param {string} xml
+ * @returns {{ authors: string[], role: string | null, institutions: { name: string, role: string | null, reason: string }[] }}
+ */
+export function extractContributors(xml) {
+  const all = extractAllContributors(xml);
+  const institutions = all.filter((c) => c.institution).map((c) => ({ name: c.name, role: c.role, reason: c.institution }));
+  const people = all.filter((c) => !c.institution);
+  const authors = people.filter((c) => c.role === "A01").map((c) => c.name);
+  if (authors.length) return { authors, role: "A01", institutions };
+  if (people.length) return { authors: [people[0].name], role: people[0].role, institutions };
+  return { authors: [], role: null, institutions };
 }
 
 /**
