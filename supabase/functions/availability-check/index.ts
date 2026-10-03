@@ -183,7 +183,7 @@ async function applyAvailabilityChanges(
   // Bare feltene i c skrives: med egen tilgjengelighet er det bare utgivelsesdatoen
   const errs = (list: Array<{ message: string }> | undefined) => (list ?? []).map((e) => e.message).join(", ");
 
-  if (c.continuePolicy) {
+  if (c.continuePolicy || c.untrack) {
     const variantId = product.variants.edges[0].node.id;
     const { data } = await shopifyGraphQL<{ productVariantsBulkUpdate: { userErrors: Array<{ message: string }> } }>(
       `mutation variantPolicy($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
@@ -192,10 +192,17 @@ async function applyAvailabilityChanges(
           userErrors { field message }
         }
       }`,
-      { productId: product.id, variants: [{ id: variantId, inventoryPolicy: "CONTINUE" }] },
+      {
+        productId: product.id,
+        variants: [{
+          id: variantId,
+          ...(c.continuePolicy ? { inventoryPolicy: "CONTINUE" } : {}),
+          ...(c.untrack ? { inventoryItem: { tracked: false } } : {}),
+        }],
+      },
     );
     const e = errs(data.productVariantsBulkUpdate?.userErrors);
-    if (e) throw new Error(`inventoryPolicy: ${e}`);
+    if (e) throw new Error(`inventoryPolicy/sporing: ${e}`);
   }
 
   if (c.tilgjengelighet || c.utgivelsesdato) {
@@ -474,7 +481,7 @@ async function processBatch(jobId: string) {
 interface AvailabilityCounts {
   changed: number; unchanged: number; errors: number;
   skippedNoIsbn: number; skippedNoOnix: number; skippedProtected: number; skippedDuplicate: number;
-  skippedOwnAvailability: number; skippedArchived: number; skippedNotBook: number; keptInStock: number;
+  skippedOwnAvailability: number; skippedArchived: number; skippedNotBook: number; keptInStock: number; untracked: number;
 }
 
 function loadAvailabilityCounts(raw: unknown): AvailabilityCounts {
@@ -484,7 +491,7 @@ function loadAvailabilityCounts(raw: unknown): AvailabilityCounts {
     changed: n("changed"), unchanged: n("unchanged"), errors: n("errors"), skippedNoIsbn: n("skippedNoIsbn"),
     skippedNoOnix: n("skippedNoOnix"), skippedProtected: n("skippedProtected"), skippedDuplicate: n("skippedDuplicate"),
     skippedOwnAvailability: n("skippedOwnAvailability"), skippedArchived: n("skippedArchived"),
-    skippedNotBook: n("skippedNotBook"), keptInStock: n("keptInStock"),
+    skippedNotBook: n("skippedNotBook"), keptInStock: n("keptInStock"), untracked: n("untracked"),
   };
 }
 
@@ -494,14 +501,14 @@ function summarizeAvailability(c: AvailabilityCounts, mode: "analyze" | "update"
   return `${c.changed} ${mode === "update" ? "endret" : "ville endret"}, ${c.unchanged} uendret, hoppet over ${skipped} ` +
     `(${c.skippedProtected} beskyttet, ${c.skippedArchived} arkivert, ${c.skippedDuplicate} DUPLIKAT, ${c.skippedNoIsbn} uten ISBN, ` +
     `${c.skippedNoOnix} fant ikke boka i Bokbasen, ${c.skippedNotBook} ikke bok), ${c.skippedOwnAvailability} egen tilgjengelighet, ` +
-    `${c.keptInStock} status beholdt (på lager), ${c.errors} feil`;
+    `${c.keptInStock} status beholdt (på lager), ${c.untracked} med sporing av beholdning slått av, ${c.errors} feil`;
 }
 
 /** Feltnavnene i loggen (sync_log.fields) */
 function availabilityFields(c: AvailabilityChanges): string[] {
   return [
     ...(c.status ? ["status"] : []), ...(c.tilgjengelighet ? ["bok.tilgjengelighet"] : []),
-    ...(c.utgivelsesdato ? ["bok.utgivelsesdato"] : []), ...(c.continuePolicy ? ["inventoryPolicy"] : []),
+    ...(c.utgivelsesdato ? ["bok.utgivelsesdato"] : []), ...(c.continuePolicy ? ["inventoryPolicy"] : []), ...(c.untrack ? ["sporing"] : []),
   ];
 }
 
@@ -590,6 +597,7 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
       }
       if (Object.keys(plan.heldBack).length) c.skippedOwnAvailability++;
       if (Object.keys(plan.stockKept).length) c.keptInStock++;
+      if (plan.changes.untrack) c.untracked++;
       logs.push(availabilityPlanRow(base, plan, rule, date, update));
       if (!Object.keys(plan.changes).length) { c.unchanged++; continue; }
       c.changed++;
@@ -619,7 +627,7 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
     }
     return errorRow(
       { isbn: ref.isbn, title: ref.handle, action: "availability_update", shopify_id: ref.id, job_id: ctx.jobId, user_id: ctx.userId },
-      `Feil i bulk (${kind === "variant" ? "salg uten lager" : "status/metafelt"}): ${error}`,
+      `Feil i bulk (${kind === "variant" ? "salg uten lager / sporing" : "status/metafelt"}): ${error}`,
     );
   },
 
@@ -634,7 +642,7 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
       counts: c,
       skippedProtected: c.skippedProtected, skippedDuplicate: c.skippedDuplicate,
       skippedOwnAvailability: c.skippedOwnAvailability, skippedArchived: c.skippedArchived,
-      skippedNotBook: c.skippedNotBook, keptInStock: c.keptInStock,
+      skippedNotBook: c.skippedNotBook, keptInStock: c.keptInStock, untracked: c.untracked,
       statusChanges: ctx.state.extra.statusChanges ?? [], shopDomain: Deno.env.get("SHOPIFY_SHOP_DOMAIN") ?? null,
       summary: `${summarizeAvailability(c, ctx.mode)}. ${summarizeBulkStats(ctx.state.stats)}`,
     };

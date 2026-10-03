@@ -4,7 +4,7 @@
 //   - AVAILABILITY_BULK_QUERY: hele katalogen med bulkOperationRunQuery
 //   - availabilityBulkLines: JSONL-linjer for ett produkt ut fra planen
 //     (planAvailability i availability.ts): productVariantsBulkUpdate for
-//     CONTINUE og productUpdate for status + metafelt
+//     CONTINUE / sporing av og productUpdate for status + metafelt
 // Driveren er runBulkJob() i bulk-job.ts. Beskyttede produkter gir aldri en linje.
 
 import { ALL_PRODUCT_STATUSES } from "./shopify.ts";
@@ -36,8 +36,8 @@ export const AVAILABILITY_BULK_VARIANT_MUTATION = `mutation availabilityBulkVari
 }`;
 
 export interface AvailabilityBulkLines {
-  /** inventoryPolicy CONTINUE (kjøres før produktlinjen, slik at boka er kjøpbar når den blir aktiv) */
-  variant: { productId: string; variants: Array<{ id: string; inventoryPolicy: "CONTINUE" }> } | null;
+  /** inventoryPolicy CONTINUE og/eller sporing av (kjøres før produktlinjen, slik at boka er kjøpbar når den blir aktiv) */
+  variant: { productId: string; variants: Array<{ id: string; inventoryPolicy?: "CONTINUE"; inventoryItem?: { tracked: false } }> } | null;
   /** status og bok.tilgjengelighet / bok.utgivelsesdato i samme productUpdate */
   product: { product: Record<string, unknown> } | null;
 }
@@ -56,8 +56,16 @@ export function availabilityBulkLines(
   if (protectedProduct(product)) return none;
   const c = plan.changes;
   const variantId = product.variants?.nodes?.[0]?.id;
-  const variant = c.continuePolicy && variantId
-    ? { productId: product.id, variants: [{ id: variantId, inventoryPolicy: "CONTINUE" as const }] }
+  // CONTINUE og/eller sporing av i samme variantlinje (pakke G del 2: ingen bok spores)
+  const variant = (c.continuePolicy || c.untrack) && variantId
+    ? {
+      productId: product.id,
+      variants: [{
+        id: variantId,
+        ...(c.continuePolicy ? { inventoryPolicy: "CONTINUE" as const } : {}),
+        ...(c.untrack ? { inventoryItem: { tracked: false as const } } : {}),
+      }],
+    }
     : null;
   const metafields = availabilityMetafields(product.id, rule, c.utgivelsesdato ? date : null, !!c.tilgjengelighet)
     .map(({ ownerId: _o, ...m }) => m);

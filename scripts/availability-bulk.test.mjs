@@ -21,9 +21,10 @@ const lines = (p, code, date = null) => {
   return availabilityBulkLines(p, rule, date, plan);
 };
 
-test("kommer: CONTINUE-linje og productUpdate med status og begge metafelt", () => {
+test("kommer: sporing-av-linje og productUpdate med status og begge metafelt", () => {
   const l = lines(product(), "10", "2026-11-15");
-  assert.deepEqual(l.variant, { productId: "gid://shopify/Product/1", variants: [{ id: "gid://shopify/ProductVariant/9", inventoryPolicy: "CONTINUE" }] });
+  // Sporet lager slås av (pakke G del 2); da trengs ikke CONTINUE
+  assert.deepEqual(l.variant, { productId: "gid://shopify/Product/1", variants: [{ id: "gid://shopify/ProductVariant/9", inventoryItem: { tracked: false } }] });
   assert.deepEqual(l.product, { product: {
     id: "gid://shopify/Product/1", status: "ACTIVE",
     metafields: [
@@ -34,18 +35,19 @@ test("kommer: CONTINUE-linje og productUpdate med status og begge metafelt", () 
 });
 
 test("bare feltene som endres skrives", () => {
-  const p = product({ status: "ACTIVE", tilgjengelighet: { value: "tilgjengelig" }, variants: { nodes: [{ id: "v", inventoryPolicy: "CONTINUE", inventoryItem: { tracked: true } }] } });
+  const p = product({ status: "ACTIVE", tilgjengelighet: { value: "tilgjengelig" }, variants: { nodes: [{ id: "v", inventoryPolicy: "CONTINUE", inventoryItem: { tracked: false } }] } });
   assert.deepEqual(lines(p, "21"), { variant: null, product: null });
   const l = lines({ ...p, utgivelsesdato: { value: "2020-01-01" } }, "21", "2020-02-02");
   assert.deepEqual(l.product.product, { id: p.id, metafields: [{ namespace: "bok", key: "utgivelsesdato", type: "date", value: "2020-02-02" }] });
 });
 
-test("egen tilgjengelighet: ingen status, CONTINUE eller tilgjengelighet i linjene", () => {
+test("egen tilgjengelighet: ingen status, CONTINUE eller tilgjengelighet i linjene (bare sporing av og dato)", () => {
   const p = product({ status: "ACTIVE", egenTilgjengelighet: { value: "true" }, utgivelsesdato: { value: "2020-01-01" } });
   const l = lines(p, "40", "2021-01-01");
-  assert.equal(l.variant, null);
+  assert.deepEqual(l.variant, { productId: p.id, variants: [{ id: "gid://shopify/ProductVariant/9", inventoryItem: { tracked: false } }] });
   assert.deepEqual(l.product.product, { id: p.id, metafields: [{ namespace: "bok", key: "utgivelsesdato", type: "date", value: "2021-01-01" }] });
-  assert.deepEqual(lines({ ...p, utgivelsesdato: { value: "2021-01-01" } }, "40", "2021-01-01"), { variant: null, product: null });
+  const untracked = { nodes: [{ id: "gid://shopify/ProductVariant/9", inventoryPolicy: "DENY", inventoryItem: { tracked: false } }] };
+  assert.deepEqual(lines({ ...p, variants: untracked, utgivelsesdato: { value: "2021-01-01" } }, "40", "2021-01-01"), { variant: null, product: null });
 });
 
 test("beskyttet: aldri linjer", () => {

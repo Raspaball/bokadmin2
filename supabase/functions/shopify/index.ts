@@ -23,6 +23,7 @@ import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
 import { bookDescription, bookFieldsFromOnix, bookMetafields, type BookFields } from "../_shared/book-standard.ts";
 import { CATEGORY_IDS, CATEGORY_NAMES, notBookSkip } from "../_shared/book-format.ts";
 import { bookSeo, decideSeo, legacySeo, parseSeoAuto, seoMetafields } from "../_shared/book-seo.ts";
+import { UNTRACK_VARIANT_FIELDS, effectiveStock, needsUntrack } from "../_shared/inventory-tracking.ts";
 import { coverAlt, coverChanges, coverFilename, type CoverChange } from "../_shared/book-cover.ts";
 import { cleanBookTags } from "../_shared/book-tags.ts";
 import { isProtectedCollection, protectedProduct, protectedProductMessage } from "../_shared/protected.ts";
@@ -555,7 +556,8 @@ async function pushOneBook(
   const ownAvail = isUpdate && ownAvailability(existing?.egenTilgjengelighet);
   // Lagerbeholdning går foran Bokbasen (pakke F del 2.1): en eksisterende bok med
   // lager blir aldri utkast/arkivert av push, og inventoryPolicy endres ikke.
-  const stock = isUpdate ? Number(existing?.totalInventory ?? 0) : 0;
+  // Pakke G del 2: butikken fører ikke lager, så beholdning teller ikke (effectiveStock er alltid 0)
+  const stock = isUpdate ? effectiveStock(existing?.totalInventory as number | null | undefined) : 0;
   const keepForStock = stock > 0 && !!availRule && availRule.status !== "ACTIVE";
   const availabilityNote = ownAvail
     ? `${OWN_AVAILABILITY_MESSAGE}${availRule ? ` (regelen: ${availabilityDescription(availRule, pubDate)})` : ""}`
@@ -639,8 +641,10 @@ async function pushOneBook(
         // Uten godkjent pris sendes ikke pris: eksisterende pris blir stående
         ...(priceDecision.price !== null ? { price: priceDecision.price } : {}),
         // Kjøpbar uansett lager: sporet lager med DENY får CONTINUE (beholdningen røres ikke)
-        ...(availRule && !ownAvail && stock <= 0 && needsContinuePolicy(availRule, existingVariantNode as Parameters<typeof needsContinuePolicy>[1])
+        ...(availRule && !ownAvail && stock <= 0 && !needsUntrack(existingVariantNode as Parameters<typeof needsUntrack>[0]) && needsContinuePolicy(availRule, existingVariantNode as Parameters<typeof needsContinuePolicy>[1])
           ? { inventoryPolicy: "CONTINUE" } : {}),
+        // Ingen bok skal ha «Spor beholdning» på (pakke G del 2): sporet lager på en eksisterende bok slås av
+        ...(needsUntrack(existingVariantNode as Parameters<typeof needsUntrack>[0]) ? UNTRACK_VARIANT_FIELDS : {}),
         taxable: false,
       }],
     });

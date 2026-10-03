@@ -20,6 +20,9 @@
 // inventoryPolicy DENY får CONTINUE (se needsContinuePolicy). Beholdning,
 // sporing og lokasjoner endres ikke.
 //
+// Lagersporing (pakke G del 2): ingen bok skal ha «Spor beholdning» på (inventory-tracking.ts).
+// Jobben slår sporing av (`untrack`), og beholdning går ikke lenger foran Bokbasen.
+//
 // Frontend har en kopi i src/app/utils/availabilityCodes.ts (Vite-koden
 // importerer ikke fra supabase/) — hold dem like.
 
@@ -140,12 +143,16 @@ export function ownAvailability(value: unknown): boolean {
   return v === true || String(v).trim().toLowerCase() === "true";
 }
 
+import { effectiveStock, needsUntrack } from "./inventory-tracking.ts";
+
 export interface AvailabilityChanges {
   status?: { from: string; to: string };
   tilgjengelighet?: { from: string | null; to: string };
   utgivelsesdato?: { from: string | null; to: string };
   /** inventoryPolicy DENY → CONTINUE (sporet lager), slik at boka kan kjøpes uansett lager */
   continuePolicy?: boolean;
+  /** Sporing av beholdning slås av (inventoryItem.tracked → false), pakke G del 2 */
+  untrack?: boolean;
 }
 
 /** Det tilgjengelighetsjobben trenger å vite om produktet i Shopify. */
@@ -205,16 +212,20 @@ export function planAvailability(product: AvailabilityProduct, rule: Availabilit
   if (currentTilg !== rule.tilgjengelighet) all.tilgjengelighet = { from: currentTilg, to: rule.tilgjengelighet };
   const currentDate = product.utgivelsesdato?.value ?? null;
   if (date && /^\d{4}-\d{2}-\d{2}$/.test(date) && currentDate !== date) all.utgivelsesdato = { from: currentDate, to: date };
-  if (needsContinuePolicy(rule, product.variant)) all.continuePolicy = true;
+  // Sporet lager slås av. Da kan boka alltid kjøpes, så CONTINUE trengs ikke
+  const untrack = needsUntrack(product.variant);
+  if (untrack) all.untrack = true;
+  else if (needsContinuePolicy(rule, product.variant)) all.continuePolicy = true;
 
   const own = ownAvailability(product.egenTilgjengelighet);
   if (own) {
-    const { utgivelsesdato, ...heldBack } = all;
-    return { changes: utgivelsesdato ? { utgivelsesdato } : {}, heldBack, ownAvailability: true, stockKept: {}, inStock: 0 };
+    // Sporing av lager er ikke tilgjengelighet: den slås av også her. Status, inventoryPolicy og bok.tilgjengelighet står.
+    const { utgivelsesdato, untrack: _untrack, ...heldBack } = all;
+    return { changes: { ...(utgivelsesdato ? { utgivelsesdato } : {}), ...(untrack ? { untrack: true } : {}) }, heldBack, ownAvailability: true, stockKept: {}, inStock: 0 };
   }
   // Lagerbeholdning går foran Bokbasen: aldri utkast/arkivert og ingen endring av
   // inventoryPolicy når boka har fysisk lager. bok.tilgjengelighet settes som før.
-  const stock = Number(product.totalInventory ?? 0);
+  const stock = effectiveStock(product.totalInventory);
   const stockKept: AvailabilityChanges = {};
   if (stock > 0) {
     if (all.status && all.status.to !== "ACTIVE") { stockKept.status = all.status; delete all.status; }
@@ -236,6 +247,7 @@ export function describeAvailabilityChanges(c: AvailabilityChanges): string {
   if (c.tilgjengelighet) parts.push(`tilgjengelighet ${c.tilgjengelighet.from ?? "mangler"} → ${c.tilgjengelighet.to}`);
   if (c.utgivelsesdato) parts.push(`utgivelsesdato ${c.utgivelsesdato.from ?? "mangler"} → ${c.utgivelsesdato.to}`);
   if (c.continuePolicy) parts.push("salg uten lager (inventoryPolicy CONTINUE)");
+  if (c.untrack) parts.push("sporing av beholdning slås av");
   return parts.join(", ");
 }
 

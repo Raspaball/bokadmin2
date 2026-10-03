@@ -39,30 +39,27 @@ test("notBookSkip: loggtekst for ikke-bøker, null for bøker og uten ONIX", () 
 const deny = { inventoryPolicy: "DENY", inventoryItem: { tracked: true } };
 const product = (over = {}) => ({ status: "ACTIVE", tilgjengelighet: { value: "tilgjengelig" }, variant: deny, ...over });
 
-test("på lager: kode 40 gir ikke utkast, inventoryPolicy står, bok.tilgjengelighet settes", () => {
+// Pakke G del 2: butikken fører ikke lager. Beholdning går ikke lenger foran Bokbasen
+// (STOCK_BEFORE_BOKBASEN = false i inventory-tracking.ts): reglene under gjaldt til pakke F.
+test("på lager: beholdning holder ikke lenger tilbake status (kode 40 → utkast, 43 → arkivert)", () => {
   const rule = availabilityRule("40");
   const plan = planAvailability(product({ totalInventory: 3 }), rule, null);
-  assert.deepEqual(plan.changes, { tilgjengelighet: { from: "tilgjengelig", to: "ikke_tilgjengelig" } });
-  assert.deepEqual(plan.stockKept, { status: { from: "ACTIVE", to: "DRAFT" } });
-  assert.equal(plan.inStock, 3);
-  const msg = availabilityLogMessage(plan, rule, null, "Ville endret");
-  assert.match(msg, /^Ville endret: .*tilgjengelighet tilgjengelig → ikke_tilgjengelig/);
-  assert.match(msg, /Status beholdt: på lager \(3\) \(regelen: Ikke tilgjengelig \(kode 40\): DRAFT; ville endret status ACTIVE → DRAFT\)/);
-  assert.equal(inStockMessage(3), "Status beholdt: på lager (3)");
+  assert.deepEqual(plan.changes.status, { from: "ACTIVE", to: "DRAFT" });
+  assert.deepEqual(plan.stockKept, {});
+  assert.equal(plan.inStock, 0);
+  assert.doesNotMatch(availabilityLogMessage(plan, rule, null, "Ville endret"), /på lager/);
+  const archived = planAvailability(product({ totalInventory: 1 }), availabilityRule("43"), null);
+  assert.deepEqual(archived.changes.status, { from: "ACTIVE", to: "ARCHIVED" });
+  assert.equal(inStockMessage(3), "Status beholdt: på lager (3)"); // teksten finnes fortsatt for den gamle regelen
 });
 
-test("på lager: utgått (43) blir ikke arkivert", () => {
-  const plan = planAvailability(product({ totalInventory: 1 }), availabilityRule("43"), null);
-  assert.equal(plan.changes.status, undefined);
-  assert.deepEqual(plan.stockKept.status, { from: "ACTIVE", to: "ARCHIVED" });
-});
-
-test("på lager: kjøpbar bok får ikke CONTINUE (policy endres ikke), men kan bli aktiv", () => {
+test("på lager: kjøpbar bok blir aktiv, og sporing slås av i stedet for CONTINUE", () => {
   const rule = availabilityRule("21");
   const plan = planAvailability(product({ status: "DRAFT", totalInventory: 5 }), rule, null);
   assert.deepEqual(plan.changes.status, { from: "DRAFT", to: "ACTIVE" });
   assert.equal(plan.changes.continuePolicy, undefined);
-  assert.deepEqual(plan.stockKept, { continuePolicy: true });
+  assert.equal(plan.changes.untrack, true);
+  assert.deepEqual(plan.stockKept, {});
 });
 
 test("uten lager (0, negativ, mangler): regelen gjelder som før", () => {
@@ -74,10 +71,10 @@ test("uten lager (0, negativ, mangler): regelen gjelder som før", () => {
   }
 });
 
-test("egen tilgjengelighet går foran lager: alt holdes tilbake som egen", () => {
+test("egen tilgjengelighet: status holdes tilbake som egen, sporing slås av", () => {
   const plan = planAvailability(product({ totalInventory: 4, egenTilgjengelighet: { value: "true" } }), availabilityRule("40"), null);
   assert.equal(plan.ownAvailability, true);
-  assert.deepEqual(plan.changes, {});
+  assert.deepEqual(plan.changes, { untrack: true });
   assert.deepEqual(plan.stockKept, {});
 });
 
