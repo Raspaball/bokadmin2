@@ -669,3 +669,51 @@ Oppgaven: `oppgaver/pakke-f-fullkatalog.md`. Beslutninger fra eier: alle 102 Wre
    `supabase functions deploy <navn> --no-verify-jwt --use-api --project-ref chwpqwblqummlufqdefe`
 
 **Gjenstår av pakken:** del 4–6 (se oppgavefila), og del 2.5 som egen pakke etter testen.
+
+## Pakke G: metabeskrivelse, lagersporing, institusjoner (2026-10-03)
+
+Alt kjørt mot Testbutikk (snapshot `foer-rettinger`, 9 050 produkter) og Bokbasen, **bare lesing**. Ingenting er endret i Shopify, og ingenting er deployet (se «Status»).
+
+| Del | Commit | Innhold |
+|---|---|---|
+| 3. Institusjoner er ikke forfattere | 53db458 | `_shared/contributors.js` (redigerbar liste), brukt av `extractContributors`, handle, SEO-tittel, metabeskrivelse, alt-tekst og `bok.forfatter`. CSV: `scripts/institusjoner.mjs` |
+| 4a. Format «Annet» | 376f6e6 | `shownFormat()`: ikke i SEO, ikke som `bok.format`; eksisterende «Annet» slettes |
+| 4b. Utgivelsesår | 6f0e6b8 | Året tas fra samme kilde som datoen |
+| 1. Gammel SEO-automatikk | d6a87a3 | `isLegacySeoTitle/Description`, `seo_auto` med bare skrevne felt, dobbeltkodede entiteter, `descriptionWords` |
+| 2. Ingen lagersporing | bdd2bb2 | `_shared/inventory-tracking.ts`; tilgjengelighetsjobben og push slår sporing av |
+| 4c. Feilen i jobb ed219b4f | 71bdfed | Forbigående linjefeil sendes på nytt (`_shared/bulk-retry.ts`) |
+| Verktøy | b29db24 | `scripts/sjekk-lokalt.mjs` (sjekkmodus lokalt mot snapshot) |
+
+### Del 1: metabeskrivelse og SEO-tittel
+- Gammel automatikk som nå regnes som automatisk og overskrives: tittelen eller hovedtittelen (SEO-tittel); «Kjøp {tittel} hos Bø bok og papir» (tittelen må være boka sin), forlagsteksten kuttet på ca. 320 tegn (råtekst 280–340 tegn, starten av forlagsteksten, også med HTML-tagger og avkuttet tagg), hele forlagsteksten, og tom. Sammenligningen er uavhengig av tagger, entiteter og mellomrom (`textFingerprint`). Forlagsteksten er ONIX-teksten og beskrivelsen som står i Shopify (forlaget kan ha rettet ONIX siden).
+- **Feil rettet:** `bokadmin.seo_auto` fikk alltid begge verdiene, også når bare tittelen ble skrevet. Derfor så «Kjøp …» ut som manuell etter første kjøring. Nå lagres bare feltene som ble skrevet (eller som allerede var like).
+- Metabeskrivelsen er høyst 155 tegn, uten HTML, med smakebit (testet på 7 393 beskrivelser: 0 over 155, 0 med HTML).
+- Test på ekte data (ONIX hentet fra Bokbasen): 30 tilfeldige av de 7 505 som ble hoppet over → **30 av 30 overskrives** (4 504 av de 7 505 er «Kjøp …», resten forlagstekst, hel eller kuttet). 8 reelt manuelle (f.eks. «Feil utgivelsesår i kolofonen: 2026», «Intenst og vakkert», «Utgivelsesår ikke oppgitt i publikasjonen», et sitat) → **8 av 8 står**.
+- SEO-tittel (19): 14 er hovedtittelen (gammel automatikk, overskrives), 5 står (reelt manuelle: «Markus Heger», «Ravn-serien», «Edelmot», «Naia Thulin», «Harinder Singh»).
+- Beskrivelse i Shopify (829 «annen tekst enn forlagsteksten»): stikkprøve 300 produkter → 25 avvik (8 %). Årsaker: (a) dobbeltkodede entiteter i ONIX («f&amp;oslash;dsel», «&amp;amp;»), nå dekodet i `onixText`; (b) bare tegnsettingen er ulik (sitattegn, tankestrek), nå regnet som samme tekst (`descriptionWords`); (c) forlaget har endret teksten siden importen (nytt første avsnitt, ny omtale): står fortsatt, kan ikke skilles fra en manuell endring; (d) Bokadmins egen reservetekst. Etter rettelsen: 829 → 660 i sjekkmodus.
+
+### Del 3: institusjoner («Norge»)
+- Rå ONIX for 10 av «Norge»-bøkene (blant dem 9788202913786 Arbeidsmiljøloven): `<ContributorRole>Z03</ContributorRole><NameType>04</NameType>…<CorporateName>Norge</CorporateName>`. Altså **CorporateName**, ikke PersonName. Rollen er Z03, ikke A01; derfor tok den gamle regelen «første bidragsyter» den. (NameType 04 betyr «Real name» og står også på personer, så den brukes ikke.)
+- Regel: en bidragsyter med CorporateName uten personnavn er institusjon, og det samme er navn på listen `INSTITUTION_NAMES` / `INSTITUTION_PATTERNS` (Norge, Norway, Lovdata, departementer, direktorat, kommune …). Bøker som bare har institusjon er «uten forfatter». `bok.forfatter` som bare har institusjoner slettes (`metafieldsDelete`); manuelt satte personer røres ikke.
+- **CSV til kontroll:** `scripts/out/institusjoner-2026-10-03.csv` (`node scripts/institusjoner.mjs` leser den fra en ferdig jobb): 102 navn på 282 bøker. «Norge» 97, Walt Disney Company 42, Nuanxed 6, KODE 5, TISIP 5 …
+- I sjekkmodus: 103 `bok.forfatter` endres, 78 av dem slettes («Norge» o.l.).
+
+### Del 2: lagersporing
+- Policy fast i koden (`TRACK_INVENTORY = false`). Jobben og push slår av `inventoryItem.tracked` (`productVariantsBulkUpdate`, validert mot skjemaet 2026-07). Uten sporing trengs ikke CONTINUE. Gjelder også bøker med egen tilgjengelighet. Beskyttede røres ikke.
+- **Beholdning går ikke lenger foran Bokbasen** (regelen fra pakke F del 2.1 er slått av med `STOCK_BEFORE_BOKBASEN = false`): en bok med lager og kode 40 blir utkast.
+- **Funn:** snapshotet (kl. 04:17) viser at bare **45 av 9 050** varianter har sporing på (35 med CONTINUE, 10 med DENY). 9 005 har den av. Sjekkmodus: 29 av de 45 ville fått sporing av; resten er beskyttede, duplikater, arkiverte eller ikke bøker.
+
+### Del 4
+- **a)** «Annet»: 66 `bok.format` «Annet» slettes, og «Annet» står ikke i SEO-tittel (Loggbok-bøkene, Ayotzinapa).
+- **b)** `bok.utgivelsesaar` kom fra PublishingDate 01 (hos Bokbasen bare årstall) og `bok.utgivelsesdato` fra MarketDate 01 / PublishingDate 11. «Syn og segn. Hefte 2-2023»: 01 = 2022, 11 = 20230525. Nå gir datoen året. I sjekkmodus endres **329** år. Fordeling over alle 7 692 hentede poster med full dato og årstall i rolle 01 (ulikt år: 337, inkludert beskyttede og duplikater): +1 på 167, −1 på 38, ±2 på 32, ±3 eller mer på 100. Eksempler: Mikrovaner 2021 → 2020, Grit 2017 → 2018. Eirik bør se på de ≥ 3 år (dato fra en nyere utgave enn årstallet).
+- **c)** Den ene feilen i jobb ed219b4f: ISBN 9788205572775, `Feil i bulk (status/metafelt): This product is currently being modified. Please try again later.` Bokdata-jobben (df680bbe) oppdaterte det samme produktet samtidig. Forbigående linjefeil sendes nå på nytt, høyst to ganger.
+
+### Sjekkmodus lokalt (nye regler, hele snapshotet, ingenting skrevet)
+- Bokdata: 8 537 ville blitt endret (alle får `bok.bokgruppe` fra pakke F), hoppet over 513 (51 uten ISBN, 197 ikke bok, 158 beskyttet, 107 duplikat). Felt: seoDescription 7 393, bok.utgivelsesaar 329, seoTitle 198, description 120, coverAlt 119, bok.forfatter 103, bok.format 66. Står: 660 beskrivelser, 12 metabeskrivelser, 5 SEO-titler.
+- Tilgjengelighet: 31 ville endret (29 sporing av, 1 ACTIVE → DRAFT), 8 489 uendret. Statusrapport: `scripts/out/statusendringer-lokalt-2026-10-03.csv`.
+
+### Status og det som gjenstår (Eirik)
+- **Migrasjonen `20261002150000_job_log_outcome.sql` (pakke F del 3) er ikke kjørt i 2.0** (tillatelsen ble avslått også i denne økten). Den må kjøres før noen funksjon deployes: koden skriver `sync_log.outcome/reason/fields`.
+- Deretter deploy av `shopify`, `bokbasen`, `book-update` og `availability-check` (`--project-ref chwpqwblqummlufqdefe`), sjekkmodus i Testbutikk med de ekte jobbene, og først etter ja fra Eirik oppdateringsmodus for bokdata og tilgjengelighet.
+- Etter oppdateringen: kontroller 50 tilfeldige bøker i Testbutikk (SEO, `bok.forfatter`, format, sporing av, status) og bekreft at beskyttede produkter har 0 endringer (også `updatedAt`).
+- Prosjektdokumentet `status-generalprove-fullkatalog.md` fantes ikke på disken; det ble ikke lest.
