@@ -4,14 +4,18 @@
 //
 // Tittel:  «{Hovedtittel} – {Forfatter} ({format})», maks ca. 60 tegn. For lang:
 //          dropp formatet; fortsatt for lang: kutt hovedtittelen ved helt ord.
-//          Uten forfatter: «{Hovedtittel} ({format})».
-// Beskrivelse: høyst 155 tegn. «{Hovedtittel} av {Forfatter} ({format}, {år}). »
+//          Uten forfatter: «{Hovedtittel} ({format})». Formatet «Annet» vises ikke
+//          (pakke G del 4a), og institusjoner («Norge») er ikke forfatter (del 3).
+// Beskrivelse: høyst 155 tegn, uten HTML. «{Hovedtittel} av {Forfatter} ({format}, {år}). »
 //          + starten av forlagsteksten, kuttet ved setningsslutt hvis mulig,
 //          ellers ved helt ord med «…». Avsnitt og linjeskift blir mellomrom.
 // Manuelle endringer: det Bokadmin sist genererte lagres i bokadmin.seo_auto
-// (JSON). Et felt oppdateres bare hvis det er tomt, lik forrige genererte verdi,
-// eller lik den gamle automatikken (title_tag = tittelen, description_tag =
-// forlagsteksten kuttet på 320 tegn).
+// (JSON, bare feltene som faktisk ble skrevet). Et felt oppdateres bare hvis det
+// er tomt, lik forrige genererte verdi, eller gammel automatikk (pakke G del 1):
+//   SEO-tittel:  tittelen, eller hovedtittelen (før kolon)
+//   Beskrivelse: «Kjøp {tittel} hos Bø bok og papir» (gammelt skript), forlagsteksten
+//                kuttet på ca. 320 tegn (også med HTML-tagger), eller hele forlagsteksten
+// Alt annet er en manuell endring og står.
 
 import { personAuthors } from "./contributors.js";
 import { shownFormat } from "./book-format.ts";
@@ -97,9 +101,78 @@ export function bookSeo(input: SeoInput): SeoValues {
   return { title: seoTitle(input), description: metaDescription(input) };
 }
 
-/** Det den gamle automatikken skrev (push før pakke B): tittelen og forlagsteksten kuttet på 320 tegn. */
-export function legacySeo(title: string, description: string | null | undefined): SeoValues {
-  return { title: title || "", description: String(description ?? "").replace(/\s+/g, " ").trim().slice(0, 320) };
+/**
+ * Det den gamle automatikken skrev (push før pakke B og eldre skript). `title` og
+ * `description` er den eksakte gamle verdien (tittelen; forlagsteksten kuttet på 320
+ * tegn). `titles` og `texts` brukes til å kjenne igjen de andre variantene.
+ */
+export interface LegacySeo extends SeoValues {
+  /** Titlene automatikken brukte (tittelen og hovedtittelen), uten HTML */
+  titles: string[];
+  /** Forlagsteksten(e) som ble kuttet eller kopiert */
+  texts: string[];
+}
+
+export function legacySeo(title: string, description: string | null | undefined, extraTexts: Array<string | null | undefined> = []): LegacySeo {
+  const titles = [...new Set([plainOneLine(title), plainOneLine(mainTitle(title))].filter(Boolean))];
+  const texts = [description, ...extraTexts].map((t) => String(t ?? "")).filter((t) => t.trim());
+  return {
+    title: title || "",
+    description: String(description ?? "").replace(/\s+/g, " ").trim().slice(0, 320),
+    titles,
+    texts: [...new Set(texts)],
+  };
+}
+
+const norm = (s: string | null | undefined) => String(s ?? "").replace(/\s+/g, " ").trim();
+const sameText = (a: string, b: string) => norm(a).toLocaleLowerCase("nb") === norm(b).toLocaleLowerCase("nb");
+
+/** Teksten uten tagger (også en avkuttet tagg på slutten), entiteter og mellomrom: for å sammenligne uavhengig av formatering. */
+export function textFingerprint(text: string | null | undefined): string {
+  return String(text ?? "")
+    .replace(/<[^>]*$/, "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/\s+/g, "");
+}
+
+/** «Kjøp {tittel} hos Bø bok og papir»: tittelen inni, eller null. */
+export function shopSeoTitle(text: string | null | undefined): string | null {
+  return norm(text).match(/^Kjøp (.+?) hos Bø bok og papir\.?$/i)?.[1] ?? null;
+}
+
+/** Den gamle automatikken skrev tittelen eller hovedtittelen som SEO-tittel (og «Kjøp … hos Bø bok og papir»). */
+export function isLegacySeoTitle(current: string | null | undefined, legacy: SeoValues & Partial<LegacySeo>): boolean {
+  const cur = norm(current);
+  if (!cur) return true;
+  const titles = legacy.titles ?? [legacy.title];
+  if (titles.some((t) => t && sameText(t, cur))) return true;
+  const shop = shopSeoTitle(cur);
+  return shop !== null && titles.some((t) => t && sameText(t, shop));
+}
+
+/**
+ * Den gamle automatikken skrev som metabeskrivelse: «Kjøp {tittel} hos Bø bok og papir»,
+ * forlagsteksten kuttet på ca. 320 tegn (med eller uten HTML), eller hele forlagsteksten.
+ * Alt annet (en annen tekst, en egen setning, et sitat) er manuelt.
+ */
+export function isLegacySeoDescription(current: string | null | undefined, legacy: SeoValues & Partial<LegacySeo>): boolean {
+  const cur = norm(current);
+  if (!cur) return true;
+  const titles = legacy.titles ?? [legacy.title];
+  const shop = shopSeoTitle(cur);
+  if (shop !== null && titles.some((t) => t && sameText(t, shop))) return true;
+  if (cur === norm(legacy.description)) return true;
+  const c = textFingerprint(cur);
+  if (!c) return false;
+  for (const text of legacy.texts ?? [legacy.description]) {
+    const t = textFingerprint(text);
+    if (!t) continue;
+    if (c === t) return true; // hele forlagsteksten, i alle lengder
+    // kuttet på 320 tegn: råteksten (med tagger) er ca. 320 tegn og er starten av forlagsteksten
+    if (cur.length >= 280 && cur.length <= 340 && c.length >= 60 && t.startsWith(c)) return true;
+  }
+  return false;
 }
 
 /** bokadmin.seo_auto (JSON) → verdiene, eller null. */
@@ -119,44 +192,56 @@ export interface SeoDecision {
   description: string | null;
   /** «SEO-tittel endret manuelt, ikke overskrevet» osv. */
   notes: string[];
+  /** Ny verdi for bokadmin.seo_auto (JSON) når noe skrives, ellers null */
+  auto: string | null;
 }
 
 /**
  * metafieldsSet-input for beslutningen: global.title_tag / global.description_tag
- * for feltene som skal skrives, og bokadmin.seo_auto (JSON med det Bokadmin
- * genererte) når noe skrives. Tom liste = ingenting å gjøre.
+ * for feltene som skal skrives, og bokadmin.seo_auto når noe skrives. seo_auto har
+ * bare feltene Bokadmin faktisk har skrevet (eller som allerede var lik det genererte),
+ * slik at en manuelt stående verdi aldri ser ut som «forrige genererte».
+ * Tom liste = ingenting å gjøre.
  */
-export function seoMetafields(ownerId: string, decision: SeoDecision, wanted: SeoValues) {
+export function seoMetafields(ownerId: string, decision: SeoDecision) {
   const out: Array<{ ownerId: string; namespace: string; key: string; type: string; value: string }> = [];
   if (decision.title !== null) out.push({ ownerId, namespace: "global", key: "title_tag", type: "single_line_text_field", value: decision.title });
   if (decision.description !== null) out.push({ ownerId, namespace: "global", key: "description_tag", type: "single_line_text_field", value: decision.description });
-  if (out.length) out.push({ ownerId, namespace: "bokadmin", key: "seo_auto", type: "json", value: JSON.stringify(wanted) });
+  if (out.length && decision.auto) out.push({ ownerId, namespace: "bokadmin", key: "seo_auto", type: "json", value: decision.auto });
   return out;
 }
 
-const norm = (s: string | null | undefined) => String(s ?? "").replace(/\s+/g, " ").trim();
-
 /**
  * Hva som skal skrives, felt for felt. Et felt oppdateres bare hvis det i
- * Shopify er tomt, lik forrige genererte verdi (bokadmin.seo_auto) eller lik
- * den gamle automatikken. Er det allerede lik ønsket verdi, skrives ingenting.
+ * Shopify er tomt, lik forrige genererte verdi (bokadmin.seo_auto) eller gammel
+ * automatikk (isLegacySeoTitle / isLegacySeoDescription). Er det allerede lik
+ * ønsket verdi, skrives ingenting.
  */
 export function decideSeo(
   current: { title?: string | null; description?: string | null },
   wanted: SeoValues,
   previousAuto: Partial<SeoValues> | null,
-  legacy: SeoValues,
+  legacy: SeoValues & Partial<LegacySeo>,
 ): SeoDecision {
   const notes: string[] = [];
+  const auto: Partial<SeoValues> = { ...(previousAuto ?? {}) };
+  let written = false;
   const pick = (field: "title" | "description", label: string): string | null => {
     const cur = norm(current[field]);
-    if (cur === norm(wanted[field])) return null;
-    const ours = !cur || cur === norm(previousAuto?.[field]) || cur === norm(legacy[field]);
-    if (!ours) {
+    if (cur === norm(wanted[field])) {
+      auto[field] = wanted[field];
+      return null;
+    }
+    const old = field === "title" ? isLegacySeoTitle(cur, legacy) : isLegacySeoDescription(cur, legacy);
+    if (!(!cur || cur === norm(previousAuto?.[field]) || old)) {
       notes.push(`${label} endret manuelt, ikke overskrevet`);
       return null;
     }
+    auto[field] = wanted[field];
+    written = true;
     return wanted[field];
   };
-  return { title: pick("title", "SEO-tittel"), description: pick("description", "Metabeskrivelse"), notes };
+  const title = pick("title", "SEO-tittel");
+  const description = pick("description", "Metabeskrivelse");
+  return { title, description, notes, auto: written ? JSON.stringify(auto) : null };
 }

@@ -144,6 +144,11 @@ export function descriptionFingerprint(html: string | null | undefined): string 
     .replace(/\s+/g, "");
 }
 
+/** Bare ordene (bokstaver og tall, små bokstaver): to tekster med samme ord er samme tekst med annen tegnsetting. */
+export function descriptionWords(html: string | null | undefined): string {
+  return descriptionFingerprint(html).toLocaleLowerCase("nb").replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
 /**
  * Kan jobben erstatte beskrivelsen i Shopify? Ja når den er tom, eller når
  * teksten er den samme og bare formateringen er annerledes (avsnitt, linjeskift,
@@ -154,6 +159,8 @@ export function canReplaceDescription(currentHtml: string | null | undefined, wa
   const cur = descriptionFingerprint(currentHtml);
   if (!cur) return true;
   if (cur === descriptionFingerprint(wanted.html)) return true;
+  // Samme ord, annen tegnsetting (typografiske sitattegn, tankestrek): bare formatering
+  if (descriptionWords(currentHtml) === descriptionWords(wanted.html)) return true;
   if (previousFallbackHtml && cur === descriptionFingerprint(previousFallbackHtml)) return true;
   return false;
 }

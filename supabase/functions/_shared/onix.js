@@ -22,6 +22,17 @@ export function stripNamespaces(xml) {
     .replace(/<\/(\w+:)/g, "</");
 }
 
+/** Navngitte HTML-entiteter for bokstaver (store og små bokstaver teller), for dobbeltkodet tekst. */
+const LATIN_ENTITIES = {
+  oslash: "ø", Oslash: "Ø", aring: "å", Aring: "Å", aelig: "æ", AElig: "Æ",
+  eacute: "é", Eacute: "É", egrave: "è", Egrave: "È", ecirc: "ê", euml: "ë",
+  aacute: "á", Aacute: "Á", agrave: "à", acirc: "â", auml: "ä", Auml: "Ä",
+  ouml: "ö", Ouml: "Ö", oacute: "ó", ograve: "ò", ocirc: "ô",
+  uuml: "ü", Uuml: "Ü", uacute: "ú", ugrave: "ù", ucirc: "û",
+  iacute: "í", igrave: "ì", icirc: "î", iuml: "ï", ccedil: "ç", ntilde: "ñ", szlig: "ß",
+  hellip: "…", ndash: "–", mdash: "—", laquo: "«", raquo: "»",
+};
+
 /**
  * Tekst fra et ONIX-felt som ren tekst med avsnitt: CDATA pakkes ut, kodet HTML
  * (&lt;br&gt;) blir tagger, <br> → linjeskift, </p> </li> </div> </hN> → tomt
@@ -76,6 +87,11 @@ export function onixText(value) {
     .replace(/&#([0-9]+);/g, (_, n) => {
       try { return String.fromCodePoint(parseInt(n, 10)); } catch { return ""; }
     });
+  // 6b. Dobbeltkodede entiteter (Bokbasen har f.eks. «f&amp;oslash;dsel» og «&amp;amp;» i noen forlagstekster):
+  //     etter &amp; → & står «&oslash;» igjen. Pakke G del 1: dekodes her, ellers ble teksten vist med «&oslash;».
+  s = s
+    .replace(/&([A-Za-z]+);/g, (m, name) => LATIN_ENTITIES[name] ?? m)
+    .replace(/&amp;/g, "&");
   // 7. Usynlige tegn
   s = s.replace(/­/g, "").replace(/​/g, "").replace(/‌/g, "").replace(/‍/g, "");
   // 8. Skift tilbake, rydd mellomrom

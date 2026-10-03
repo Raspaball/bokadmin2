@@ -675,10 +675,10 @@ async function pushOneBook(
       { title: (existing?.seoTitleMf as { value?: string } | null)?.value, description: (existing?.seoDescMf as { value?: string } | null)?.value },
       wantedSeo,
       parseSeoAuto((existing?.seoAuto as { value?: string } | null)?.value),
-      legacySeo(book.title, book.description),
+      legacySeo(book.title, book.description, [seoText]),
     );
     seoNotes.push(...decision.notes);
-    const seoInput = seoMetafields(product.id as string, decision, wantedSeo);
+    const seoInput = seoMetafields(product.id as string, decision);
     if (seoInput.length) {
       await shopifyGraphQL(`
         mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {

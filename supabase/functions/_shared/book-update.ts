@@ -142,10 +142,11 @@ export function planBookUpdate(product: ShopifyBookProduct, xml: string): BookUp
     { title: product.seoTitleMf?.value, description: product.seoDescMf?.value },
     wantedSeo,
     parseSeoAuto(product.seoAuto?.value),
-    legacySeo(title, description),
+    // Også beskrivelsen som står i Shopify: den gamle automatikken kopierte den, og forlaget kan ha rettet ONIX-teksten siden
+    legacySeo(title, description, [product.descriptionHtml]),
   );
   notes.push(...decision.notes);
-  metafields.push(...seoMetafields(product.id, decision, wantedSeo));
+  metafields.push(...seoMetafields(product.id, decision));
   if (decision.title !== null) changes.push({ field: "seoTitle", from: short(product.seoTitleMf?.value), to: decision.title });
   if (decision.description !== null) changes.push({ field: "seoDescription", from: short(product.seoDescMf?.value), to: short(decision.description) });
 
