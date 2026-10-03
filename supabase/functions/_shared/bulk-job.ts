@@ -17,6 +17,7 @@
 // (ISBN med flere produkter, fra bulk-fila), og jobbens plan hopper over dem
 // og beskyttede produkter før det lages en linje.
 
+import { splitRetries } from "./bulk-retry.ts";
 import { BulkProductAssembler, type BulkProduct, parseBulkResult, toJsonl } from "./book-bulk.ts";
 import { BULK_ACTIVE, fetchBulkText, startBulkMutation, startBulkQuery, streamJsonlLines, waitForBulkOperation } from "./shopify-bulk.ts";
 import { getOnixCached, ONIX_CACHE_MAX_AGE_DAYS } from "./onix-cache.ts";
@@ -42,7 +43,8 @@ export interface BulkOpPlan {
   filename: string;
 }
 
-interface PendingOp { kind: string; mutation: string; field: string; jsonl: string; refs: BulkRef[]; filename: string }
+/** `retry`: antall ganger linjene er sendt på nytt etter en forbigående feil (bulk-retry.ts) */
+interface PendingOp { kind: string; mutation: string; field: string; jsonl: string; refs: BulkRef[]; filename: string; retry?: number }
 
 export interface BulkJobStats {
   onixCalls: number; onixOk: number; onixMissing: number; onixCached: number; onixMs: number;
@@ -317,13 +319,17 @@ export async function runBulkJob<C>(
         const okLines = new Set(results.filter((r) => r.ok).map((r) => r.line));
         const errByLine = new Map(results.filter((r) => !r.ok).map((r) => [r.line, r.error!]));
         const logs: Record<string, unknown>[] = [];
-        next.refs.forEach((ref, line) => {
+        const failed = new Map<number, string>();
+        next.refs.forEach((_ref, line) => {
           if (okLines.has(line)) return;
-          const err = errByLine.get(line) ?? `mangler i resultatet (operasjonen endte med ${op.status}${op.errorCode ? `, ${op.errorCode}` : ""})`;
-          logs.push(spec.onLineError(ctx, next.kind, ref, err));
+          failed.set(line, errByLine.get(line) ?? `mangler i resultatet (operasjonen endte med ${op.status}${op.errorCode ? `, ${op.errorCode}` : ""})`);
         });
+        // Forbigående feil («This product is currently being modified») sendes på nytt i en egen liten operasjon (pakke G del 4c)
+        const { retry, errors } = splitRetries(next, failed);
+        for (const e of errors) logs.push(spec.onLineError(ctx, next.kind, e.ref, e.error));
         await insertLogs(supabase, logs);
         state.pending = state.pending!.slice(1);
+        if (retry) state.pending.unshift({ ...next, ...retry });
         state.opId = undefined;
         state.opStartedAt = undefined;
         await save();
