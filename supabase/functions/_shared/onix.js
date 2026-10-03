@@ -385,12 +385,20 @@ export function extractPages(xml) {
 }
 
 /**
- * Utgivelsesår: PublishingDate rolle 01 (hos Bokbasen bare årstall), ellers
+ * Utgivelsesår (bok.utgivelsesaar) fra SAMME kilde som utgivelsesdatoen
+ * (bok.utgivelsesdato, extractPublishingDate): årstallet i datoen når ONIX har en hel
+ * dato. Ellers PublishingDate rolle 01 (hos Bokbasen bare årstall), ellers
  * PublicationDate (ONIX 2.1). null ellers.
+ *
+ * Pakke G del 4b: før kom året alltid fra PublishingDate 01 og datoen fra MarketDate 01 /
+ * PublishingDate 11, så de kunne vise ulike år (Syn og segn 2-2023: år 2022, dato 2023-05-25;
+ * i ONIX står 2022 i rolle 01 og 20230525 i rolle 11). Nå gir datoen året.
  * @param {string} xml
  * @returns {number | null}
  */
 export function extractPublicationYear(xml) {
+  const date = extractPublishingDate(xml);
+  if (date) return parseInt(date.slice(0, 4), 10);
   const x = stripNamespaces(xml);
   for (const b of blocks(x, "PublishingDate")) {
     if (firstText(b, "PublishingDateRole") !== "01") continue;
