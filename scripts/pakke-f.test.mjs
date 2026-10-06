@@ -132,3 +132,11 @@ test("snapshot-diff: felt for felt, også updatedAt, metafelt og variant", async
   });
   assert.deepEqual(d.map((c) => c.field).sort(), ["mf.bok.bokgruppe", "updatedAt", "variant.price"]);
 });
+
+test("snapshot-diff (pakke H del 4): beskyttede sjekkes på innhold, updatedAt alene teller ikke", async () => {
+  const { diffProduct } = await import("./snapshot-diff.mjs");
+  const p = { id: "gid://shopify/Product/1", handle: "h", title: "T", status: "ACTIVE", tags: ["gave"], updatedAt: "2026-10-01T00:00:00Z", variants: [], metafields: [], media: [] };
+  const later = { ...p, updatedAt: "2026-10-03T12:00:00Z" };
+  assert.deepEqual(diffProduct(p, later, { ignore: ["updatedAt"] }), []);
+  assert.deepEqual(diffProduct(p, { ...later, title: "Ny" }, { ignore: ["updatedAt"] }).map((c) => c.field), ["title"]);
+});

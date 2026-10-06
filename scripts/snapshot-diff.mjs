@@ -7,7 +7,8 @@
 //
 // Resultat i scripts/out/snapshot-diff-<før>-<etter>.json og .csv (én rad per produkt og felt).
 // Gruppene: beskyttet (tagg, leverandør Wrendale eller samling wrendale i før-bildet),
-// uten ISBN, og med ISBN. Forventet: 0 endringer i de to første (også updatedAt).
+// uten ISBN, og med ISBN. Forventet: 0 endringer i de to første. Beskyttede sjekkes på innhold:
+// updatedAt alene teller ikke (pakke H del 4), men telles for seg.
 // Ikke-bøker med ISBN skilles ut med --ikke-boker <fil> (én ISBN per linje, f.eks. fra
 // jobbloggens CSV med årsak «ikke bok»).
 
@@ -70,11 +71,16 @@ export function flatten(p) {
   return f;
 }
 
-export function diffProduct(a, b) {
+/**
+ * Felt for felt. `ignore`: felt som ikke teller (pakke H del 4: beskyttede produkter sjekkes på innhold,
+ * ikke updatedAt. Shopify rører updatedAt selv, f.eks. 12 timer etter en CSV-import).
+ */
+export function diffProduct(a, b, { ignore = [] } = {}) {
   const fa = flatten(a), fb = flatten(b);
   const keys = new Set([...Object.keys(fa), ...Object.keys(fb)]);
   const out = [];
   for (const k of keys) {
+    if (ignore.includes(k)) continue;
     const x = fa[k] ?? null, y = fb[k] ?? null;
     if (String(x) !== String(y)) out.push({ field: k, before: x, after: y });
   }
@@ -108,7 +114,9 @@ if (isMain) {
     groups[g].produkter++;
     const b = after.products.get(id);
     if (!b) { groups[g].borte++; rows.push([g, isbnOf(a) ?? "", a.handle, "(produktet er borte)", "", ""]); continue; }
-    const d = diffProduct(a, b);
+    // Beskyttede: innholdet teller, ikke updatedAt (egen telling under)
+    const d = diffProduct(a, b, g === "beskyttet" ? { ignore: ["updatedAt"] } : {});
+    if (g === "beskyttet" && !d.length && a.updatedAt !== b.updatedAt) groups[g].bareUpdatedAt = (groups[g].bareUpdatedAt ?? 0) + 1;
     if (!d.length) { groups[g].uendret++; continue; }
     groups[g].endret++;
     for (const c of d) {
@@ -149,7 +157,7 @@ if (isMain) {
   writeFileSync(`${out}.csv`, "﻿" + [["Gruppe", "ISBN", "Handle", "Felt", "Før", "Etter"], ...rows].map((r) => r.map(cell).join(";")).join("\r\n") + "\r\n");
 
   console.log("\nGrupper:");
-  for (const [g, c] of Object.entries(groups)) console.log(`  ${g.padEnd(10)} ${c.produkter} produkter: ${c.endret} endret, ${c.uendret} uendret, ${c.borte} borte`);
+  for (const [g, c] of Object.entries(groups)) console.log(`  ${g.padEnd(10)} ${c.produkter} produkter: ${c.endret} endret, ${c.uendret} uendret, ${c.borte} borte${c.bareUpdatedAt ? ` (${c.bareUpdatedAt} har bare ny updatedAt: Shopify, ikke innhold)` : ""}`);
   console.log(`  nye produkter: ${newProducts}`);
   const bad = ["beskyttet", "uten ISBN", "ikke bok"].filter((g) => groups[g]?.endret || groups[g]?.borte);
   console.log(bad.length ? `\n✖ Endringer der det skulle vært 0: ${bad.join(", ")}` : "\n✔ Beskyttede, uten ISBN og ikke-bøker: 0 endringer");
