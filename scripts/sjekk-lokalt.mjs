@@ -18,7 +18,7 @@ import { countPlan, emptyBookUpdateCounts, planBookUpdate, summarizeBookUpdate }
 import { availabilityRule, planAvailability } from "../supabase/functions/_shared/availability.ts";
 import { notBookSkip } from "../supabase/functions/_shared/book-format.ts";
 import { institutionsCsv } from "../supabase/functions/_shared/contributors.js";
-import { extractAvailabilityCode, extractDescription, extractPublishingDate } from "../supabase/functions/_shared/onix.js";
+import { extractAvailabilityCode, extractDescription, resolvePublication } from "../supabase/functions/_shared/onix.js";
 import { extractIsbn } from "../supabase/functions/_shared/isbn.js";
 import { PROTECTED_COLLECTION_HANDLES, protectedProduct, setProtectedMembers } from "../supabase/functions/_shared/protected.ts";
 import { SEO_DESCRIPTION_MAX } from "../supabase/functions/_shared/book-seo.ts";
@@ -100,6 +100,10 @@ for (const p of products) {
 }
 console.log(`${products.length} produkter; ${work.length} skal sjekkes (ONIX hentes eller leses fra cache) …`);
 
+const pubRules = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, flereProdukter: 0 };
+const pubCheck = [];
+const descExamples = [];
+let seenDesc = 0;
 let done = 0;
 async function handle({ p, isbn }) {
   const xml = await onixFor(isbn);
@@ -122,18 +126,29 @@ async function handle({ p, isbn }) {
   }
   if (plan.metafieldDeletes.some((x) => x.key === "forfatter")) extra.forfatterSlettet++;
   if (plan.metafieldDeletes.some((x) => x.key === "format")) extra.formatAnnetSlettet++;
+  // Utgivelsesår og -dato (pakke H): regelfordeling og kontrolliste
+  const pub = resolvePublication(xml);
+  pubRules[pub.rule]++;
+  if (pub.products > 1) pubRules.flereProdukter++;
+  if (pub.check) {
+    pubCheck.push({ title: p.title, isbn, handle: p.handle, year01: pub.role01Year, date11: pub.role11Date, products: pub.products, shopifyYear: p.mf["bok.utgivelsesaar"] ?? "", shopifyDate: p.mf["bok.utgivelsesdato"] ?? "", chosen: pub.year });
+  }
+  const dsc = plan.metafields.find((m) => m.key === "description_tag");
+  if (dsc) { seenDesc++; if (descExamples.length < 5) descExamples.push({ handle: p.handle, from: p.mf["global.description_tag"] ?? "", to: dsc.value }); else { const j = Math.floor(Math.random() * seenDesc); if (j < 5) descExamples[j] = { handle: p.handle, from: p.mf["global.description_tag"] ?? "", to: dsc.value }; } }
   const year = plan.changes.find((c) => c.field === "bok.utgivelsesaar");
   if (year) { extra.aarEndret++; if (extra.aarEksempler.length < 5) extra.aarEksempler.push(`${p.handle}: ${year.from} → ${year.to}`); }
   // Tilgjengelighet (arkiverte hoppes over, som i jobben)
   if (p.status === "ARCHIVED") { av.skipped.arkivert++; return; }
   const rule = availabilityRule(extractAvailabilityCode(xml));
-  const date = extractPublishingDate(xml);
+  const date = pub.date;
   const v = p.variants[0];
   const ap = planAvailability({
     status: p.status, tilgjengelighet: mf(p, "bok.tilgjengelighet"), utgivelsesdato: mf(p, "bok.utgivelsesdato"),
     egenTilgjengelighet: mf(p, "bok.egen_tilgjengelighet"), totalInventory: p.totalInventory,
     variant: v ? { inventoryPolicy: v.inventoryPolicy, inventoryItem: { tracked: v.inventoryItem?.tracked } } : null,
-  }, rule, date);
+  }, rule, date, pub.check);
+  if (ap.changes.deleteDate) av.deleteDate = (av.deleteDate ?? 0) + 1;
+  if (ap.changes.utgivelsesdato) av.dateChanged = (av.dateChanged ?? 0) + 1;
   if (ap.ownAvailability) av.ownAvailability++;
   if (Object.keys(ap.changes).length) av.changed++; else av.unchanged++;
   if (ap.changes.untrack) { av.untrack++; if (Number(p.totalInventory) > 0) av.untrackWithStock++; }
@@ -159,9 +174,13 @@ writeFileSync(csvFile, "﻿" + institutionsCsv(counts.institutions), "utf8");
 const statusFile = join(outDir, `statusendringer-lokalt-${date}.csv`);
 const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
 writeFileSync(statusFile, "﻿" + ["Tittel;ISBN;ONIX-kode;Fra;Til;Lager i Shopify;Egen tilgjengelighet;Handle", ...av.statusChanges.map((s) => [s.title, s.isbn, s.code, s.from, s.to, s.lager, s.egen ? "ja" : "nei", s.handle].map(q).join(";"))].join("\n") + "\n", "utf8");
+const checkFile = join(outDir, "utgivelsesaar-kontroll.csv");
+writeFileSync(checkFile, "﻿" + ["Tittel;ISBN;Handle;År rolle 01;Dato rolle 11 (tidligste);Antall Product;År i Shopify nå;Dato i Shopify nå;Valgt år (ingen dato)", ...pubCheck.map((c) => [c.title, c.isbn, c.handle, c.year01, c.date11, c.products, c.shopifyYear, c.shopifyDate, c.chosen].map(q).join(";"))].join("
+") + "
+", "utf8");
 const csvQ = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
 writeFileSync(join(outDir, "uten-beskrivelse.csv"), "﻿" + ["Tittel;ISBN;Handle;Status;Beskrivelse i Shopify;Handling;Ny tekst", ...utenBeskrivelse.map((u) => [u.title, u.isbn, u.handle, u.status, u.shopify, u.handling, u.ny.replace(/<[^>]+>/g, "")].map(csvQ).join(";"))].join("\n") + "\n", "utf8");
-const result = { snapshot: dir, utenBeskrivelse: { antall: utenBeskrivelse.length, tom: utenBeskrivelse.filter((u) => u.shopify === "tom").length, harTekst: utenBeskrivelse.filter((u) => u.shopify.startsWith("har")).length, skrives: utenBeskrivelse.filter((u) => u.handling.startsWith("faktatekst")).length }, products: products.length, checked: work.length, bokdata: { summary: summarizeBookUpdate(counts, "analyze"), counts }, seo, extra, tilgjengelighet: { ...av, statusChanges: av.statusChanges.length } };
+const result = { snapshot: dir, utenBeskrivelse: { antall: utenBeskrivelse.length, tom: utenBeskrivelse.filter((u) => u.shopify === "tom").length, harTekst: utenBeskrivelse.filter((u) => u.shopify.startsWith("har")).length, skrives: utenBeskrivelse.filter((u) => u.handling.startsWith("faktatekst")).length }, products: products.length, checked: work.length, bokdata: { summary: summarizeBookUpdate(counts, "analyze"), counts }, seo, extra, tilgjengelighet: { ...av, statusChanges: av.statusChanges.length }, utgivelse: { regler: pubRules, kontrolliste: pubCheck.length, kontrollFil: checkFile }, metabeskrivelseEksempler: descExamples };
 writeFileSync(join(outDir, `sjekk-lokalt-${date}.json`), JSON.stringify(result, null, 1));
 console.log("\n── Bokdata (sjekkmodus) ──\n" + result.bokdata.summary);
 console.log("\nFelt:"); for (const [k, v] of Object.entries(counts.fields).sort((a, b) => b[1].count - a[1].count)) console.log(`  ${k}: ${v.count}`);

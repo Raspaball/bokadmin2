@@ -21,4 +21,5 @@ export declare function extractLanguage(xml: string): string | null;
 export declare function extractSeries(xml: string): string | null;
 export declare function extractAudienceAge(xml: string): string | null;
 export declare function extractThema(xml: string): string[];
+export declare function resolvePublication(xml: string): { year: number | null; date: string | null; rule: 0 | 1 | 2 | 3 | 4; products: number; check: boolean; role01Year: number | null; role11Date: string | null };
 export declare function extractPublishingDate(xml: string): string | null;

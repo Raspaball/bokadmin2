@@ -150,6 +150,8 @@ export interface AvailabilityChanges {
   status?: { from: string; to: string };
   tilgjengelighet?: { from: string | null; to: string };
   utgivelsesdato?: { from: string | null; to: string };
+  /** bok.utgivelsesdato slettes: ONIX har en usikker dato (rolle 11 to år eller mer fra rolle 01, pakke H) */
+  deleteDate?: { from: string };
   /** inventoryPolicy DENY → CONTINUE (sporet lager), slik at boka kan kjøpes uansett lager */
   continuePolicy?: boolean;
   /** Sporing av beholdning slås av (inventoryItem.tracked → false), pakke G del 2 */
@@ -206,13 +208,15 @@ export function availabilitySkip(product: { status?: string | null }): "arkivert
  * status, bok.tilgjengelighet og inventoryPolicy til `heldBack`; bare
  * utgivelsesdatoen endres. Arkiverte produkter: se availabilitySkip.
  */
-export function planAvailability(product: AvailabilityProduct, rule: AvailabilityRule, date: string | null): AvailabilityPlan {
+export function planAvailability(product: AvailabilityProduct, rule: AvailabilityRule, date: string | null, dateCheck = false): AvailabilityPlan {
   const all: AvailabilityChanges = {};
   if (product.status !== rule.status) all.status = { from: product.status || "ukjent", to: rule.status };
   const currentTilg = product.tilgjengelighet?.value ?? null;
   if (currentTilg !== rule.tilgjengelighet) all.tilgjengelighet = { from: currentTilg, to: rule.tilgjengelighet };
   const currentDate = product.utgivelsesdato?.value ?? null;
   if (date && /^\d{4}-\d{2}-\d{2}$/.test(date) && currentDate !== date) all.utgivelsesdato = { from: currentDate, to: date };
+  // Usikker dato i ONIX (resolvePublication.check): ingen dato, og en som står, slettes
+  else if (!date && dateCheck && currentDate) all.deleteDate = { from: currentDate };
   // Sporet lager slås av. Da kan boka alltid kjøpes, så CONTINUE trengs ikke
   const untrack = needsUntrack(product.variant);
   if (untrack) all.untrack = true;
@@ -221,8 +225,8 @@ export function planAvailability(product: AvailabilityProduct, rule: Availabilit
   const own = ownAvailability(product.egenTilgjengelighet);
   if (own) {
     // Sporing av lager er ikke tilgjengelighet: den slås av også her. Status, inventoryPolicy og bok.tilgjengelighet står.
-    const { utgivelsesdato, untrack: _untrack, ...heldBack } = all;
-    return { changes: { ...(utgivelsesdato ? { utgivelsesdato } : {}), ...(untrack ? { untrack: true } : {}) }, heldBack, ownAvailability: true, stockKept: {}, inStock: 0 };
+    const { utgivelsesdato, deleteDate, untrack: _untrack, ...heldBack } = all;
+    return { changes: { ...(utgivelsesdato ? { utgivelsesdato } : {}), ...(deleteDate ? { deleteDate } : {}), ...(untrack ? { untrack: true } : {}) }, heldBack, ownAvailability: true, stockKept: {}, inStock: 0 };
   }
   // Lagerbeholdning går foran Bokbasen: aldri utkast/arkivert og ingen endring av
   // inventoryPolicy når boka har fysisk lager. bok.tilgjengelighet settes som før.
@@ -247,6 +251,7 @@ export function describeAvailabilityChanges(c: AvailabilityChanges): string {
   if (c.status) parts.push(`status ${c.status.from} → ${c.status.to}`);
   if (c.tilgjengelighet) parts.push(`tilgjengelighet ${c.tilgjengelighet.from ?? "mangler"} → ${c.tilgjengelighet.to}`);
   if (c.utgivelsesdato) parts.push(`utgivelsesdato ${c.utgivelsesdato.from ?? "mangler"} → ${c.utgivelsesdato.to}`);
+  if (c.deleteDate) parts.push(`utgivelsesdato ${c.deleteDate.from} slettes (usikker dato i ONIX)`);
   if (c.continuePolicy) parts.push("salg uten lager (inventoryPolicy CONTINUE)");
   if (c.untrack) parts.push("sporing av beholdning slås av");
   return parts.join(", ");

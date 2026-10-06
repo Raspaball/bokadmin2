@@ -338,24 +338,83 @@ function roleDate(xml, tag, roleTag, role) {
   return null;
 }
 
+/** Årstallet (4 siffer i starten) i den første blokken <tag> med <roleTag> = role, eller null. */
+function roleYear(xml, tag, roleTag, role) {
+  for (const b of blocks(xml, tag)) {
+    if (firstText(b, roleTag) !== role) continue;
+    const y = firstText(b, "Date").match(/^(\d{4})/)?.[1];
+    if (y) return parseInt(y, 10);
+  }
+  return null;
+}
+
 /**
- * Utgivelsesdato som "YYYY-MM-DD", eller null når ONIX bare har årstall.
- * Rekkefølge (kontrollert mot 206 rå ONIX 3.1-poster fra Bokbasen 2026-10-02):
- *   1. PublishingDate rolle 01 (utgivelsesdato), hvis den er en hel dato.
- *      Hos Bokbasen er den alltid bare årstall (dateformat 05).
- *   2. MarketDate rolle 01 (utgivelse i markedet). Her står den hele datoen
- *      for kommende bøker (kode 10/11: 33 av 33).
- *   3. PublishingDate rolle 11 (første utgivelse). Her står den for utgitte bøker.
- *   4. PublicationDate (ONIX 2.1).
+ * Utgivelsesår og utgivelsesdato (pakke H, etter sjekkrapport 06.10; erstatter pakke G del 4b).
+ * PublishingDate rolle 11 hos Bokbasen er ofte en registrerings- eller importdato, ikke
+ * utgivelsen: 9781847940933 (Getting to Yes) har rolle 01 = 2012 i begge poster og rolle 11 =
+ * 20180105 og 20170421. Regler, i rekkefølge:
+ *   1. Kommende bok (ProductAvailability 10–12) med MarketDate rolle 01 som hel dato: den gir
+ *      dato og år (tidligste hvis flere).
+ *   2. Ellers, når året i rolle 01 og datoen (rolle 11) er like eller 1 år fra hverandre: dato og
+ *      år fra datoen.
+ *   3. Er de 2 år eller mer fra hverandre: år = rolle 01 og ingen dato (`check` = true, boka
+ *      legges på kontrollisten scripts/out/utgivelsesaar-kontroll.csv).
+ *   4. Finnes bare én av dem: bruk den (bare rolle 01 gir bare år).
+ *   5. Flere <Product> i ONIX: alle leses. År = rolle 01-året flest poster har (likt antall:
+ *      det laveste). Dato = den tidligste som passer med regel 2. (`products` > 1)
+ * Datoen er rolle 11, ellers (ONIX 3 uten rolle 11) PublishingDate 01 som hel dato, MarketDate 01,
+ * og PublicationDate (ONIX 2.1). Brukes av push, bokdata og tilgjengelighet via
+ * extractPublishingDate / extractPublicationYear.
+ * @param {string} xml
+ * @returns {{ year: number | null, date: string | null, rule: 0 | 1 | 2 | 3 | 4, products: number, check: boolean, role01Year: number | null, role11Date: string | null }}
+ */
+export function resolvePublication(xml) {
+  const x = stripNamespaces(xml);
+  const prods = blocks(x, "Product");
+  const list = prods.length ? prods : [x];
+  const info = list.map((p) => {
+    const year01 = roleYear(p, "PublishingDate", "PublishingDateRole", "01");
+    const full01 = roleDate(p, "PublishingDate", "PublishingDateRole", "01");
+    const market = roleDate(p, "MarketDate", "MarketDateRole", "01");
+    const d11 = roleDate(p, "PublishingDate", "PublishingDateRole", "11");
+    const pub21 = fullDate(firstText(p, "PublicationDate"));
+    const year21 = firstText(p, "PublicationDate").match(/^(\d{4})/)?.[1];
+    return { year01: year01 ?? (year21 ? parseInt(year21, 10) : null), market, date: full01 ?? d11 ?? market ?? pub21 };
+  });
+  const base = { products: list.length, check: false };
+  const yearOf = (d) => parseInt(d.slice(0, 4), 10);
+  const role11 = (() => { const d = info.map((i) => i.date).filter(Boolean).sort(); return d[0] ?? null; })();
+  const out = (r) => ({ ...base, role01Year: null, role11Date: role11, ...r });
+
+  // 1. Kommende bok med MarketDate 01
+  const code = extractAvailabilityCode(x);
+  if (code && ["10", "11", "12"].includes(code)) {
+    const m = info.map((i) => i.market).filter(Boolean).sort()[0];
+    if (m) return out({ year: yearOf(m), date: m, rule: 1 });
+  }
+
+  // År: det rolle 01-året flest poster har (likt antall: det laveste)
+  const counts = new Map();
+  for (const i of info) if (i.year01 != null) counts.set(i.year01, (counts.get(i.year01) ?? 0) + 1);
+  const y01 = [...counts].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? null;
+  const dates = info.map((i) => i.date).filter(Boolean).sort();
+
+  if (y01 == null && !dates.length) return out({ year: null, date: null, rule: 0 });
+  if (y01 == null) return out({ year: yearOf(dates[0]), date: dates[0], rule: 4 });
+  if (!dates.length) return out({ year: y01, date: null, rule: 4, role01Year: y01 });
+  const fitting = dates.filter((d) => Math.abs(yearOf(d) - y01) <= 1);
+  if (fitting.length) return out({ year: yearOf(fitting[0]), date: fitting[0], rule: 2, role01Year: y01 });
+  return out({ year: y01, date: null, rule: 3, check: true, role01Year: y01 });
+}
+
+/**
+ * Utgivelsesdato som "YYYY-MM-DD", eller null (bare årstall, eller datoen er mistenkelig).
+ * Regelen står i resolvePublication.
  * @param {string} xml
  * @returns {string | null}
  */
 export function extractPublishingDate(xml) {
-  const x = stripNamespaces(xml);
-  return roleDate(x, "PublishingDate", "PublishingDateRole", "01")
-    ?? roleDate(x, "MarketDate", "MarketDateRole", "01")
-    ?? roleDate(x, "PublishingDate", "PublishingDateRole", "11")
-    ?? fullDate(x.match(/<PublicationDate[^>]*>\s*([^<]+?)\s*<\/PublicationDate>/i)?.[1]);
+  return resolvePublication(xml).date;
 }
 
 // ── Bokfeltene (pakke B del 2) ───────────────────────────────────────────────
@@ -423,28 +482,12 @@ export function extractPages(xml) {
 }
 
 /**
- * Utgivelsesår (bok.utgivelsesaar) fra SAMME kilde som utgivelsesdatoen
- * (bok.utgivelsesdato, extractPublishingDate): årstallet i datoen når ONIX har en hel
- * dato. Ellers PublishingDate rolle 01 (hos Bokbasen bare årstall), ellers
- * PublicationDate (ONIX 2.1). null ellers.
- *
- * Pakke G del 4b: før kom året alltid fra PublishingDate 01 og datoen fra MarketDate 01 /
- * PublishingDate 11, så de kunne vise ulike år (Syn og segn 2-2023: år 2022, dato 2023-05-25;
- * i ONIX står 2022 i rolle 01 og 20230525 i rolle 11). Nå gir datoen året.
+ * Utgivelsesår (bok.utgivelsesaar): fra samme regel som utgivelsesdatoen (resolvePublication).
  * @param {string} xml
  * @returns {number | null}
  */
 export function extractPublicationYear(xml) {
-  const date = extractPublishingDate(xml);
-  if (date) return parseInt(date.slice(0, 4), 10);
-  const x = stripNamespaces(xml);
-  for (const b of blocks(x, "PublishingDate")) {
-    if (firstText(b, "PublishingDateRole") !== "01") continue;
-    const y = firstText(b, "Date").match(/^(\d{4})/)?.[1];
-    if (y) return parseInt(y, 10);
-  }
-  const y = firstText(x, "PublicationDate").match(/^(\d{4})/)?.[1];
-  return y ? parseInt(y, 10) : null;
+  return resolvePublication(xml).year;
 }
 
 /** ISO 639-2/B-koder → norsk språknavn. Ukjente koder vises som koden. */

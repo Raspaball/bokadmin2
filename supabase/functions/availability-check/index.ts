@@ -8,7 +8,7 @@ import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
 import { getCaller, scheduledUserId } from "../_shared/auth.ts";
 import { BOKBASEN_ONIX_URL, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
-import { extractAvailabilityCode, extractPublishingDate, extractReplacedBy } from "../_shared/onix.js";
+import { extractAvailabilityCode, extractReplacedBy, resolvePublication } from "../_shared/onix.js";
 import { isFatalJobError, protectedProduct, protectedProductMessage } from "../_shared/protected.ts";
 import { ensureProtectedMembers } from "../_shared/protected-load.ts";
 import { extractProductForm } from "../_shared/onix.js";
@@ -164,6 +164,8 @@ interface OnixAvailability {
   code: string | null;
   /** Utgivelsesdato som YYYY-MM-DD, eller null */
   date: string | null;
+  /** Usikker dato i ONIX (rolle 11 to år eller mer fra rolle 01): en bok.utgivelsesdato som står, slettes */
+  dateCheck: boolean;
 }
 
 /** Tilgjengelighetskode og utgivelsesdato fra Bokbasen, eller null når oppslaget feiler. */
@@ -174,7 +176,25 @@ async function fetchBokbasenAvailability(isbn: string, userId: string | null): P
   });
   if (!res.ok) return null;
   const xml = await res.text();
-  return { form: extractProductForm(xml).form, code: extractAvailabilityCode(xml), date: extractPublishingDate(xml) };
+  const pub = resolvePublication(xml);
+  return { form: extractProductForm(xml).form, code: extractAvailabilityCode(xml), date: pub.date, dateCheck: pub.check };
+}
+
+const METAFIELDS_DELETE = `
+  mutation availabilityDeleteMetafields($metafields: [MetafieldIdentifierInput!]!) {
+    metafieldsDelete(metafields: $metafields) { deletedMetafields { key namespace ownerId } userErrors { field message } }
+  }
+`;
+
+/** Sletter bok.utgivelsesdato på produktene (usikker dato i ONIX). Kaster med Shopifys melding ved feil. */
+async function deleteUtgivelsesdato(ownerIds: string[]): Promise<void> {
+  for (let i = 0; i < ownerIds.length; i += 25) {
+    const { data } = await shopifyGraphQL<{ metafieldsDelete: { userErrors: Array<{ message: string }> } }>(METAFIELDS_DELETE, {
+      metafields: ownerIds.slice(i, i + 25).map((ownerId) => ({ ownerId, namespace: "bok", key: "utgivelsesdato" })),
+    });
+    const e = (data.metafieldsDelete?.userErrors ?? []).map((x) => x.message).join(", ");
+    if (e) throw new Error(`slette utgivelsesdato: ${e}`);
+  }
 }
 
 // Hva som skal endres (også egen tilgjengelighet): planAvailability() i
@@ -211,6 +231,8 @@ async function applyAvailabilityChanges(
     const e = errs(data.productVariantsBulkUpdate?.userErrors);
     if (e) throw new Error(`inventoryPolicy/sporing: ${e}`);
   }
+
+  if (c.deleteDate) await deleteUtgivelsesdato([product.id]);
 
   if (c.tilgjengelighet || c.utgivelsesdato) {
     const { data } = await shopifyGraphQL<{ metafieldsSet: { userErrors: Array<{ message: string }> } }>(
@@ -395,7 +417,7 @@ async function processBatch(jobId: string) {
         // Egen tilgjengelighet (bok.egen_tilgjengelighet): status, bok.tilgjengelighet
         // og inventoryPolicy står; bare utgivelsesdatoen kan endres. På lager: aldri
         // utkast/arkivert, inventoryPolicy står
-        const plan = planAvailability({ ...product, variant: product.variants?.edges?.[0]?.node }, rule, date);
+        const plan = planAvailability({ ...product, variant: product.variants?.edges?.[0]?.node }, rule, date, bokbasenAvailability.dateCheck);
         const changes = plan.changes;
         if (Object.keys(plan.heldBack).length || Object.keys(plan.stockKept).length) skippedOwn++;
         const statusChange = plan.changes.status ?? plan.heldBack.status;
@@ -530,7 +552,7 @@ function redirectSummary(c: AvailabilityCounts, update: boolean): string {
 function availabilityFields(c: AvailabilityChanges): string[] {
   return [
     ...(c.status ? ["status"] : []), ...(c.tilgjengelighet ? ["bok.tilgjengelighet"] : []),
-    ...(c.utgivelsesdato ? ["bok.utgivelsesdato"] : []), ...(c.continuePolicy ? ["inventoryPolicy"] : []), ...(c.untrack ? ["sporing"] : []),
+    ...(c.utgivelsesdato || c.deleteDate ? ["bok.utgivelsesdato"] : []), ...(c.continuePolicy ? ["inventoryPolicy"] : []), ...(c.untrack ? ["sporing"] : []),
   ];
 }
 
@@ -610,6 +632,7 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
     const variantLines: unknown[] = [], variantRefs: BulkRef[] = [];
     const productLines: unknown[] = [], productRefs: BulkRef[] = [];
     const publishLines: unknown[] = [], publishRefs: BulkRef[] = [];
+    const dateDeletes: BulkRef[] = [];
     const update = ctx.mode === "update";
     // Videresending for arkiverte bøker (pakke H del 3b): legger teksten på loggraden. Feil blir egen feilrad, resten går videre.
     const redirectExamples: string[] = (ctx.state.extra.redirectExamples ??= []);
@@ -663,8 +686,9 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
         continue;
       }
       const rule = availabilityRule(extractAvailabilityCode(xml));
-      const date = extractPublishingDate(xml);
-      const plan = planAvailability({ ...p, variant: p.variants?.nodes?.[0] }, rule, date);
+      const pub = resolvePublication(xml);
+      const date = pub.date;
+      const plan = planAvailability({ ...p, variant: p.variants?.nodes?.[0] }, rule, date, pub.check);
       const statusChange = plan.changes.status ?? plan.heldBack.status;
       if (statusChange) {
         statusChanges.push({
@@ -696,8 +720,23 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
       if (!update) continue;
       const lines = availabilityBulkLines(p, rule, date, plan);
       const ref = { id: product.id, isbn, handle: product.handle };
+      if (plan.changes.deleteDate) dateDeletes.push({ id: product.id, isbn, handle: product.handle });
       if (lines.variant) { variantLines.push(lines.variant); variantRefs.push(ref); }
       if (lines.product) { productLines.push(lines.product); productRefs.push(ref); }
+    }
+    // Usikker utgivelsesdato (pakke H): metafeltet slettes direkte, ikke i bulk-filene (få produkter)
+    if (dateDeletes.length) {
+      try {
+        await deleteUtgivelsesdato(dateDeletes.map((d) => d.id));
+      } catch (e) {
+        c.errors += dateDeletes.length;
+        for (const d of dateDeletes) {
+          logs.push(errorRow(
+            { isbn: d.isbn, title: d.handle, action: "availability_update", shopify_id: d.id, job_id: ctx.jobId, user_id: ctx.userId },
+            `Feil (utgivelsesdato slettes): ${e instanceof Error ? e.message : String(e)}`,
+          ));
+        }
+      }
     }
     return {
       logs,
