@@ -87,20 +87,14 @@ function cutText(text: string, max: number): string {
 }
 
 /**
- * Forlagsteksten uten tittelen i starten (tittelen står allerede først i metabeskrivelsen),
- * og med stor forbokstav: «Solaris inneholder en …» → «Inneholder en …». Tittelen fjernes
- * bare som helt ord (ikke «Solaris» i «Solarisen …»), sammen med skilletegnet etter.
+ * Forlagsteksten med stor forbokstav når den starter med et helt småbokstavord
+ * («inneholder en …» → «Inneholder en …»). Ord med store bokstaver inni («iPRAKSIS», «eBok»)
+ * og tegn som ikke er bokstaver røres ikke. Teksten ellers er forlagets, uendret.
  */
-export function bodyWithoutTitle(body: string, titles: string[]): string {
-  let text = body.trim();
-  const candidates = [...new Set(titles.map((t) => plainOneLine(t)).filter(Boolean))].sort((a, b) => b.length - a.length);
-  for (const t of candidates) {
-    if (text.length < t.length || text.slice(0, t.length).toLocaleLowerCase("nb") !== t.toLocaleLowerCase("nb")) continue;
-    const rest = text.slice(t.length);
-    if (rest && /^[\p{L}\p{N}]/u.test(rest)) continue;
-    text = rest.replace(/^[\s.,:;–—-]+/, "");
-    break;
-  }
+export function capitalizeStart(body: string): string {
+  const text = body.trim();
+  const first = text.match(/^\S+/)?.[0] ?? "";
+  if (!/^\p{Ll}+$/u.test(first.replace(/[.,:;!?»”"')]+$/u, ""))) return text;
   return text.charAt(0).toLocaleUpperCase("nb") + text.slice(1);
 }
 
@@ -109,7 +103,7 @@ export function metaDescription({ title, authors, format, year, description }: S
   const author = personAuthors(authors)[0] || "";
   const details = [shownFormat(format), year ? String(year) : ""].filter(Boolean).join(", ");
   const prefix = `${main}${author ? ` av ${author}` : ""}${details ? ` (${details})` : ""}.`;
-  const body = bodyWithoutTitle(plainOneLine(description), [title, mainTitle(title)]);
+  const body = capitalizeStart(plainOneLine(description));
   if (prefix.length >= SEO_DESCRIPTION_MAX) return cutText(prefix, SEO_DESCRIPTION_MAX);
   if (!body) return prefix;
   return `${prefix} ${cutText(body, SEO_DESCRIPTION_MAX - prefix.length - 1)}`.trim();

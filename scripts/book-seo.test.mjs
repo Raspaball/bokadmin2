@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  cutAtWord, decideSeo, legacySeo, metaDescription, parseSeoAuto, plainOneLine, seoTitle,
+  capitalizeStart, cutAtWord, decideSeo, legacySeo, metaDescription, parseSeoAuto, plainOneLine, seoTitle,
 } from "../supabase/functions/_shared/book-seo.ts";
 
 const book = (o = {}) => ({ title: "Avkledd", authors: ["Nina Brochmann"], format: "Innbundet", year: 2026, description: "", ...o });
@@ -83,26 +83,21 @@ test("gammel automatikk: tittel og 320 tegn", () => {
   assert.equal(parseSeoAuto("ikke json"), null);
 });
 
-test("beskrivelse: tittelen først i forlagsteksten fjernes, resten får stor forbokstav", () => {
+test("beskrivelse: forlagsteksten beholdes som den er, med stor forbokstav hvis den starter med liten", () => {
   const solaris = { title: "Solaris", authors: ["Astrid Munkebye"], format: "Innbundet", year: 2022 };
   assert.equal(
+    metaDescription({ ...solaris, description: "inneholder engasjerende aktiviteter og lek." }),
+    "Solaris av Astrid Munkebye (Innbundet, 2022). Inneholder engasjerende aktiviteter og lek.",
+  );
+  // tittelen i teksten fjernes ikke
+  assert.equal(
     metaDescription({ ...solaris, description: "Solaris inneholder en rekke aktiviteter." }),
-    "Solaris av Astrid Munkebye (Innbundet, 2022). Inneholder en rekke aktiviteter.",
+    "Solaris av Astrid Munkebye (Innbundet, 2022). Solaris inneholder en rekke aktiviteter.",
   );
-  assert.equal(
-    metaDescription({ ...solaris, description: "SOLARIS: en bok om natur." }),
-    "Solaris av Astrid Munkebye (Innbundet, 2022). En bok om natur.",
-  );
-  // ikke helt ord: «Solarisen» beholdes (men får stor forbokstav)
-  assert.equal(
-    metaDescription({ ...solaris, description: "solarisen er et skip." }),
-    "Solaris av Astrid Munkebye (Innbundet, 2022). Solarisen er et skip.",
-  );
-  // hovedtittel (før kolon) fjernes også
-  assert.equal(
-    metaDescription({ ...solaris, title: "Solaris: Naturfag 3-4", description: "Solaris har aktiviteter." }),
-    "Solaris av Astrid Munkebye (Innbundet, 2022). Har aktiviteter.",
-  );
-  // bare tittelen som tekst → bare prefikset
-  assert.equal(metaDescription({ ...solaris, description: "Solaris" }), "Solaris av Astrid Munkebye (Innbundet, 2022).");
+  // varemerker med stor bokstav inni og tall/tegn røres ikke
+  assert.equal(capitalizeStart("iPRAKSIS Håndbok er en bok"), "iPRAKSIS Håndbok er en bok");
+  assert.equal(capitalizeStart("2022 var et år"), "2022 var et år");
+  assert.equal(capitalizeStart("«sitat» står her"), "«sitat» står her");
+  assert.equal(capitalizeStart("eins pust er"), "Eins pust er");
+  assert.equal(capitalizeStart(""), "");
 });
