@@ -87,3 +87,52 @@ test("sammendrag og tellinger over pulser", () => {
   const s = summarizeBookUpdate(reloaded, "analyze");
   assert.ok(s.startsWith("1 ville blitt endret, 0 uendret, hoppet over 22 (22 uten ISBN, 0 uten ONIX, 0 ikke bok, 0 beskyttet, 0 DUPLIKAT), 0 feil. Felt:"), s);
 });
+
+// ── Pakke H del 3: bøker uten forlagstekst ───────────────────────────────────
+const onixNoText = onix.replace(/<CollateralDetail>.*<\/CollateralDetail>\n/s, "");
+const FALLBACK = "<p>Avkledd av Nina Brochmann. Innbundet, 288 sider, utgitt 2026.</p>";
+const autoOf = (plan) => JSON.parse(plan.metafields.find((m) => m.key === "seo_auto").value);
+
+test("uten forlagstekst og tom beskrivelse (også <p></p>): faktatekst, lagret som generert i seo_auto.body", () => {
+  for (const empty of ["", "<p></p>", null]) {
+    const plan = planBookUpdate({ ...oldProduct(), descriptionHtml: empty }, onixNoText);
+    assert.equal(plan.product.descriptionHtml, FALLBACK, String(empty));
+    assert.equal(autoOf(plan).body, FALLBACK);
+  }
+});
+
+test("metabeskrivelsen er «Tittel av Forfatter (format, år).» uten forlagstekst", () => {
+  const plan = planBookUpdate({ ...oldProduct(), descriptionHtml: "" }, onixNoText);
+  const d = plan.metafields.find((m) => m.key === "description_tag");
+  assert.equal(d.value, "Avkledd av Nina Brochmann (Innbundet, 2026).");
+});
+
+test("en eksisterende tekst overskrives aldri av faktateksten", () => {
+  const plan = planBookUpdate({ ...oldProduct(), descriptionHtml: "<p>Butikkens egen tekst.</p>" }, onixNoText);
+  assert.equal("descriptionHtml" in plan.product, false);
+  assert.ok(!plan.changes.some((c) => c.field === "description"));
+  const a = plan.metafields.find((m) => m.key === "seo_auto");
+  assert.ok(!a || autoOf(plan).body === undefined);
+});
+
+test("generert tekst byttes ut når forlagsteksten kommer, og body fjernes", () => {
+  const p = { ...oldProduct(), descriptionHtml: FALLBACK, seoAuto: { value: JSON.stringify({ body: FALLBACK }) } };
+  const plan = planBookUpdate(p, onix);
+  assert.equal(plan.product.descriptionHtml, "<p>Første avsnitt.</p>\n<p>Andre avsnitt.</p>");
+  assert.equal(autoOf(plan).body, undefined);
+});
+
+test("generert tekst som ikke lenger stemmer med feltene oppdateres (stor forskjell: gammel form med forlag)", () => {
+  const old = "<p>Avkledd av Nina Brochmann. Innbundet, 288 sider, utgitt 2026 på Gyldendal.</p>";
+  const plan = planBookUpdate({ ...oldProduct(), descriptionHtml: old }, onixNoText);
+  assert.equal(plan.product.descriptionHtml, FALLBACK);
+});
+
+test("faktateksten er stabil: ingen ny endring ved neste kjøring", () => {
+  const first = planBookUpdate({ ...oldProduct(), descriptionHtml: "" }, onixNoText);
+  const after = { ...oldProduct(), descriptionHtml: FALLBACK, seoAuto: { value: first.metafields.find((m) => m.key === "seo_auto").value },
+    seoDescMf: { value: first.metafields.find((m) => m.key === "description_tag").value } };
+  const again = planBookUpdate(after, onixNoText);
+  assert.ok(!again.changes.some((c) => c.field === "description"));
+  assert.ok(!again.metafields.some((m) => m.key === "seo_auto"));
+});

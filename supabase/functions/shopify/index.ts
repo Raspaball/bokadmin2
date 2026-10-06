@@ -20,9 +20,9 @@ import { EGEN_PRIS_FIELD, priceLock, priceLockMessage } from "../_shared/price-l
 import { bokgruppeTagsForKode } from "../_shared/bokgruppe.ts";
 import { COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, collectionTitleFix, tagSources } from "../_shared/collections.ts";
 import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
-import { bookDescription, bookFieldsFromOnix, bookMetafields, type BookFields } from "../_shared/book-standard.ts";
+import { bookDescription, bookFieldsFromOnix, bookMetafields, canReplaceDescription, descriptionHtml, fallbackDescription, legacyFallbackDescription, type BookFields } from "../_shared/book-standard.ts";
 import { CATEGORY_IDS, CATEGORY_NAMES, notBookSkip } from "../_shared/book-format.ts";
-import { bookSeo, decideSeo, legacySeo, parseSeoAuto, seoMetafields } from "../_shared/book-seo.ts";
+import { bookSeo, decideSeo, legacySeo, mergeSeoAutoBody, parseSeoAuto, parseSeoAutoBody, seoMetafields } from "../_shared/book-seo.ts";
 import { UNTRACK_VARIANT_FIELDS, effectiveStock, needsUntrack } from "../_shared/inventory-tracking.ts";
 import { coverAlt, coverChanges, coverFilename, type CoverChange } from "../_shared/book-cover.ts";
 import { cleanBookTags } from "../_shared/book-tags.ts";
@@ -97,7 +97,7 @@ interface BookMetadata {
 
 // Felt pushOneBook trenger fra et eksisterende produkt
 const PUSH_PRODUCT_FIELDS = `
-  id title handle tags vendor status totalInventory
+  id title handle tags vendor status totalInventory descriptionHtml
   ${EGEN_PRIS_FIELD}
   ${EGEN_TILGJENGELIGHET_FIELD}
   variants(first: 1) { edges { node { id sku price compareAtPrice inventoryPolicy inventoryItem { tracked } } } }
@@ -125,7 +125,7 @@ const PRODUCTS_BY_ISBN_SEARCH_QUERY = `
   query productsByIsbn($q: String!) {
     products(first: 5, query: $q) {
       nodes {
-        id title handle tags vendor status totalInventory
+        id title handle tags vendor status totalInventory descriptionHtml
         ${BOK_ISBN_FIELD}
         ${EGEN_PRIS_FIELD}
         ${EGEN_TILGJENGELIGHET_FIELD}
@@ -535,7 +535,21 @@ async function pushOneBook(
     format: fields?.format ?? null,
     pages: fields?.pages ?? null,
     year: fields?.year ?? (parseInt(book.year, 10) || null),
-  }, book.publisher);
+  });
+  // Reservebeskrivelsen (pakke H del 3) skriver aldri over en eksisterende tekst: bare tom,
+  // eller en tekst Bokadmin selv har generert (seo_auto.body / samme formel, også den eldre med forlag)
+  let writeDescription = true;
+  if (isUpdate && desc.fallback) {
+    const descFields = {
+      authors: book.authors?.length ? book.authors : fields?.authors ?? [],
+      format: fields?.format ?? null, pages: fields?.pages ?? null, year: fields?.year ?? (parseInt(book.year, 10) || null),
+    };
+    writeDescription = canReplaceDescription((existing?.descriptionHtml as string | undefined) ?? "", desc, [
+      parseSeoAutoBody((existing?.seoAuto as { value?: string } | null)?.value),
+      descriptionHtml(fallbackDescription(book.title, descFields)),
+      descriptionHtml(legacyFallbackDescription(book.title, descFields, book.publisher)),
+    ]);
+  }
   const descriptionNote = desc.fallback ? "Mangler forlagstekst: reservebeskrivelse brukt" : undefined;
 
   // Tagger: eksisterende produkt beholder alle tagger unntatt forfatter/tittel,
@@ -550,7 +564,7 @@ async function pushOneBook(
 
   const productInput: Record<string, unknown> = {
     title: book.title,
-    descriptionHtml: desc.html,
+    ...(writeDescription ? { descriptionHtml: desc.html } : {}),
     vendor: book.publisher || "",
     // Bok / Lydbok / E-bok ut fra formatet (ikke lenger forfatter). Uten ONIX:
     // ny bok blir «Bok», eksisterende beholder sin
@@ -637,7 +651,15 @@ async function pushOneBook(
       legacySeo(book.title, book.description, [seoText]),
     );
     seoNotes.push(...decision.notes);
-    const seoInput = seoMetafields(product.id as string, decision);
+    const seoInput = seoMetafields(product.id as string, decision).filter((m) => m.key !== "seo_auto");
+    // seo_auto husker også reservebeskrivelsen (body), så forlagsteksten kan ta over senere
+    const prevAuto = (existing?.seoAuto as { value?: string } | null)?.value;
+    const prevBody = parseSeoAutoBody(prevAuto);
+    const bodyAfter = writeDescription ? (desc.fallback ? desc.html : null) : prevBody;
+    if (decision.auto !== null || bodyAfter !== prevBody) {
+      const auto = mergeSeoAutoBody(prevAuto, decision.auto, bodyAfter);
+      if (auto !== null) seoInput.push({ ownerId: product.id as string, namespace: "bokadmin", key: "seo_auto", type: "json", value: auto });
+    }
     if (seoInput.length) {
       await shopifyGraphQL(`
         mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {

@@ -186,6 +186,37 @@ export function parseSeoAuto(value: string | null | undefined): Partial<SeoValue
   }
 }
 
+/**
+ * Reservebeskrivelsen Bokadmin sist skrev (bokadmin.seo_auto.body, pakke H del 3), eller null.
+ * Den er «generert»: kan byttes ut når forlagsteksten kommer i ONIX.
+ */
+export function parseSeoAutoBody(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const v = JSON.parse(value);
+    return v && typeof v.body === "string" && v.body ? v.body : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ny verdi for bokadmin.seo_auto med reservebeskrivelsen (`body`) satt eller fjernet.
+ * `decisionAuto` er verdien fra decideSeo (title/description), `previous` det som står i Shopify.
+ * `body`: tekst = lagre, null = fjern, undefined = rør ikke. Returnerer null når seo_auto ikke skal skrives.
+ */
+export function mergeSeoAutoBody(previous: string | null | undefined, decisionAuto: string | null, body: string | null | undefined): string | null {
+  if (body === undefined) return decisionAuto;
+  let base: Record<string, unknown> = {};
+  try {
+    const b = JSON.parse(decisionAuto ?? previous ?? "{}");
+    if (b && typeof b === "object") base = b;
+  } catch { /* ugyldig JSON: begynn på nytt */ }
+  if (body) base.body = body; else delete base.body;
+  const out = JSON.stringify(base);
+  return out === (previous ?? null) ? null : out;
+}
+
 export interface SeoDecision {
   /** Verdien som skal settes, eller null = la stå */
   title: string | null;

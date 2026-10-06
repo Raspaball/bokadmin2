@@ -8,8 +8,8 @@
 
 import { extractDescription, extractInvertedNames, extractPublisher, extractTitle } from "./onix.js";
 import { shownFormat } from "./book-format.ts";
-import { bookDescription, bookFieldsFromOnix, bookMetafields, canReplaceDescription, sameMetafieldValue } from "./book-standard.ts";
-import { bookSeo, decideSeo, legacySeo, parseSeoAuto, seoMetafields } from "./book-seo.ts";
+import { bookDescription, bookFieldsFromOnix, bookMetafields, canReplaceDescription, descriptionHtml, fallbackDescription, legacyFallbackDescription, sameMetafieldValue } from "./book-standard.ts";
+import { bookSeo, decideSeo, legacySeo, mergeSeoAutoBody, parseSeoAuto, parseSeoAutoBody, seoMetafields } from "./book-seo.ts";
 import { coverAlt, coverChanges, coverFilename, fileNameFromUrl, type CoverChange } from "./book-cover.ts";
 import { cleanBookTags } from "./book-tags.ts";
 import { isInstitutionName } from "./contributors.js";
@@ -146,7 +146,8 @@ export function planBookUpdate(product: ShopifyBookProduct, xml: string): BookUp
     legacySeo(title, description, [product.descriptionHtml]),
   );
   notes.push(...decision.notes);
-  metafields.push(...seoMetafields(product.id, decision));
+  // seo_auto skrives til slutt (etter beskrivelsen), siden den også husker reservebeskrivelsen
+  metafields.push(...seoMetafields(product.id, decision).filter((m) => m.key !== "seo_auto"));
   if (decision.title !== null) changes.push({ field: "seoTitle", from: short(product.seoTitleMf?.value), to: decision.title });
   if (decision.description !== null) changes.push({ field: "seoDescription", from: short(product.seoDescMf?.value), to: short(decision.description) });
 
@@ -165,16 +166,32 @@ export function planBookUpdate(product: ShopifyBookProduct, xml: string): BookUp
     }
   }
 
-  // Beskrivelse (del 6): bare når den er tom, eller samme tekst med annen formatering
-  const wantedDesc = bookDescription(description, title, f, extractPublisher(xml));
+  // Beskrivelse (del 6): bare når den er tom, samme tekst med annen formatering, eller en tekst
+  // Bokadmin selv har generert (reservebeskrivelsen). Manglende forlagstekst gir en kort faktatekst
+  // fra feltene (pakke H del 3), lagret i bokadmin.seo_auto.body så forlagsteksten kan ta over senere.
+  const publisher = extractPublisher(xml);
+  const wantedDesc = bookDescription(description, title, f);
   const currentDesc = product.descriptionHtml ?? "";
+  const prevAuto = product.seoAuto?.value;
+  const prevBody = parseSeoAutoBody(prevAuto);
+  const generated = [
+    prevBody,
+    descriptionHtml(fallbackDescription(title, f)),
+    descriptionHtml(legacyFallbackDescription(title, f, publisher)), // eldre tekst med forlag
+  ];
+  let bodyAfter: string | null = prevBody;
   if (currentDesc.trim() !== wantedDesc.html.trim()) {
-    if (canReplaceDescription(currentDesc, wantedDesc, wantedDesc.fallback ? wantedDesc.html : null)) {
+    if (canReplaceDescription(currentDesc, wantedDesc, generated)) {
       productInput.descriptionHtml = wantedDesc.html;
       changes.push({ field: "description", from: short(currentDesc.replace(/<[^>]+>/g, " ")), to: short(wantedDesc.html.replace(/<[^>]+>/g, " ")) });
+      bodyAfter = wantedDesc.fallback ? wantedDesc.html : null;
     } else {
       notes.push("Beskrivelsen er en annen tekst enn forlagsteksten, ikke overskrevet");
     }
+  }
+  if (decision.auto !== null || bodyAfter !== prevBody) {
+    const auto = mergeSeoAutoBody(prevAuto, decision.auto, bodyAfter);
+    if (auto !== null) metafields.push({ ownerId: product.id, namespace: "bokadmin", key: "seo_auto", type: "json", value: auto });
   }
 
   // Tagger (del 7): fjern forfatter og tittel, rør ikke andre

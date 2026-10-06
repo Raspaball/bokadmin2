@@ -106,11 +106,20 @@ export function descriptionHtml(text: string | null | undefined): string {
 }
 
 /**
- * Reservebeskrivelse når forlagstekst mangler:
- * «{Hovedtittel} av {Forfatter}. {Format}, {sider} sider, utgitt {år} på {forlag}.»
- * Det som mangler utelates.
+ * Reservebeskrivelse når forlagstekst mangler (pakke H del 3, Eirik 2026-10-06):
+ * «{Hovedtittel} av {Forfatter}. {Format}, {sider} sider, utgitt {år}.»
+ * Det som mangler utelates (uten forfatter: «{Hovedtittel}. …»). «Annet» og institusjoner brukes ikke.
  */
-export function fallbackDescription(title: string, f: Pick<BookFields, "authors" | "format" | "pages" | "year">, publisher?: string | null): string {
+export function fallbackDescription(title: string, f: Pick<BookFields, "authors" | "format" | "pages" | "year">): string {
+  return fallbackText(title, f, null);
+}
+
+/** Den eldre reservebeskrivelsen med forlag («… utgitt 2020 på Gyldendal.»). Bare for å kjenne igjen tekster Bokadmin selv har skrevet. */
+export function legacyFallbackDescription(title: string, f: Pick<BookFields, "authors" | "format" | "pages" | "year">, publisher?: string | null): string {
+  return fallbackText(title, f, publisher);
+}
+
+function fallbackText(title: string, f: Pick<BookFields, "authors" | "format" | "pages" | "year">, publisher: string | null | undefined): string {
   const main = String(title.split(":")[0] ?? title).trim();
   const author = personAuthors(f.authors)[0];
   const first = author ? `${main} av ${author}.` : `${main}.`;
@@ -130,10 +139,10 @@ export interface BookDescription {
   fallback: boolean;
 }
 
-export function bookDescription(text: string | null | undefined, title: string, f: Pick<BookFields, "authors" | "format" | "pages" | "year">, publisher?: string | null): BookDescription {
+export function bookDescription(text: string | null | undefined, title: string, f: Pick<BookFields, "authors" | "format" | "pages" | "year">): BookDescription {
   const html = descriptionHtml(text);
   if (html) return { html, fallback: false };
-  return { html: descriptionHtml(fallbackDescription(title, f, publisher)), fallback: true };
+  return { html: descriptionHtml(fallbackDescription(title, f)), fallback: true };
 }
 
 /** Teksten uten tagger, entiteter og mellomrom: for å se om to beskrivelser bare skiller seg i formatering. */
@@ -155,13 +164,16 @@ export function descriptionWords(html: string | null | undefined): string {
  * sammenlimte setninger), eller når den er Bokadmins reservebeskrivelse.
  * Ellers er den skrevet eller endret av noen andre og får stå.
  */
-export function canReplaceDescription(currentHtml: string | null | undefined, wanted: BookDescription, previousFallbackHtml?: string | null): boolean {
+export function canReplaceDescription(currentHtml: string | null | undefined, wanted: BookDescription, generatedHtml?: string | null | readonly (string | null | undefined)[]): boolean {
   const cur = descriptionFingerprint(currentHtml);
   if (!cur) return true;
   if (cur === descriptionFingerprint(wanted.html)) return true;
   // Samme ord, annen tegnsetting (typografiske sitattegn, tankestrek): bare formatering
   if (descriptionWords(currentHtml) === descriptionWords(wanted.html)) return true;
-  if (previousFallbackHtml && cur === descriptionFingerprint(previousFallbackHtml)) return true;
+  // Tekster Bokadmin selv har generert (lagret i seo_auto.body, eller regnet ut på nytt): kan byttes ut, f.eks. når forlagsteksten kommer
+  for (const g of Array.isArray(generatedHtml) ? generatedHtml : [generatedHtml]) {
+    if (g && cur === descriptionFingerprint(g as string)) return true;
+  }
   return false;
 }
 
