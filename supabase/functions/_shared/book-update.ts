@@ -204,6 +204,9 @@ export interface BookUpdateCounts {
   /** Samme ISBN på flere produkter (_shared/duplicates.ts): hoppes over til de er ryddet */
   skippedDuplicate: number;
   errors: number;
+  /** Aktive bøker som mangler salgskanaler (pakke H del 2): antall bøker og kanaler til sammen */
+  publishProducts: number;
+  publishChannels: number;
   /** Per felt: antall bøker, og opptil tre eksempler «handle: fra → til» */
   fields: Record<string, { count: number; examples: string[] }>;
   /** Notater (f.eks. manuelt endret SEO-tittel) med antall */
@@ -215,14 +218,14 @@ export interface BookUpdateCounts {
 export interface InstitutionCount { reason: string; roles: string[]; count: number; isbns: string[] }
 
 export function emptyBookUpdateCounts(): BookUpdateCounts {
-  return { changed: 0, unchanged: 0, skippedNoIsbn: 0, skippedNoOnix: 0, skippedNotBook: 0, skippedProtected: 0, skippedDuplicate: 0, errors: 0, fields: {}, notes: {}, institutions: {} };
+  return { changed: 0, unchanged: 0, skippedNoIsbn: 0, skippedNoOnix: 0, skippedNotBook: 0, skippedProtected: 0, skippedDuplicate: 0, errors: 0, publishProducts: 0, publishChannels: 0, fields: {}, notes: {}, institutions: {} };
 }
 
 export function loadBookUpdateCounts(v: unknown): BookUpdateCounts {
   const c = emptyBookUpdateCounts();
   if (!v || typeof v !== "object") return c;
   const o = v as Partial<BookUpdateCounts>;
-  for (const k of ["changed", "unchanged", "skippedNoIsbn", "skippedNoOnix", "skippedNotBook", "skippedProtected", "skippedDuplicate", "errors"] as const) {
+  for (const k of ["changed", "unchanged", "skippedNoIsbn", "skippedNoOnix", "skippedNotBook", "skippedProtected", "skippedDuplicate", "errors", "publishProducts", "publishChannels"] as const) {
     if (typeof o[k] === "number") c[k] = o[k] as number;
   }
   if (o.fields && typeof o.fields === "object") c.fields = JSON.parse(JSON.stringify(o.fields));
@@ -257,5 +260,6 @@ export function summarizeBookUpdate(c: BookUpdateCounts, mode: "analyze" | "upda
   const instText = inst.length ? `Institusjoner (ikke forfatter): ${inst.length} navn på ${inst.reduce((n, i) => n + i.count, 0)} bøker` : "";
   return `${c.changed} ${mode === "analyze" ? "ville blitt endret" : "endret"}, ${c.unchanged} uendret, ` +
     `hoppet over ${c.skippedNoIsbn + c.skippedNoOnix + c.skippedNotBook + c.skippedProtected + c.skippedDuplicate} (${c.skippedNoIsbn} uten ISBN, ${c.skippedNoOnix} uten ONIX, ${c.skippedNotBook} ikke bok, ${c.skippedProtected} beskyttet, ${c.skippedDuplicate} DUPLIKAT), ${c.errors} feil` +
+    (c.publishProducts ? `. ${c.publishProducts} aktive bøker ${mode === "analyze" ? "ville blitt publisert" : "publisert"} på ${c.publishChannels} kanaler de mangler` : "") +
     (fields ? `. Felt: ${fields}` : "") + (notes ? `. ${notes}` : "") + (instText ? `. ${instText}` : "");
 }

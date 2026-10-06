@@ -30,6 +30,7 @@ import { isProtectedCollection, protectedProduct, protectedProductMessage } from
 import { ensureProtectedMembers } from "../_shared/protected-load.ts";
 import { BULK_ACTIVE, startBulkMutation } from "../_shared/shopify-bulk.ts";
 import { duplicateCounts, duplicateMessage } from "../_shared/duplicates.ts";
+import { publishToAllChannels } from "../_shared/publish.ts";
 import { getOnixCached } from "../_shared/onix-cache.ts";
 import {
   SAFE_STORES, MIGRATION_PRODUCTS_QUERY, HANDLE_UPDATE_MUTATION,
@@ -42,13 +43,6 @@ const PRODUCT_ISBN_FIELDS = `${BOK_ISBN_FIELD} variants(first: 1) { nodes { barc
 // ── Bokbasen auth (for ISBN → bokgruppekode lookup during catalog sync) ───────
 // Shopify-tilgangen er felles for hele serveren (se _shared/shopify.ts).
 // Kun Bokbasen kan fortsatt settes per bruker i user_settings (se _shared/bokbasen-auth.ts).
-
-interface PublicationsCacheEntry {
-  ids: string[];
-  expiry: number;
-}
-
-const publicationsCache = new Map<string, PublicationsCacheEntry>();
 
 // Bokgruppekode for ett ISBN (skjema 37, se _shared/onix.js)
 async function fetchBokgruppekode(isbn: string, credentials: BokbasenCredentials | null): Promise<string | null> {
@@ -228,45 +222,6 @@ async function updateCoverFile(mediaId: string, change: CoverChange): Promise<vo
     if (!notReady || attempt === 5) throw new Error(errs.map((e) => e.message).join(", "));
     await new Promise((res) => setTimeout(res, 1500));
   }
-}
-
-const PUBLICATIONS_QUERY = `
-  query GetPublications {
-    publications(first: 25) {
-      edges { node { id } }
-    }
-  }
-`;
-
-const PUBLISHABLE_PUBLISH_MUTATION = `
-  mutation publishablePublish($id: ID!, $input: [PublicationInput!]!) {
-    publishablePublish(id: $id, input: $input) {
-      userErrors { field message }
-    }
-  }
-`;
-
-// Sales channels ("publications") a product must be published to so it doesn't
-// sit at "0 salgskanaler" after export. Cached per shop for the life of the
-// function instance — the set of channels rarely changes.
-async function getAllPublicationIds(): Promise<string[]> {
-  const shopDomain = getShopDomain();
-  const cached = publicationsCache.get(shopDomain);
-  if (cached && Date.now() < cached.expiry) return cached.ids;
-
-  const result = await shopifyGraphQL(PUBLICATIONS_QUERY, {});
-  const ids = ((result.data?.publications?.edges as { node: { id: string } }[]) || []).map((e) => e.node.id);
-  publicationsCache.set(shopDomain, { ids, expiry: Date.now() + 30 * 60 * 1000 });
-  return ids;
-}
-
-async function publishToAllChannels(productId: string): Promise<void> {
-  const publicationIds = await getAllPublicationIds();
-  if (!publicationIds.length) return;
-  await shopifyGraphQL(PUBLISHABLE_PUBLISH_MUTATION, {
-    id: productId,
-    input: publicationIds.map((publicationId) => ({ publicationId })),
-  });
 }
 
 // ── Collection mutations ─────────────────────────────────────────────────────
@@ -626,7 +581,7 @@ async function pushOneBook(
   // on its own, so a freshly exported product would otherwise sit at "0
   // salgskanaler" until someone publishes it manually in Shopify Admin.
   try {
-    await publishToAllChannels(product.id as string);
+    await publishToAllChannels(product.id as string, getShopDomain()); // felles regel: _shared/publish.ts
   } catch (_) { /* non-critical — product still exists, just unpublished */ }
 
   const variantId = (product.variants as { edges: { node: { id: string } }[] })?.edges?.[0]?.node?.id;

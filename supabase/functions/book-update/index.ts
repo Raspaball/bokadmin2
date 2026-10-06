@@ -26,10 +26,12 @@ import {
   bulkCoverLine, bulkUpdateLine, parseBulkResult, toJsonl,
 } from "../_shared/book-bulk.ts";
 import { BULK_ACTIVE, fetchBulkText, startBulkMutation, startBulkQuery, streamJsonlLines, waitForBulkOperation } from "../_shared/shopify-bulk.ts";
+import { channelsToPublish, getAllPublicationIds, PUBLISH_BULK_MUTATION, publishBulkLine } from "../_shared/publish.ts";
+import { extractProductForm } from "../_shared/onix.js";
 import { beginPlanSlice, clearChunkLogs, freshOnixIsbns, insertLogs, loadOnixXml, PLAN_BUDGET_MS, readPlanSlice } from "../_shared/bulk-job.ts";
 import { isFatalJobError, protectedProduct, protectedProductMessage } from "../_shared/protected.ts";
 import { ensureProtectedMembers } from "../_shared/protected-load.ts";
-import { notBookSkip, NOT_IN_BOKBASEN_MESSAGE } from "../_shared/book-format.ts";
+import { bookFormat, notBookSkip, NOT_IN_BOKBASEN_MESSAGE } from "../_shared/book-format.ts";
 import { changedRow, errorRow, NO_ISBN_MESSAGE, skipRow, unchangedRow, type JobLogRow, type LogBase } from "../_shared/job-log.ts";
 import { ensureDuplicates } from "../_shared/duplicate-scan.ts";
 import { duplicateCounts, duplicateMessage } from "../_shared/duplicates.ts";
@@ -305,6 +307,7 @@ const ONIX_CONCURRENCY = 4;
 const BULK_DEADLINE_MS = 40_000;
 
 interface BulkLineRef { id: string; isbn: string | null; handle: string }
+interface ApplyOp { kind: "product" | "cover" | "publish"; jsonl: string; refs: BulkLineRef[] }
 interface BulkState {
   phase: "query" | "onix" | "plan" | "apply";
   queryOpId?: string;
@@ -318,7 +321,11 @@ interface BulkState {
   planByte?: number;
   chunk?: number;
   attempt?: { index: number; n: number };
-  apply?: { kind: "product" | "cover"; opId: string; refs: BulkLineRef[]; coverJsonl?: string; coverRefs?: BulkLineRef[]; startedAt: number };
+  /** `queue`: operasjonene som kjøres etter denne (omslag, publisering). coverJsonl/coverRefs: gammel form, leses fortsatt */
+  apply?: {
+    kind: "product" | "cover" | "publish"; opId: string; refs: BulkLineRef[]; coverJsonl?: string; coverRefs?: BulkLineRef[]; startedAt: number;
+    queue?: ApplyOp[];
+  };
   stats: { onixCalls: number; onixOk: number; onixMissing: number; onixCached: number; onixMs: number; operations: number; operationMs: number; queryMs: number };
 }
 
@@ -333,6 +340,15 @@ function summarizeBulk(s: BulkState["stats"]): string {
 }
 
 // insertLogs, freshOnixIsbns og loadOnixXml: felles i _shared/bulk-job.ts
+
+/** Starter bulk-mutasjonen for én operasjon i apply-køen */
+async function startApplyOp(op: ApplyOp): Promise<NonNullable<BulkState["apply"]>> {
+  const [mutation, file] = op.kind === "product" ? [BULK_PRODUCT_UPDATE_MUTATION, "book-update.jsonl"]
+    : op.kind === "cover" ? [BULK_COVER_MUTATION, "book-cover.jsonl"]
+    : [PUBLISH_BULK_MUTATION, "book-publish.jsonl"];
+  const opId = await startBulkMutation(mutation, op.jsonl, file);
+  return { kind: op.kind, opId, refs: op.refs, startedAt: Date.now() };
+}
 
 async function processBulk(jobId: string) {
   const supabase = getSupabase();
@@ -467,6 +483,8 @@ async function processBulk(jobId: string) {
         const logs: Record<string, unknown>[] = [];
         const productLines: unknown[] = [], productRefs: BulkLineRef[] = [];
         const coverLines: unknown[] = [], coverRefs: BulkLineRef[] = [];
+        const publishLines: unknown[] = [], publishRefs: BulkLineRef[] = [];
+        const allChannels = await getAllPublicationIds(); // _shared/publish.ts
         for (const product of chunkProducts) {
           const isbn = extractIsbn(product);
           if (only && (!isbn || !only.has(isbn))) continue;
@@ -499,9 +517,19 @@ async function processBulk(jobId: string) {
           }
           const plan = planBookUpdate(product, xml);
           countPlan(counts, product.handle, plan, isbn);
-          logs.push(bookUpdatePlanRow(base, plan, mode === "update" ? "Sendt i bulk" : "Ville endret"));
-          if (!plan.changes.length || mode !== "update") continue;
+          const planRow = bookUpdatePlanRow(base, plan, mode === "update" ? "Sendt i bulk" : "Ville endret");
+          logs.push(planRow);
+          // Aktive bøker som mangler salgskanaler (pakke H del 2): lydbøker, e-bøker og beskyttede røres ikke
+          const form = extractProductForm(xml);
+          const missing = channelsToPublish(allChannels, product, bookFormat(form.form, form.details).productType, product.status === "ACTIVE");
           const ref = { id: product.id, isbn, handle: product.handle };
+          if (missing.length) {
+            counts.publishProducts++;
+            counts.publishChannels += missing.length;
+            planRow.message = `${planRow.message} + ${mode === "update" ? "publiseres" : "ville blitt publisert"} på ${missing.length} kanaler`;
+            if (mode === "update") { publishLines.push(publishBulkLine(product.id, missing)); publishRefs.push(ref); }
+          }
+          if (!plan.changes.length || mode !== "update") continue;
           const pl = bulkUpdateLine(product, plan);
           if (pl) { productLines.push(pl); productRefs.push(ref); }
           const cl = bulkCoverLine(product, plan);
@@ -522,16 +550,15 @@ async function processBulk(jobId: string) {
         state.attempt = undefined;
         planMs += Date.now() - tPlan;
 
-        if (mode === "update" && (productLines.length || coverLines.length)) {
-          const kind = productLines.length ? "product" : "cover";
-          const opId = kind === "product"
-            ? await startBulkMutation(BULK_PRODUCT_UPDATE_MUTATION, toJsonl(productLines), "book-update.jsonl")
-            : await startBulkMutation(BULK_COVER_MUTATION, toJsonl(coverLines), "book-cover.jsonl");
+        if (mode === "update" && (productLines.length || coverLines.length || publishLines.length)) {
+          // Rekkefølge: produkt/metafelt, omslag, publisering. Resten ligger i køen til første er ferdig
+          const ops: ApplyOp[] = [];
+          if (productLines.length) ops.push({ kind: "product", jsonl: toJsonl(productLines), refs: productRefs });
+          if (coverLines.length) ops.push({ kind: "cover", jsonl: toJsonl(coverLines), refs: coverRefs });
+          if (publishLines.length) ops.push({ kind: "publish", jsonl: toJsonl(publishLines), refs: publishRefs });
+          const first = ops.shift()!;
+          state.apply = { ...(await startApplyOp(first)), queue: ops };
           state.stats.operations++;
-          state.apply = {
-            kind, opId, refs: kind === "product" ? productRefs : coverRefs, startedAt: Date.now(),
-            ...(kind === "product" && coverLines.length ? { coverJsonl: toJsonl(coverLines), coverRefs } : {}),
-          };
           state.phase = "apply";
         }
         await save();
@@ -546,7 +573,7 @@ async function processBulk(jobId: string) {
         if (BULK_ACTIVE.includes(op.status)) break;
         state.stats.operationMs += Date.now() - ap.startedAt;
 
-        const field = ap.kind === "product" ? "productUpdate" : "fileUpdate";
+        const field = ap.kind === "product" ? "productUpdate" : ap.kind === "cover" ? "fileUpdate" : "publishablePublish";
         const results = parseBulkResult(await fetchBulkText(op.url ?? op.partialDataUrl), field);
         const okLines = new Set(results.filter((r) => r.ok).map((r) => r.line));
         const errByLine = new Map(results.filter((r) => !r.ok).map((r) => [r.line, r.error!]));
@@ -557,14 +584,16 @@ async function processBulk(jobId: string) {
           counts.errors++;
           if (ap.kind === "product") counts.changed = Math.max(0, counts.changed - 1);
           logs.push(errorRow({ isbn: ref.isbn, title: ref.handle, action: "book_update", shopify_id: ref.id, job_id: jobId, user_id: userId },
-            `Feil i bulk (${ap.kind === "product" ? "produkt/metafelt" : "omslag"}): ${err}`));
+            `Feil i bulk (${ap.kind === "product" ? "produkt/metafelt" : ap.kind === "cover" ? "omslag" : "publisering på kanaler"}): ${err}`));
         });
         await insertLogs(supabase, logs);
 
-        if (ap.kind === "product" && ap.coverJsonl) {
-          const opId = await startBulkMutation(BULK_COVER_MUTATION, ap.coverJsonl, "book-cover.jsonl");
+        // Gammel form (coverJsonl) leses som en kø med én operasjon
+        const queue = ap.queue ?? (ap.coverJsonl ? [{ kind: "cover" as const, jsonl: ap.coverJsonl, refs: ap.coverRefs ?? [] }] satisfies ApplyOp[] : []);
+        if (queue.length) {
+          const [next, ...rest] = queue;
+          state.apply = { ...(await startApplyOp(next)), queue: rest };
           state.stats.operations++;
-          state.apply = { kind: "cover", opId, refs: ap.coverRefs ?? [], startedAt: Date.now() };
         } else {
           state.apply = undefined;
           state.phase = "plan";

@@ -12,6 +12,7 @@
 
 import { BOOK_METAFIELD_KEYS, type BookUpdatePlan, type ShopifyBookProduct } from "./book-update.ts";
 import { protectedProduct, type ProtectableProduct } from "./protected.ts";
+import { PUBLISHED_ON_BULK_FIELD } from "./publish.ts";
 
 /**
  * Bulk-spørring med de samme feltene som BOOK_UPDATE_PRODUCT_FIELDS + ISBN-feltene.
@@ -20,7 +21,7 @@ import { protectedProduct, type ProtectableProduct } from "./protected.ts";
 export const BULK_PRODUCTS_QUERY = `{
   products(query: "status:active OR status:draft OR status:archived") {
     edges { node {
-      __typename id handle title vendor productType tags descriptionHtml
+      __typename id handle title status vendor productType tags descriptionHtml
       category { id }
       ${BOOK_METAFIELD_KEYS.map((k) => `mf_${k}: metafield(namespace: "bok", key: "${k}") { value }`).join("\n      ")}
       bokIsbn: metafield(namespace: "bok", key: "isbn") { value }
@@ -29,6 +30,7 @@ export const BULK_PRODUCTS_QUERY = `{
       seoAuto: metafield(namespace: "bokadmin", key: "seo_auto") { value }
       media(first: 1) { edges { node { __typename id alt ... on MediaImage { image { url } } } } }
       variants(first: 1) { edges { node { __typename id barcode sku } } }
+      ${PUBLISHED_ON_BULK_FIELD}
     } }
   }
 }`;
@@ -45,6 +47,9 @@ export type BulkProduct = ShopifyBookProduct & {
   bokIsbn?: { value: string } | null;
   variants: { nodes: Array<{ id?: string; barcode: string | null; sku: string | null }> };
   media: { nodes: Array<{ id: string; alt?: string | null; image?: { url: string } | null }> };
+  /** Salgskanalene produktet er publisert på (bare når spørringen har PUBLISHED_ON_BULK_FIELD) */
+  publicationIds?: string[];
+  status?: string | null;
 };
 
 /**
@@ -82,7 +87,7 @@ export class BulkProductAssembler {
       if (!this.keep(index)) return;
       delete o.__typename;
       const base = this.slim ? Object.fromEntries(this.slim.map((k) => [k, o[k]])) : o;
-      const p = { ...base, media: { nodes: [] }, variants: { nodes: [] } } as BulkProduct;
+      const p = { ...base, media: { nodes: [] }, variants: { nodes: [] }, publicationIds: [] } as BulkProduct;
       this.products.push(p);
       this.byId.set(p.id, p);
       return;
@@ -90,6 +95,12 @@ export class BulkProductAssembler {
     const parent = this.byId.get(o.__parentId);
     if (!parent) return;
     const { __parentId: _p, __typename: type, ...node } = o;
+    // Kanalene produktet er publisert på (PUBLISHED_ON_BULK_FIELD)
+    // Typenavnet i API 2026-07 er ResourcePublicationV2 (sjekket mot Testbutikk), så vi går på selve feltet
+    if (node.publication?.id) {
+      parent.publicationIds!.push(node.publication.id);
+      return;
+    }
     if (type === "ProductVariant" || (!type && ("barcode" in node || "sku" in node))) {
       if (!parent.variants.nodes.length) parent.variants.nodes.push(node);
     } else if (!this.slim && !parent.media.nodes.length) {

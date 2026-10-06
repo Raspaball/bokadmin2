@@ -12,7 +12,8 @@ import { extractAvailabilityCode, extractPublishingDate } from "../_shared/onix.
 import { isFatalJobError, protectedProduct, protectedProductMessage } from "../_shared/protected.ts";
 import { ensureProtectedMembers } from "../_shared/protected-load.ts";
 import { extractProductForm } from "../_shared/onix.js";
-import { isBookForm, notBookMessage, notBookSkip, NOT_IN_BOKBASEN_MESSAGE } from "../_shared/book-format.ts";
+import { bookFormat, isBookForm, notBookMessage, notBookSkip, NOT_IN_BOKBASEN_MESSAGE } from "../_shared/book-format.ts";
+import { channelsToPublish, getAllPublicationIds, PUBLISH_BULK_MUTATION, publishBulkLine, publishSummary } from "../_shared/publish.ts";
 import {
   changedRow, errorRow, NO_ISBN_MESSAGE, skipRow, unchangedRow, type JobLogRow, type LogBase,
 } from "../_shared/job-log.ts";
@@ -483,6 +484,8 @@ interface AvailabilityCounts {
   changed: number; unchanged: number; errors: number;
   skippedNoIsbn: number; skippedNoOnix: number; skippedProtected: number; skippedDuplicate: number;
   skippedOwnAvailability: number; skippedArchived: number; skippedNotBook: number; keptInStock: number; untracked: number;
+  /** Bøker som blir aktive og publiseres på kanaler de mangler (pakke H del 2), og antall kanaler til sammen */
+  publishProducts: number; publishChannels: number;
 }
 
 function loadAvailabilityCounts(raw: unknown): AvailabilityCounts {
@@ -493,6 +496,7 @@ function loadAvailabilityCounts(raw: unknown): AvailabilityCounts {
     skippedNoOnix: n("skippedNoOnix"), skippedProtected: n("skippedProtected"), skippedDuplicate: n("skippedDuplicate"),
     skippedOwnAvailability: n("skippedOwnAvailability"), skippedArchived: n("skippedArchived"),
     skippedNotBook: n("skippedNotBook"), keptInStock: n("keptInStock"), untracked: n("untracked"),
+    publishProducts: n("publishProducts"), publishChannels: n("publishChannels"),
   };
 }
 
@@ -502,7 +506,7 @@ function summarizeAvailability(c: AvailabilityCounts, mode: "analyze" | "update"
   return `${c.changed} ${mode === "update" ? "endret" : "ville endret"}, ${c.unchanged} uendret, hoppet over ${skipped} ` +
     `(${c.skippedProtected} beskyttet, ${c.skippedArchived} arkivert, ${c.skippedDuplicate} DUPLIKAT, ${c.skippedNoIsbn} uten ISBN, ` +
     `${c.skippedNoOnix} fant ikke boka i Bokbasen, ${c.skippedNotBook} ikke bok), ${c.skippedOwnAvailability} egen tilgjengelighet, ` +
-    `${c.keptInStock} status beholdt (på lager), ${c.untracked} med sporing av beholdning slått av, ${c.errors} feil`;
+    `${c.keptInStock} status beholdt (på lager), ${c.untracked} med sporing av beholdning slått av, ${c.publishProducts ? `${publishSummary(c.publishProducts, c.publishChannels, mode === "update")}, ` : ""}${c.errors} feil`;
 }
 
 /** Feltnavnene i loggen (sync_log.fields) */
@@ -549,7 +553,9 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
     const logs: Record<string, unknown>[] = [];
     const variantLines: unknown[] = [], variantRefs: BulkRef[] = [];
     const productLines: unknown[] = [], productRefs: BulkRef[] = [];
+    const publishLines: unknown[] = [], publishRefs: BulkRef[] = [];
     const update = ctx.mode === "update";
+    const allChannels = await getAllPublicationIds(); // kanalene appen publiserer på (_shared/publish.ts)
 
     // Én loggrad per produkt (pakke F del 3.1)
     for (const product of products) {
@@ -599,7 +605,20 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
       if (Object.keys(plan.heldBack).length) c.skippedOwnAvailability++;
       if (Object.keys(plan.stockKept).length) c.keptInStock++;
       if (plan.changes.untrack) c.untracked++;
-      logs.push(availabilityPlanRow(base, plan, rule, date, update));
+      const row = availabilityPlanRow(base, plan, rule, date, update);
+      logs.push(row);
+      // Blir boka aktiv, publiseres den på kanalene den mangler (bare bøker; lydbøker, e-bøker og beskyttede røres ikke)
+      if (plan.changes.status?.to === "ACTIVE") {
+        const form = extractProductForm(xml);
+        const missing = channelsToPublish(allChannels, p, bookFormat(form.form, form.details).productType, true);
+        if (missing.length) {
+          c.publishProducts++;
+          c.publishChannels += missing.length;
+          row.message = `${row.message ?? ""} + ${publishSummary(1, missing.length, update)}`.trim();
+          row.fields = [...(row.fields ?? []), "publisering"];
+          if (update) { publishLines.push(publishBulkLine(product.id, missing)); publishRefs.push({ id: product.id, isbn, handle: product.handle }); }
+        }
+      }
       if (!Object.keys(plan.changes).length) { c.unchanged++; continue; }
       c.changed++;
       if (!update) continue;
@@ -614,6 +633,8 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
         // CONTINUE først: blir boka aktiv, er den da allerede kjøpbar
         { kind: "variant", mutation: AVAILABILITY_BULK_VARIANT_MUTATION, field: "productVariantsBulkUpdate", lines: variantLines, refs: variantRefs, filename: "availability-variants.jsonl" },
         { kind: "product", mutation: AVAILABILITY_BULK_PRODUCT_MUTATION, field: "productUpdate", lines: productLines, refs: productRefs, filename: "availability-products.jsonl" },
+        // Publisering sist: boka er aktiv og kjøpbar når den kommer på kanalene
+        { kind: "publish", mutation: PUBLISH_BULK_MUTATION, field: "publishablePublish", lines: publishLines, refs: publishRefs, filename: "availability-publish.jsonl" },
       ],
     };
   },
@@ -628,7 +649,7 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
     }
     return errorRow(
       { isbn: ref.isbn, title: ref.handle, action: "availability_update", shopify_id: ref.id, job_id: ctx.jobId, user_id: ctx.userId },
-      `Feil i bulk (${kind === "variant" ? "salg uten lager / sporing" : "status/metafelt"}): ${error}`,
+      `Feil i bulk (${kind === "variant" ? "salg uten lager / sporing" : kind === "publish" ? "publisering på kanaler" : "status/metafelt"}): ${error}`,
     );
   },
 
@@ -644,6 +665,7 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
       skippedProtected: c.skippedProtected, skippedDuplicate: c.skippedDuplicate,
       skippedOwnAvailability: c.skippedOwnAvailability, skippedArchived: c.skippedArchived,
       skippedNotBook: c.skippedNotBook, keptInStock: c.keptInStock, untracked: c.untracked,
+      publishProducts: c.publishProducts, publishChannels: c.publishChannels,
       statusChanges: ctx.state.extra.statusChanges ?? [], shopDomain: Deno.env.get("SHOPIFY_SHOP_DOMAIN") ?? null,
       summary: `${summarizeAvailability(c, ctx.mode)}. ${summarizeBulkStats(ctx.state.stats)}`,
     };

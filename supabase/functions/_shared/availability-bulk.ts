@@ -10,6 +10,7 @@
 import { ALL_PRODUCT_STATUSES } from "./shopify.ts";
 import { availabilityMetafields, type AvailabilityPlan, type AvailabilityRule } from "./availability.ts";
 import { protectedProduct, type ProtectableProduct } from "./protected.ts";
+import { PUBLISHED_ON_BULK_FIELD } from "./publish.ts";
 
 export const AVAILABILITY_BULK_QUERY = `{
   products(query: "${ALL_PRODUCT_STATUSES}") {
@@ -20,6 +21,8 @@ export const AVAILABILITY_BULK_QUERY = `{
       utgivelsesdato: metafield(namespace: "bok", key: "utgivelsesdato") { value }
       egenTilgjengelighet: metafield(namespace: "bok", key: "egen_tilgjengelighet") { value }
       variants(first: 1) { edges { node { __typename id barcode sku inventoryPolicy inventoryItem { tracked } } } }
+      productType
+      ${PUBLISHED_ON_BULK_FIELD}
     } }
   }
 }`;
