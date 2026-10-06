@@ -594,9 +594,13 @@ async function pushOneBook(
   // Publish to every available sales channel — productCreate does not do this
   // on its own, so a freshly exported product would otherwise sit at "0
   // salgskanaler" until someone publishes it manually in Shopify Admin.
-  try {
-    await publishToAllChannels(product.id as string, getShopDomain()); // felles regel: _shared/publish.ts
-  } catch (_) { /* non-critical — product still exists, just unpublished */ }
+  // Lydbøker og e-bøker publiseres ikke (pakke H); uten ONIX publiseres bare en ny bok (blir «Bok»)
+  const publishType = fields ? fields.productType : isUpdate ? null : "Bok";
+  if (publishType === "Bok") {
+    try {
+      await publishToAllChannels(product.id as string, getShopDomain()); // felles regel: _shared/publish.ts
+    } catch (_) { /* non-critical — product still exists, just unpublished */ }
+  }
 
   const variantId = (product.variants as { edges: { node: { id: string } }[] })?.edges?.[0]?.node?.id;
 
