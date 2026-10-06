@@ -82,3 +82,27 @@ test("gammel automatikk: tittel og 320 tegn", () => {
   assert.equal(legacySeo("X", "a".repeat(400)).description.length, 320);
   assert.equal(parseSeoAuto("ikke json"), null);
 });
+
+test("beskrivelse: tittelen først i forlagsteksten fjernes, resten får stor forbokstav", () => {
+  const solaris = { title: "Solaris", authors: ["Astrid Munkebye"], format: "Innbundet", year: 2022 };
+  assert.equal(
+    metaDescription({ ...solaris, description: "Solaris inneholder en rekke aktiviteter." }),
+    "Solaris av Astrid Munkebye (Innbundet, 2022). Inneholder en rekke aktiviteter.",
+  );
+  assert.equal(
+    metaDescription({ ...solaris, description: "SOLARIS: en bok om natur." }),
+    "Solaris av Astrid Munkebye (Innbundet, 2022). En bok om natur.",
+  );
+  // ikke helt ord: «Solarisen» beholdes (men får stor forbokstav)
+  assert.equal(
+    metaDescription({ ...solaris, description: "solarisen er et skip." }),
+    "Solaris av Astrid Munkebye (Innbundet, 2022). Solarisen er et skip.",
+  );
+  // hovedtittel (før kolon) fjernes også
+  assert.equal(
+    metaDescription({ ...solaris, title: "Solaris: Naturfag 3-4", description: "Solaris har aktiviteter." }),
+    "Solaris av Astrid Munkebye (Innbundet, 2022). Har aktiviteter.",
+  );
+  // bare tittelen som tekst → bare prefikset
+  assert.equal(metaDescription({ ...solaris, description: "Solaris" }), "Solaris av Astrid Munkebye (Innbundet, 2022).");
+});

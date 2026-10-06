@@ -86,12 +86,30 @@ function cutText(text: string, max: number): string {
   return cutAtWord(text, max - 1) + "…";
 }
 
+/**
+ * Forlagsteksten uten tittelen i starten (tittelen står allerede først i metabeskrivelsen),
+ * og med stor forbokstav: «Solaris inneholder en …» → «Inneholder en …». Tittelen fjernes
+ * bare som helt ord (ikke «Solaris» i «Solarisen …»), sammen med skilletegnet etter.
+ */
+export function bodyWithoutTitle(body: string, titles: string[]): string {
+  let text = body.trim();
+  const candidates = [...new Set(titles.map((t) => plainOneLine(t)).filter(Boolean))].sort((a, b) => b.length - a.length);
+  for (const t of candidates) {
+    if (text.length < t.length || text.slice(0, t.length).toLocaleLowerCase("nb") !== t.toLocaleLowerCase("nb")) continue;
+    const rest = text.slice(t.length);
+    if (rest && /^[\p{L}\p{N}]/u.test(rest)) continue;
+    text = rest.replace(/^[\s.,:;–—-]+/, "");
+    break;
+  }
+  return text.charAt(0).toLocaleUpperCase("nb") + text.slice(1);
+}
+
 export function metaDescription({ title, authors, format, year, description }: SeoInput): string {
   const main = plainOneLine(mainTitle(title)) || plainOneLine(title);
   const author = personAuthors(authors)[0] || "";
   const details = [shownFormat(format), year ? String(year) : ""].filter(Boolean).join(", ");
   const prefix = `${main}${author ? ` av ${author}` : ""}${details ? ` (${details})` : ""}.`;
-  const body = plainOneLine(description);
+  const body = bodyWithoutTitle(plainOneLine(description), [title, mainTitle(title)]);
   if (prefix.length >= SEO_DESCRIPTION_MAX) return cutText(prefix, SEO_DESCRIPTION_MAX);
   if (!body) return prefix;
   return `${prefix} ${cutText(body, SEO_DESCRIPTION_MAX - prefix.length - 1)}`.trim();
