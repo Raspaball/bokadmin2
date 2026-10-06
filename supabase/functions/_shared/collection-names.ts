@@ -242,3 +242,37 @@ export const COLLECTION_NAMES: Record<string, string> = {
   '943': 'Fantasy/SF på originalspråket, voksen',
   '944': 'Skjønnlitteratur på originalspråket, barn og ungdom',
 };
+
+/**
+ * Unike samlingstitler (pakke H, etter sjekkrapport 06.10). Flere koder har samme navn i
+ * bokgruppelista («Jus» under både 21 og 22, «Verk» som både 6 og 60), og to samlinger med
+ * samme tittel kan ikke skilles i butikken. Regel for koder som deler navn:
+ *  1. «{navn} – {overordnet navn}» når den overordnede gruppen har et annet navn og
+ *     resultatet er unikt («Jus – Fagbøker, høyere utdanning»).
+ *  2. Ellers («Skolebøker» 1 og 11, «Verk» 6 og 60): den korteste koden beholder navnet,
+ *     de andre får «{navn} ({kode})» («Verk (60)»).
+ * Koder med unikt navn er uendret. Brukes for samlingene (shopify, sjangre-sync); menyen
+ * viser COLLECTION_NAMES, siden den står under foreldrene.
+ */
+export function uniqueCollectionTitles(names: Record<string, string>): Record<string, string> {
+  const groups = new Map<string, string[]>();
+  for (const [code, title] of Object.entries(names)) groups.set(title, [...(groups.get(title) ?? []), code]);
+  const out: Record<string, string> = { ...names };
+  const taken = new Set([...groups].filter(([, v]) => v.length === 1).map(([t]) => t));
+  for (const [title, codes] of groups) {
+    if (codes.length < 2) continue;
+    const rest: string[] = [];
+    for (const code of codes) {
+      const parent = names[code.slice(0, -1)];
+      const candidate = parent && parent !== title ? `${title} – ${parent}` : null;
+      if (candidate && !taken.has(candidate)) { out[code] = candidate; taken.add(candidate); } else rest.push(code);
+    }
+    rest.sort((a, b) => a.length - b.length || a.localeCompare(b));
+    rest.forEach((code, i) => {
+      if (i === 0 && !taken.has(title)) { out[code] = title; taken.add(title); } else { out[code] = `${title} (${code})`; taken.add(out[code]); }
+    });
+  }
+  return out;
+}
+
+export const COLLECTION_TITLES: Record<string, string> = uniqueCollectionTitles(COLLECTION_NAMES);

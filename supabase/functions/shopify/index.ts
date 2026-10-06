@@ -19,7 +19,7 @@ import { getMaxPriceChangePct, recordPendingApproval } from "../_shared/price-ap
 import { EGEN_PRIS_FIELD, priceLock, priceLockMessage } from "../_shared/price-lock.ts";
 import { bokgruppeTagsForKode } from "../_shared/bokgruppe.ts";
 import { COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, collectionTitleFix, tagSources } from "../_shared/collections.ts";
-import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
+import { COLLECTION_NAMES, COLLECTION_TITLES } from "../_shared/collection-names.ts";
 import { bookDescription, bookFieldsFromOnix, bookMetafields, canReplaceDescription, descriptionHtml, fallbackDescription, legacyFallbackDescription, type BookFields } from "../_shared/book-standard.ts";
 import { CATEGORY_IDS, CATEGORY_NAMES, notBookSkip } from "../_shared/book-format.ts";
 import { bookSeo, decideSeo, legacySeo, mergeSeoAutoBody, parseSeoAuto, parseSeoAutoBody, seoMetafields } from "../_shared/book-seo.ts";
@@ -929,7 +929,7 @@ async function ensureCollections(
 
   for (const code of sortedCodes) {
     const handle = `bkg-${code}`;
-    const title = COLLECTION_NAMES[code] ?? `Bokgruppe ${code}`;
+    const title = COLLECTION_TITLES[code] ?? `Bokgruppe ${code}`;
     const tag = `bkg-${code}`;
     const level = code.length;
 
@@ -940,7 +940,7 @@ async function ensureCollections(
       if (existingCol?.id) {
         existing++;
         // Feil navn på en eksisterende samling: rett tittelen (handle endres ikke)
-        const fixed = collectionTitleFix(existingCol.title, COLLECTION_NAMES[code]);
+        const fixed = collectionTitleFix(existingCol.title, COLLECTION_TITLES[code]);
         if (fixed) {
           const ur = await shopifyGraphQL(COLLECTION_UPDATE_MUTATION, { collection: { id: existingCol.id, title: fixed } });
           const ue = ur.data?.collectionUpdate?.userErrors as { message: string }[] | undefined;
