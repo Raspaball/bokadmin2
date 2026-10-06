@@ -15,6 +15,20 @@ export const BOKGRUPPE_METAFIELD = Object.freeze({ namespace: "bok", key: "bokgr
 /** GraphQL-felt på produktet */
 export const BOKGRUPPE_FIELD = `bokgruppe: metafield(namespace: "bok", key: "bokgruppe") { value }`;
 
+/**
+ * Bokgruppekoden fra bkg-taggene (den lengste, «bkg-417» → «417»), for produkter uten bok.bokgruppe ennå.
+ * Samme kode som metafeltet, siden begge settes ut fra samme ONIX-kode.
+ */
+export function bokgruppeFromTags(tags: unknown): string | null {
+  const list = Array.isArray(tags) ? tags : typeof tags === "string" ? tags.split(",") : [];
+  let best = "";
+  for (const t of list) {
+    const m = /^bkg-(\d{1,3})$/i.exec(String(t).trim());
+    if (m && m[1].length > best.length) best = m[1];
+  }
+  return best || null;
+}
+
 /** «417» → ["bkg-4", "bkg-41", "bkg-417"] */
 export function bokgruppeTagsForKode(kode: string): string[] {
   const k = String(kode ?? "").trim();

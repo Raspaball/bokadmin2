@@ -12,6 +12,7 @@ export declare function extractAllContributors(xml: string): { role: string | nu
 export declare function extractContributors(xml: string): { authors: string[]; role: string | null; institutions: { name: string; role: string | null; reason: string }[] };
 export declare function extractInvertedNames(xml: string): string[];
 export declare function extractAvailabilityCode(xml: string): string | null;
+export declare function extractReplacedBy(xml: string): string[];
 export declare function extractProductForm(xml: string): { form: string | null; details: string[] };
 export declare function extractPages(xml: string): number | null;
 export declare function extractPublicationYear(xml: string): number | null;

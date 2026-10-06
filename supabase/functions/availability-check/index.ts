@@ -8,11 +8,16 @@ import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
 import { getCaller, scheduledUserId } from "../_shared/auth.ts";
 import { BOKBASEN_ONIX_URL, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { BOK_ISBN_FIELD, extractIsbn } from "../_shared/isbn.js";
-import { extractAvailabilityCode, extractPublishingDate } from "../_shared/onix.js";
+import { extractAvailabilityCode, extractPublishingDate, extractReplacedBy } from "../_shared/onix.js";
 import { isFatalJobError, protectedProduct, protectedProductMessage } from "../_shared/protected.ts";
 import { ensureProtectedMembers } from "../_shared/protected-load.ts";
 import { extractProductForm } from "../_shared/onix.js";
 import { bookFormat, isBookForm, notBookMessage, notBookSkip, NOT_IN_BOKBASEN_MESSAGE } from "../_shared/book-format.ts";
+import { bokgruppeFromTags } from "../_shared/bokgruppe.ts";
+import {
+  applyRedirectOps, chooseRedirectTarget, findActiveReplacement, handlePath, loadCollectionHandles, loadHandleRedirects, loadRedirectsFor,
+  planRedirect, planRemoveRedirect, wantsRedirect, type RedirectOp, type RedirectRow,
+} from "../_shared/redirects.ts";
 import { channelsToPublish, getAllPublicationIds, PUBLISH_BULK_MUTATION, publishBulkLine, publishSummary } from "../_shared/publish.ts";
 import {
   changedRow, errorRow, NO_ISBN_MESSAGE, skipRow, unchangedRow, type JobLogRow, type LogBase,
@@ -486,6 +491,8 @@ interface AvailabilityCounts {
   skippedOwnAvailability: number; skippedArchived: number; skippedNotBook: number; keptInStock: number; untracked: number;
   /** Bøker som blir aktive og publiseres på kanaler de mangler (pakke H del 2), og antall kanaler til sammen */
   publishProducts: number; publishChannels: number;
+  /** Videresending for arkiverte bøker (pakke H del 3b): per måltype, uten mål, og fjernet fordi boka er aktiv igjen */
+  redirectReplacement: number; redirectCollection: number; redirectNone: number; redirectRemoved: number;
 }
 
 function loadAvailabilityCounts(raw: unknown): AvailabilityCounts {
@@ -497,6 +504,7 @@ function loadAvailabilityCounts(raw: unknown): AvailabilityCounts {
     skippedOwnAvailability: n("skippedOwnAvailability"), skippedArchived: n("skippedArchived"),
     skippedNotBook: n("skippedNotBook"), keptInStock: n("keptInStock"), untracked: n("untracked"),
     publishProducts: n("publishProducts"), publishChannels: n("publishChannels"),
+    redirectReplacement: n("redirectReplacement"), redirectCollection: n("redirectCollection"), redirectNone: n("redirectNone"), redirectRemoved: n("redirectRemoved"),
   };
 }
 
@@ -506,7 +514,13 @@ function summarizeAvailability(c: AvailabilityCounts, mode: "analyze" | "update"
   return `${c.changed} ${mode === "update" ? "endret" : "ville endret"}, ${c.unchanged} uendret, hoppet over ${skipped} ` +
     `(${c.skippedProtected} beskyttet, ${c.skippedArchived} arkivert, ${c.skippedDuplicate} DUPLIKAT, ${c.skippedNoIsbn} uten ISBN, ` +
     `${c.skippedNoOnix} fant ikke boka i Bokbasen, ${c.skippedNotBook} ikke bok), ${c.skippedOwnAvailability} egen tilgjengelighet, ` +
-    `${c.keptInStock} status beholdt (på lager), ${c.untracked} med sporing av beholdning slått av, ${c.publishProducts ? `${publishSummary(c.publishProducts, c.publishChannels, mode === "update")}, ` : ""}${c.errors} feil`;
+    `${c.keptInStock} status beholdt (på lager), ${c.untracked} med sporing av beholdning slått av, ${c.publishProducts ? `${publishSummary(c.publishProducts, c.publishChannels, mode === "update")}, ` : ""}${redirectSummary(c, mode === "update")}${c.errors} feil`;
+}
+
+/** «videresending: 3 til ny utgave, 10 til samling, 2 uten mål, 1 fjernet, » (tom når ingen) */
+function redirectSummary(c: AvailabilityCounts, update: boolean): string {
+  if (!(c.redirectReplacement + c.redirectCollection + c.redirectNone + c.redirectRemoved)) return "";
+  return `videresending${update ? "" : " (ville bli)"}: ${c.redirectReplacement} til ny utgave, ${c.redirectCollection} til samling, ${c.redirectNone} uten mål, ${c.redirectRemoved} fjernet (aktiv igjen), `;
 }
 
 /** Feltnavnene i loggen (sync_log.fields) */
@@ -529,6 +543,41 @@ function availabilityPlanRow(base: LogBase, plan: AvailabilityPlan, rule: Availa
   return unchangedRow(base, `Uendret: ${availabilityDescription(rule, date)}`);
 }
 
+type ShopifyProductLike = { id: string; handle: string; status?: string | null; tags?: unknown; vendor?: string | null; bokgruppe?: { value?: string } | null };
+
+/**
+ * Videresending for én bok (pakke H del 3b), eller null når boka ikke skal røres. I oppdateringsmodus
+ * gjøres endringene direkte (få, ikke bulk); i sjekkmodus bare leses det. Teller bare det som trenger en endring.
+ * Aktive bøker som har en videresending fra handlen får den slettet (og ISBN-adressen peker tilbake til boka).
+ */
+async function redirectForBook(
+  ctx: BulkJobContext<AvailabilityCounts>, p: ShopifyProductLike, isbn: string | null, code: string | null,
+  statusAfter: string, xml: string | null, update: boolean, examples: string[],
+): Promise<string | null> {
+  const c = ctx.counts;
+  if (protectedProduct(p)) return null;
+  if (statusAfter === "ACTIVE") {
+    const known = (ctx.state.extra.handleRedirects ?? {}) as Record<string, RedirectRow>;
+    if (!known[handlePath(p.handle)]) return null;
+    const ops = planRemoveRedirect(p.handle, isbn, await loadRedirectsFor(p.handle, isbn));
+    if (!ops.length) return null;
+    c.redirectRemoved++;
+    if (update) await applyRedirectOps(ops);
+    return `${update ? "videresending fjernet" : "videresendingen ville blitt fjernet"} fra ${handlePath(p.handle)} (boka er aktiv igjen)`;
+  }
+  if (!wantsRedirect(p, code, statusAfter)) return null;
+  const replacement = code === "41" && xml ? await findActiveReplacement(extractReplacedBy(xml)) : null;
+  const t = chooseRedirectTarget(code, replacement, p.bokgruppe?.value || bokgruppeFromTags(p.tags), new Set<string>(ctx.state.extra.collectionHandles ?? []));
+  if (!t.target) { c.redirectNone++; return `ingen videresending (${t.note})`; }
+  const ops: RedirectOp[] = planRedirect(p.handle, isbn, t.target, await loadRedirectsFor(p.handle, isbn));
+  const line = `${handlePath(p.handle)} → ${t.target}`;
+  if (!ops.length) return `videresending finnes: ${line}`;
+  if (t.kind === "erstatning") c.redirectReplacement++; else c.redirectCollection++;
+  if (examples.length < 10) examples.push(`${line} (${t.kind === "erstatning" ? "ny utgave" : "samling"})`);
+  if (update) await applyRedirectOps(ops);
+  return `${update ? "videresending" : "ville videresendt"} ${line}`;
+}
+
 const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
   name: "availability-check (bulk)",
   query: AVAILABILITY_BULK_QUERY,
@@ -538,7 +587,11 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
   // er under 2 timer gammel, f.eks. rett etter bokdata-jobben ved overgangen.
   onixMaxAgeDays: 2 / 24,
 
-  onixIsbns(products) {
+  async onixIsbns(products, ctx) {
+    // Til videresendingene (pakke H del 3b): samlingene som finnes, og videresendingene fra handle-adresser
+    // (til å finne bøker som er aktive igjen). ISBN-adressene (8 000+) slås opp per bok.
+    ctx.state.extra.collectionHandles = await loadCollectionHandles();
+    ctx.state.extra.handleRedirects = await loadHandleRedirects();
     return products
       .filter((p) => !protectedProduct(p) && !availabilitySkip(p as { status?: string }))
       .map((p) => extractIsbn(p))
@@ -555,6 +608,17 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
     const productLines: unknown[] = [], productRefs: BulkRef[] = [];
     const publishLines: unknown[] = [], publishRefs: BulkRef[] = [];
     const update = ctx.mode === "update";
+    // Videresending for arkiverte bøker (pakke H del 3b): legger teksten på loggraden. Feil blir egen feilrad, resten går videre.
+    const redirectExamples: string[] = (ctx.state.extra.redirectExamples ??= []);
+    const addRedirect = async (row: JobLogRow, base: LogBase, p: ShopifyProductLike, isbn: string | null, code: string | null, statusAfter: string, xml: string | null) => {
+      try {
+        const msg = await redirectForBook(ctx, p, isbn, code, statusAfter, xml, update, redirectExamples);
+        if (msg) { row.message = `${row.message} + ${msg}`; row.fields = [...(row.fields ?? []), "videresending"]; }
+      } catch (e) {
+        c.errors++;
+        logs.push(errorRow(base, `Feil ved videresending: ${String(e)}`));
+      }
+    };
     const allChannels = await getAllPublicationIds(); // kanalene appen publiserer på (_shared/publish.ts)
 
     // Én loggrad per produkt (pakke F del 3.1)
@@ -570,7 +634,10 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
       }
       if (availabilitySkip(p) === "arkivert") {
         c.skippedArchived++;
-        logs.push(skipRow(base, "arkivert", ARCHIVED_MESSAGE));
+        const archivedRow = skipRow(base, "arkivert", ARCHIVED_MESSAGE);
+        logs.push(archivedRow);
+        // Arkivert av Bokadmin (bok.tilgjengelighet = utgatt: kode 43, 46 eller 49): videresending til samlingen
+        await addRedirect(archivedRow, base, p, isbn, p.tilgjengelighet?.value === "utgatt" ? "43" : null, "ARCHIVED", null);
         continue;
       }
       if (!isbn) { c.skippedNoIsbn++; logs.push(skipRow(base, "ingen_isbn", NO_ISBN_MESSAGE)); continue; }
@@ -607,6 +674,7 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
       if (plan.changes.untrack) c.untracked++;
       const row = availabilityPlanRow(base, plan, rule, date, update);
       logs.push(row);
+      await addRedirect(row, base, p, isbn, rule.code, plan.changes.status?.to ?? p.status ?? "DRAFT", xml);
       // Blir boka aktiv, publiseres den på kanalene den mangler (bare bøker; lydbøker, e-bøker og beskyttede røres ikke)
       if (plan.changes.status?.to === "ACTIVE") {
         const form = extractProductForm(xml);
@@ -666,6 +734,8 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
       skippedOwnAvailability: c.skippedOwnAvailability, skippedArchived: c.skippedArchived,
       skippedNotBook: c.skippedNotBook, keptInStock: c.keptInStock, untracked: c.untracked,
       publishProducts: c.publishProducts, publishChannels: c.publishChannels,
+      redirectReplacement: c.redirectReplacement, redirectCollection: c.redirectCollection, redirectNone: c.redirectNone, redirectRemoved: c.redirectRemoved,
+      redirectExamples: ctx.state.extra.redirectExamples ?? [],
       statusChanges: ctx.state.extra.statusChanges ?? [], shopDomain: Deno.env.get("SHOPIFY_SHOP_DOMAIN") ?? null,
       summary: `${summarizeAvailability(c, ctx.mode)}. ${summarizeBulkStats(ctx.state.stats)}`,
     };

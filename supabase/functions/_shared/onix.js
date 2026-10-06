@@ -372,6 +372,26 @@ function blocks(xml, tag) {
 }
 
 /**
+ * ISBN-13 for utgaver som erstatter denne boka: RelatedProduct med ProductRelationCode 05
+ * («Replaced by», List 51), identifisert med ProductIDType 15 (ISBN-13) eller 03 (GTIN-13).
+ * @param {string} xml
+ * @returns {string[]}
+ */
+export function extractReplacedBy(xml) {
+  const x = stripNamespaces(xml);
+  const out = [];
+  for (const rel of blocks(x, "RelatedProduct")) {
+    if (firstText(rel, "ProductRelationCode") !== "05") continue;
+    for (const id of blocks(rel, "ProductIdentifier")) {
+      const type = firstText(id, "ProductIDType");
+      const value = firstText(id, "IDValue").replace(/[-\s]/g, "");
+      if ((type === "15" || type === "03") && /^\d{13}$/.test(value) && !out.includes(value)) out.push(value);
+    }
+  }
+  return out;
+}
+
+/**
  * ProductForm (List 150) og ProductFormDetail (List 175).
  * @param {string} xml
  * @returns {{ form: string | null, details: string[] }}
