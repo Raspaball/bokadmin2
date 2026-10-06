@@ -17,6 +17,7 @@ import { duplicateMessage } from "../_shared/duplicates.ts";
 import { bkgCollectionPlan, type BkgCollectionPlan, COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, tagSources } from "../_shared/collections.ts";
 import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
 import { BOKGRUPPE_FIELD, BOKGRUPPE_METAFIELD, bokgruppeCollectionCodes, missingBokgruppeTags } from "../_shared/bokgruppe.ts";
+import { resumableJobFilter } from "../_shared/job-resume.ts";
 import { emptyBulkJobState, runBulkJob, summarizeBulkStats, type BulkJobContext, type BulkJobSpec, type BulkRef } from "../_shared/bulk-job.ts";
 
 // Felt extractIsbn trenger (bok.isbn, strekkode, SKU) — handle er ikke lenger ISBN
@@ -812,6 +813,20 @@ serve(async (req) => {
       const response = new Response(JSON.stringify({ jobId: job.id, status: "running", mode: bulk ? mode : "update", bulk }), { status: 202, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       // @ts-ignore
       EdgeRuntime.waitUntil(processSyncBatch(job.id));
+      return response;
+    }
+
+    // POST /sjangre-sync/resume-paused — pg_cron (anon-nøkkel, ingen bruker): gjenoppta EN pauset
+    // sjangersynk uansett user_id; processSyncBatch leser alt fra jobbens egen rad. Samme mønster som
+    // de andre jobbene (resumableJobFilter: pauset, eller «running» uten livstegn = død puls).
+    if (path === "resume-paused" && req.method === "POST") {
+      let q = supabase.from("jobs").select("id").eq("type", "sjangre_sync").or(resumableJobFilter()).order("created_at", { ascending: false }).limit(1);
+      if (userId) q = q.eq("user_id", userId);
+      const { data: paused } = await q;
+      if (!paused?.length) return new Response(JSON.stringify({ status: "no_paused_jobs" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      const response = new Response(JSON.stringify({ status: "resuming", jobId: paused[0].id }), { status: 202, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      // @ts-ignore
+      EdgeRuntime.waitUntil(processSyncBatch(paused[0].id));
       return response;
     }
 
