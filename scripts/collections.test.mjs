@@ -19,23 +19,32 @@ test("tagSources gir en smart samling på taggen", () => {
   assert.deepEqual(tagSources("bkg-3")[0].source.inclusion.conditions[0].productTag, { relation: "TAGGED_WITH", values: ["bkg-3"], matchType: "ANY" });
 });
 
-import { COLLECTION_TITLES, uniqueCollectionTitles } from "../supabase/functions/_shared/collection-names.ts";
+import { bkgCollectionPlan, newCollectionTitles } from "../supabase/functions/_shared/collections.ts";
 
-test("samlingstitler er unike, og unike navn er uendret", () => {
-  const titles = Object.values(COLLECTION_TITLES);
-  assert.equal(new Set(titles).size, titles.length);
-  assert.equal(Object.keys(COLLECTION_TITLES).length, Object.keys(COLLECTION_NAMES).length);
-  assert.equal(COLLECTION_TITLES["334"], "Ungdom – Sakprosa norsk, barn og ungdom");
-  assert.equal(COLLECTION_TITLES["344"], "Ungdom – Sakprosa oversatt, barn og ungdom");
-  for (const [code, name] of Object.entries(COLLECTION_NAMES)) {
-    if (Object.values(COLLECTION_NAMES).filter((n) => n === name).length === 1) assert.equal(COLLECTION_TITLES[code], name, code);
-  }
+test("nye samlinger med samme navn som en eksisterende eller en annen ny får « (kode)»; eksisterende omdøpes ikke", () => {
+  const names = { "21": "Fag", "211": "Jus", "22": "Fag 2", "221": "Jus", "414": "Skuespill", "424": "Skuespill", "6": "Verk", "60": "Verk", "500": "Unik" };
+  const current = new Map([["211", { id: "gid://1", title: "Jus" }], ["21", { id: "gid://2", title: "Fag" }]]);
+  const plan = bkgCollectionPlan(["21", "211", "22", "221", "414", "424", "6", "60", "500"], current, names);
+  assert.deepEqual(plan.rename, []);
+  assert.deepEqual(plan.existing, ["21", "211"]);
+  assert.deepEqual(plan.create.map((c) => [c.code, c.title, !!c.suffixed]), [
+    ["22", "Fag 2", false],
+    ["221", "Jus (221)", true], // «Jus» finnes fra før (211)
+    ["414", "Skuespill (414)", true], // to like nye: begge får tillegget
+    ["424", "Skuespill (424)", true],
+    ["6", "Verk (6)", true],
+    ["60", "Verk (60)", true],
+    ["500", "Unik", false],
+  ]);
 });
 
-test("samme navn som den overordnede gruppen: korteste kode beholder navnet, de andre får kode", () => {
-  assert.equal(COLLECTION_TITLES["6"], "Verk");
-  assert.equal(COLLECTION_TITLES["60"], "Verk (60)");
-  assert.equal(COLLECTION_TITLES["1"], "Skolebøker");
-  assert.equal(COLLECTION_TITLES["11"], "Skolebøker (11)");
-  assert.deepEqual(uniqueCollectionTitles({ "1": "A", "2": "B", "21": "A", "22": "A" }), { "1": "A", "2": "B", "21": "A – B", "22": "A (22)" });
+test("newCollectionTitles: ukjent kode gir «Bokgruppe NNN»; sammenligningen ser bort fra store/små bokstaver", () => {
+  const t = newCollectionTitles(["999", "1"], ["jus"], { "1": "Jus" });
+  assert.deepEqual(t.get("999"), { title: "Bokgruppe 999", suffixed: false });
+  assert.deepEqual(t.get("1"), { title: "Jus (1)", suffixed: true });
+});
+
+test("en eksisterende samling med feil navn rettes som før (Bokgruppe 334 → Ungdom)", () => {
+  const plan = bkgCollectionPlan(["334"], new Map([["334", { id: "gid://3", title: "Bokgruppe 334" }]]), { "334": "Ungdom" });
+  assert.deepEqual(plan.rename.map((r) => [r.code, r.to]), [["334", "Ungdom"]]);
 });

@@ -15,7 +15,7 @@ import { changedRow, errorRow, NO_ISBN_MESSAGE, skipRow, unchangedRow } from "..
 import { ensureDuplicates } from "../_shared/duplicate-scan.ts";
 import { duplicateMessage } from "../_shared/duplicates.ts";
 import { bkgCollectionPlan, type BkgCollectionPlan, COLLECTION_CREATE_MUTATION, COLLECTION_UPDATE_MUTATION, tagSources } from "../_shared/collections.ts";
-import { COLLECTION_TITLES } from "../_shared/collection-names.ts";
+import { COLLECTION_NAMES } from "../_shared/collection-names.ts";
 import { BOKGRUPPE_FIELD, BOKGRUPPE_METAFIELD, bokgruppeCollectionCodes, missingBokgruppeTags } from "../_shared/bokgruppe.ts";
 import { resumableJobFilter } from "../_shared/job-resume.ts";
 import { emptyBulkJobState, runBulkJob, summarizeBulkStats, type BulkJobContext, type BulkJobSpec, type BulkRef } from "../_shared/bulk-job.ts";
@@ -134,7 +134,7 @@ async function applyCollectionPlan(
 
 async function ensureCollections(koder: Set<string>): Promise<CollectionSyncResult> {
   const codes = bokgruppeCollectionCodes(koder);
-  const plan = bkgCollectionPlan(codes, await listBkgCollections(), COLLECTION_TITLES);
+  const plan = bkgCollectionPlan(codes, await listBkgCollections(), COLLECTION_NAMES);
   const result: CollectionSyncResult = {
     created: 0, existing: plan.existing.length, renamed: 0, errors: 0, total: codes.length,
     details: plan.existing.map((code) => ({ code, status: "existing" })),
@@ -516,7 +516,7 @@ const SJANGRE_BULK_SPEC: BulkJobSpec<SjangreCounts> = {
     const extra = ctx.state.extra;
     if (!extra.collectionPlan) {
       const codes = bokgruppeCollectionCodes(extra.koder ?? []);
-      extra.collectionPlan = bkgCollectionPlan(codes, await listBkgCollections(), COLLECTION_TITLES);
+      extra.collectionPlan = bkgCollectionPlan(codes, await listBkgCollections(), COLLECTION_NAMES);
       extra.collectionResult = {
         created: 0, existing: extra.collectionPlan.existing.length, renamed: 0, errors: 0, total: codes.length, details: [],
         toCreate: extra.collectionPlan.create.length, toRename: extra.collectionPlan.rename.length,
