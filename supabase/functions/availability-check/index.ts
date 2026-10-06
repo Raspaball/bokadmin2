@@ -493,6 +493,8 @@ interface AvailabilityCounts {
   publishProducts: number; publishChannels: number;
   /** Videresending for arkiverte bøker (pakke H del 3b): per måltype, uten mål, og fjernet fordi boka er aktiv igjen */
   redirectReplacement: number; redirectCollection: number; redirectNone: number; redirectRemoved: number;
+  /** Bøker som blir ARCHIVED på kode 41, 47 og 48 (pakke H: tidligere DRAFT) */
+  archive41: number; archive47: number; archive48: number;
 }
 
 function loadAvailabilityCounts(raw: unknown): AvailabilityCounts {
@@ -505,6 +507,7 @@ function loadAvailabilityCounts(raw: unknown): AvailabilityCounts {
     skippedNotBook: n("skippedNotBook"), keptInStock: n("keptInStock"), untracked: n("untracked"),
     publishProducts: n("publishProducts"), publishChannels: n("publishChannels"),
     redirectReplacement: n("redirectReplacement"), redirectCollection: n("redirectCollection"), redirectNone: n("redirectNone"), redirectRemoved: n("redirectRemoved"),
+    archive41: n("archive41"), archive47: n("archive47"), archive48: n("archive48"),
   };
 }
 
@@ -514,7 +517,7 @@ function summarizeAvailability(c: AvailabilityCounts, mode: "analyze" | "update"
   return `${c.changed} ${mode === "update" ? "endret" : "ville endret"}, ${c.unchanged} uendret, hoppet over ${skipped} ` +
     `(${c.skippedProtected} beskyttet, ${c.skippedArchived} arkivert, ${c.skippedDuplicate} DUPLIKAT, ${c.skippedNoIsbn} uten ISBN, ` +
     `${c.skippedNoOnix} fant ikke boka i Bokbasen, ${c.skippedNotBook} ikke bok), ${c.skippedOwnAvailability} egen tilgjengelighet, ` +
-    `${c.keptInStock} status beholdt (på lager), ${c.untracked} med sporing av beholdning slått av, ${c.publishProducts ? `${publishSummary(c.publishProducts, c.publishChannels, mode === "update")}, ` : ""}${redirectSummary(c, mode === "update")}${c.errors} feil`;
+    `${c.keptInStock} status beholdt (på lager), ${c.untracked} med sporing av beholdning slått av, ${c.publishProducts ? `${publishSummary(c.publishProducts, c.publishChannels, mode === "update")}, ` : ""}${c.archive41 + c.archive47 + c.archive48 ? `${mode === "update" ? "arkivert" : "ville blitt arkivert"} på kode 41/47/48: ${c.archive41}/${c.archive47}/${c.archive48}, ` : ""}${redirectSummary(c, mode === "update")}${c.errors} feil`;
 }
 
 /** «videresending: 3 til ny utgave, 10 til samling, 2 uten mål, 1 fjernet, » (tom når ingen) */
@@ -674,6 +677,7 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
       if (plan.changes.untrack) c.untracked++;
       const row = availabilityPlanRow(base, plan, rule, date, update);
       logs.push(row);
+      if (plan.changes.status?.to === "ARCHIVED" && ["41", "47", "48"].includes(rule.code)) c[`archive${rule.code}` as "archive41" | "archive47" | "archive48"]++;
       await addRedirect(row, base, p, isbn, rule.code, plan.changes.status?.to ?? p.status ?? "DRAFT", xml);
       // Blir boka aktiv, publiseres den på kanalene den mangler (bare bøker; lydbøker, e-bøker og beskyttede røres ikke)
       if (plan.changes.status?.to === "ACTIVE") {
@@ -736,6 +740,7 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
       publishProducts: c.publishProducts, publishChannels: c.publishChannels,
       redirectReplacement: c.redirectReplacement, redirectCollection: c.redirectCollection, redirectNone: c.redirectNone, redirectRemoved: c.redirectRemoved,
       redirectExamples: ctx.state.extra.redirectExamples ?? [],
+      archive41: c.archive41, archive47: c.archive47, archive48: c.archive48,
       statusChanges: ctx.state.extra.statusChanges ?? [], shopDomain: Deno.env.get("SHOPIFY_SHOP_DOMAIN") ?? null,
       summary: `${summarizeAvailability(c, ctx.mode)}. ${summarizeBulkStats(ctx.state.stats)}`,
     };

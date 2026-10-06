@@ -499,7 +499,7 @@ Oppgaven: `oppgaver/pakke-c-tilgjengelighet.md`. Beslutning (Eirik): kommende og
 | 20–23 | ACTIVE | Ja | `tilgjengelig` |
 | 10, 11, 12 | ACTIVE | Ja (forhåndsbestilling) | `kommer` |
 | 30–34 | ACTIVE | Ja (vi bestiller) | `midlertidig_utsolgt` |
-| 43, 46, 49 | ARCHIVED | Nei | `utgatt` |
+| 41, 43, 46, 47, 48, 49 | ARCHIVED | Nei | `utgatt` |
 | Alt annet, også tom/ukjent kode | DRAFT | Nei | `ikke_tilgjengelig` |
 
 Brukt av tilgjengelighetssjekken, push og CSV-eksporten. Frontend-kopi i `src/app/utils/availabilityCodes.ts`. Importfilteret har nå gruppene Tilgjengelig, Kommer og Midlertidig utsolgt på som standard, og Ikke tilgjengelig, Utgått og Ukjent av.

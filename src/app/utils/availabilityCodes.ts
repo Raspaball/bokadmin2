@@ -5,7 +5,7 @@
 //
 // Regel (pakke C, 2026-10-02): kommende (10–12) og midlertidig utsolgte (30–34)
 // bøker er ACTIVE og kan kjøpes, med bok.tilgjengelighet = kommer /
-// midlertidig_utsolgt. 43, 46, 49 → ARCHIVED. Alt annet → DRAFT.
+// midlertidig_utsolgt. 41, 43, 46, 47, 48, 49 → ARCHIVED. Alt annet → DRAFT.
 
 export type ShopifyStatus = "ACTIVE" | "DRAFT" | "ARCHIVED";
 
@@ -38,16 +38,16 @@ export const AVAILABILITY_OPTIONS = [
     key: "not_available",
     label: "Ikke tilgjengelig",
     shopifyStatus: "DRAFT" as ShopifyStatus,
-    // 01 = vil ikke utkomme, 09 = ikke utkommet (ingen dato), 40–42, 44, 45, 47, 48, 50–52
-    codes: ["01", "09", "40", "41", "42", "44", "45", "47", "48", "50", "51", "52"],
+    // 01 = vil ikke utkomme, 09 = ikke utkommet (ingen dato), 40, 42, 44, 45, 50–52
+    codes: ["01", "09", "40", "42", "44", "45", "50", "51", "52"],
     defaultOn: false,
   },
   {
     key: "permanent",
     label: "Utgått",
     shopifyStatus: "ARCHIVED" as ShopifyStatus,
-    // 43 = ikke lenger distribuert, 46 = trukket fra salg, 49 = tilbakekalt
-    codes: ["43", "46", "49"],
+    // 41 = erstattet, 43 = ikke lenger distribuert, 46 = trukket fra salg, 47/48 = ute av salg, 49 = tilbakekalt
+    codes: ["41", "43", "46", "47", "48", "49"],
     defaultOn: false,
   },
   {
@@ -84,6 +84,6 @@ export function mapAvailabilityToShopifyStatus(code: string | null | undefined):
   if (num >= 20 && num <= 23) return "ACTIVE";
   if (num >= 10 && num <= 12) return "ACTIVE";
   if (num >= 30 && num <= 34) return "ACTIVE";
-  if (num === 43 || num === 46 || num === 49) return "ARCHIVED";
+  if ([41, 43, 46, 47, 48, 49].includes(num)) return "ARCHIVED";
   return "DRAFT";
 }

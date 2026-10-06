@@ -205,8 +205,8 @@ Kanonisk kilde: `availabilityRule()` i `supabase/functions/_shared/availability.
 - **20–23** → ACTIVE, `tilgjengelig`, kan kjøpes
 - **10, 11, 12** → ACTIVE, `kommer`, kan kjøpes (forhåndsbestilling). Ikke lenger utkast: utkast gir 404 og mister søketrafikken
 - **30–34** → ACTIVE, `midlertidig_utsolgt`, kan kjøpes (vi bestiller)
-- **43, 46, 49** → ARCHIVED, `utgatt`
-- **Alt annet** (også tom/ukjent kode: 01, 09, 40–42, 44, 45, 47, 48, 50–52, 97–99) → DRAFT, `ikke_tilgjengelig`
+- **41, 43, 46, 47, 48, 49** → ARCHIVED, `utgatt` (41, 47, 48 fra pakke H; før var de DRAFT)
+- **Alt annet** (også tom/ukjent kode: 01, 09, 40, 42, 44, 45, 50–52, 97–99) → DRAFT, `ikke_tilgjengelig`
 - **Unntak (pakke E):** `bok.egen_tilgjengelighet` = true → status, `inventoryPolicy` og `bok.tilgjengelighet` står (jobben og push); ARCHIVED endres aldri av tilgjengelighetsjobben. Regelen er `planAvailability()`
 - «Kan kjøpes» uansett lager: varianter med sporet lager og `inventoryPolicy: DENY` får `CONTINUE` (`needsContinuePolicy`). Beholdning, sporing og lokasjoner endres aldri. Varianter Bokadmin lager selv spores ikke
 - `bok.utgivelsesdato` (date) fra `extractPublishingDate()` i `_shared/onix.js`: PublishingDate 01 hvis hel dato → MarketDate 01 → PublishingDate 11 → PublicationDate. Hos Bokbasen er PublishingDate 01 alltid bare årstall; kommende bøker har datoen i MarketDate 01

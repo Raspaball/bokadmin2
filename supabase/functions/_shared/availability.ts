@@ -12,7 +12,7 @@
 //   20–23        ACTIVE    kan kjøpes                 tilgjengelig
 //   10, 11, 12   ACTIVE    kan kjøpes (forhåndsbest.)  kommer
 //   30–34        ACTIVE    kan kjøpes (vi bestiller)   midlertidig_utsolgt
-//   43, 46, 49   ARCHIVED  nei                         utgatt
+//   41, 43, 46–49 ARCHIVED  nei                         utgatt
 //   alt annet    DRAFT     nei                         ikke_tilgjengelig
 //                (også tom eller ukjent kode)
 //
@@ -55,7 +55,8 @@ export function availabilityRule(code: string | null | undefined): AvailabilityR
   if (num >= 20 && num <= 23) return r("ACTIVE", "tilgjengelig", true);
   if (num >= 10 && num <= 12) return r("ACTIVE", "kommer", true);
   if (num >= 30 && num <= 34) return r("ACTIVE", "midlertidig_utsolgt", true);
-  if (num === 43 || num === 46 || num === 49) return r("ARCHIVED", "utgatt", false);
+  // 41 erstattet av ny utgave, 43 ikke lenger distribuert, 46 trukket fra salg, 47/48 ute av salg, 49 tilbakekalt (pakke H: 41, 47, 48 også ARCHIVED)
+  if ([41, 43, 46, 47, 48, 49].includes(num)) return r("ARCHIVED", "utgatt", false);
   return r("DRAFT", "ikke_tilgjengelig", false);
 }
 

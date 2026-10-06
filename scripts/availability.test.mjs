@@ -23,12 +23,12 @@ test("30–34: midlertidig utsolgt, ACTIVE, kan kjøpes", () => {
   for (const c of ["30", "31", "32", "33", "34"]) assert.deepEqual(pick(c), ["ACTIVE", "midlertidig_utsolgt", true], c);
 });
 
-test("43, 46, 49: utgått, ARCHIVED", () => {
-  for (const c of ["43", "46", "49"]) assert.deepEqual(pick(c), ["ARCHIVED", "utgatt", false], c);
+test("41, 43, 46, 47, 48, 49: utgått, ARCHIVED", () => {
+  for (const c of ["41", "43", "46", "47", "48", "49"]) assert.deepEqual(pick(c), ["ARCHIVED", "utgatt", false], c);
 });
 
 test("alt annet: ikke tilgjengelig, DRAFT", () => {
-  for (const c of ["01", "09", "13", "40", "41", "42", "44", "45", "47", "48", "50", "51", "52", "97", "98", "99"]) {
+  for (const c of ["01", "09", "13", "40", "42", "44", "45", "50", "51", "52", "97", "98", "99"]) {
     assert.deepEqual(pick(c), ["DRAFT", "ikke_tilgjengelig", false], c);
   }
 });
