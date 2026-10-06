@@ -242,7 +242,9 @@ function parseContributor(block) {
  * (SequenceNumber, ellers rekkefølgen i ONIX): { role, name, order, institution }.
  * `institution` er årsaken («CorporateName» …) eller null for personer.
  * @param {string} xml
- * @returns {{ role: string | null, name: string, order: number, institution: string | null }[]}
+ * `corporate`: navnet står som CorporateName. Et CorporateName som ikke er en organisasjon
+ * (en tittel i feil felt, `institution` er null) regnes ikke som forfatter heller.
+ * @returns {{ role: string | null, name: string, order: number, institution: string | null, corporate: boolean }[]}
  */
 export function extractAllContributors(xml) {
   const list = [];
@@ -252,7 +254,7 @@ export function extractAllContributors(xml) {
     const role = block.match(/<ContributorRole[^>]*>\s*([^<]+?)\s*<\/ContributorRole>/i)?.[1] ?? null;
     const seq = parseInt(block.match(/<SequenceNumber[^>]*>\s*(\d+)\s*<\/SequenceNumber>/i)?.[1] ?? "", 10);
     const c = parseContributor(block);
-    if (c.name) list.push({ role, name: c.name, order: Number.isFinite(seq) ? seq : 100000 + index, institution: c.reason });
+    if (c.name) list.push({ role, name: c.name, order: Number.isFinite(seq) ? seq : 100000 + index, institution: c.reason, corporate: c.corporate });
     index++;
   }
   list.sort((a, b) => a.order - b.order);
@@ -274,7 +276,7 @@ export function extractAllContributors(xml) {
 export function extractContributors(xml) {
   const all = extractAllContributors(xml);
   const institutions = all.filter((c) => c.institution).map((c) => ({ name: c.name, role: c.role, reason: c.institution }));
-  const people = all.filter((c) => !c.institution);
+  const people = all.filter((c) => !c.institution && !c.corporate);
   const authors = people.filter((c) => c.role === "A01").map((c) => c.name);
   if (authors.length) return { authors, role: "A01", institutions };
   if (people.length) return { authors: [people[0].name], role: people[0].role, institutions };

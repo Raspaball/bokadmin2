@@ -66,14 +66,61 @@ export function isInstitutionName(name) {
 }
 
 /**
- * Hvorfor en bidragsyter er en institusjon, eller null (= person).
- * `corporate`: ONIX har CorporateName og ingen personnavn. Ellers avgjør navnet (listen i koden).
+ * Ord som gjør et CorporateName til en organisasjon. REDIGERBAR LISTE.
+ * `ORGANISATION_SUFFIXES` treffer også som slutt på sammensatte ord (Landslaget, Riksmålsforbundet,
+ * Mattilsynet); `ORGANISATION_WORDS` er korte ord som må stå alene (AS, Hub, Group).
+ */
+export const ORGANISATION_SUFFIXES = [
+  "museum", "museet", "avlslag", "universitet", "universitetet", "høgskole", "høyskole", "høgskolen", "høyskolen", "institutt", "instituttet",
+  "forbund", "forbundet", "forening", "foreningen", "laget", "historielag", "stiftelse", "stiftelsen", "sykehus", "sykehuset",
+  "hospital", "selskap", "selskapet", "akademi", "akademiet", "kommune", "kommunar", "direktorat", "departement", "tilsyn", "tilsynet",
+  "kringkasting", "samanslutning", "sammenslutning", "avdeling", "avdelinga", "kollektivet", "bibliotek", "biblioteket", "kirke",
+  "kirken", "senter", "sentret", "organisasjon", "komité", "skole", "skolen", "råd", "rådet", "forlag",
+];
+export const ORGANISATION_WORDS = [
+  "lag", "venner", "klubb", "company", "enterprises", "comics", "group", "animation", "hub", "as", "a/s", "asa", "ltd", "inc", "gmbh", "union",
+];
+
+const esc = (w) => w.replace(/[/.]/g, "\$&");
+const ORG_RE = new RegExp(
+  String.raw`(${ORGANISATION_SUFFIXES.map(esc).join("|")})(?=$|[\s./),:;-])|(^|[\s./(-])(${ORGANISATION_WORDS.map(esc).join("|")})(?=$|[\s./),:;-])`,
+  "i",
+);
+const LEADING_ARTICLE_RE = /^(en|et|ei|det|den|de|the|a|an)\s/i;
+const CONNECTIVE_RE = /\s(og|for|fra|på|the|of|and|in|at|with|til)\s/i;
+
+/**
+ * Er et CorporateName en organisasjon, eller ser det ut som en tittel (utstilling, bok,
+ * katalog) som forlaget har lagt i feil felt? (Pakke H etter sjekkrapport 06.10.)
+ *  1. Ord som museum, universitet, forbund, lag, AS … → organisasjon, uansett resten.
+ *  2. Tittelpreg uten slike ord → IKKE organisasjon: « - » / «. » / «:» / parentes / årstall i
+ *     navnet, binde-/småord (og, for, fra, på, of, the …), eller starter med artikkel (En, Det, The).
+ *  3. Ellers (kort navn uten tittelpreg: «Netflix», «KODE», «Game Flow») → organisasjon.
+ * @param {string} name
+ * @returns {boolean}
+ */
+export function looksLikeOrganisation(name) {
+  const n = norm(name);
+  if (!n) return false;
+  if (ORG_RE.test(n)) return true;
+  if (/\s[-–—]\s|\.\s|:|[()]|(1[5-9]|20)\d\d/.test(n)) return false;
+  if (CONNECTIVE_RE.test(n) || LEADING_ARTICLE_RE.test(n)) return false;
+  return true;
+}
+
+/**
+ * Hvorfor en bidragsyter er en institusjon, eller null (= person, eller tittel i feil felt).
+ * `corporate`: ONIX har CorporateName og ingen personnavn. Er det en organisasjon
+ * (`looksLikeOrganisation`) er det en institusjon; ellers (en tittel som «Picasso - the code
+ * of painting») er det verken institusjon eller person. Ellers avgjør navnet (listen i koden).
  * @param {{ name: string, corporate?: boolean }} c
  * @returns {string | null}
  */
 export function institutionReason({ name, corporate = false }) {
-  if (corporate) return "CorporateName";
-  return institutionByName(name);
+  const byName = institutionByName(name);
+  if (byName) return corporate ? "CorporateName" : byName;
+  if (corporate) return looksLikeOrganisation(name) ? "CorporateName" : null;
+  return null;
 }
 
 /**

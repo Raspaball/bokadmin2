@@ -158,3 +158,30 @@ test("institusjon er ikke forfatter i SEO-tittel, metabeskrivelse, alt-tekst, bo
   assert.match(fallbackDescription("Arbeidsmiljøloven", f, "Cappelen Damm"), /^Arbeidsmiljøloven\. Heftet/);
   assert.deepEqual(bookMetafields({ ...f, authors: ["Norge", "Per Hansen"] }).find((m) => m.key === "forfatter").value, JSON.stringify(["Per Hansen"]));
 });
+
+// ---- Pakke H: CorporateName som er en tittel er ikke en institusjon (sjekkrapport 06.10) ----
+import { looksLikeOrganisation } from "../supabase/functions/_shared/contributors.js";
+
+test("CorporateName: titler i feil felt er ikke institusjoner", () => {
+  for (const n of ["Picasso - the code of painting", "Vibeke Tandberg. De lever", "Edvard Munch og sjokoladefabrikken", "Composition for the Left Hand", "En moderne middelalder", "Ny Nordisk. Mat, estetikk og sted", "MUNCH Triennale - Almost unreal", "Livsblod - Edvard Munch", "Nordisk seminar 2017 (seminar)"]) {
+    assert.equal(looksLikeOrganisation(n), false, n);
+  }
+});
+
+test("CorporateName: organisasjoner og korte navn er fortsatt institusjoner", () => {
+  for (const n of ["Norge", "Walt Disney Company", "Universitetet i Oslo", "Landslaget for norskundervisning", "Norsk sau- og geitavlslag", "St. Olavs hospital. Avdeling Brøset", "Netflix", "KODE", "Mattilsynet", "Fiskeri Hub AS", "Norges idrettsforbund og olympiske og paralympiske komité"]) {
+    assert.equal(looksLikeOrganisation(n), true, n);
+  }
+});
+
+test("CorporateName som tittel: ikke institusjon og aldri forfatter", () => {
+  const corp = (role, name, seq) => `<Contributor><SequenceNumber>${seq}</SequenceNumber><ContributorRole>${role}</ContributorRole><CorporateName>${name}</CorporateName></Contributor>`;
+  const inv = (role, name, seq) => `<Contributor><SequenceNumber>${seq}</SequenceNumber><ContributorRole>${role}</ContributorRole><PersonNameInverted>${name}</PersonNameInverted></Contributor>`;
+  const x = `<Product>${corp("A99", "Vibeke Tandberg. De lever", 1)}${inv("A01", "Bang Larsen, Lars", 2)}</Product>`;
+  assert.deepEqual(extractContributors(x), { authors: ["Lars Bang Larsen"], role: "A01", institutions: [] });
+  // uten person: ikke forfatter via reserveregelen heller
+  const y = `<Product>${corp("A99", "Picasso - the code of painting", 1)}</Product>`;
+  assert.deepEqual(extractContributors(y), { authors: [], role: null, institutions: [] });
+  const z = `<Product>${corp("A09", "Universitetet i Oslo", 1)}</Product>`;
+  assert.equal(extractContributors(z).institutions[0].name, "Universitetet i Oslo");
+});

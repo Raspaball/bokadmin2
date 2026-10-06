@@ -8,7 +8,7 @@ export declare function extractDescription(xml: string): string;
 export declare function extractPublisher(xml: string): string;
 export declare function decodeXmlText(text: string): string;
 export declare function uninvertName(inverted: string): string;
-export declare function extractAllContributors(xml: string): { role: string | null; name: string; order: number; institution: string | null }[];
+export declare function extractAllContributors(xml: string): { role: string | null; name: string; order: number; institution: string | null; corporate: boolean }[];
 export declare function extractContributors(xml: string): { authors: string[]; role: string | null; institutions: { name: string; role: string | null; reason: string }[] };
 export declare function extractInvertedNames(xml: string): string[];
 export declare function extractAvailabilityCode(xml: string): string | null;
