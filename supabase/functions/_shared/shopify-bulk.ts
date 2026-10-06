@@ -68,10 +68,15 @@ export async function getBulkOperation(id: string): Promise<BulkOperation | null
 }
 
 /** Venter på operasjonen til `deadline` (ms). Returnerer den (ev. fortsatt aktiv). */
-export async function waitForBulkOperation(id: string, deadline: number, intervalMs = 2000): Promise<BulkOperation | null> {
+export async function waitForBulkOperation(
+  id: string, deadline: number, intervalMs = 2000, onBeat?: () => Promise<unknown>, beatMs = 20_000,
+): Promise<BulkOperation | null> {
+  let lastBeat = Date.now();
   for (;;) {
     const op = await getBulkOperation(id);
     if (!op || !BULK_ACTIVE.includes(op.status) || Date.now() + intervalMs > deadline) return op;
+    // Livstegn minst hvert 20. sekund mens vi venter (pakke H del 1)
+    if (onBeat && Date.now() - lastBeat >= beatMs) { lastBeat = Date.now(); await onBeat(); }
     await new Promise((r) => setTimeout(r, intervalMs));
   }
 }
@@ -93,6 +98,59 @@ export async function streamJsonlLines(url: string, onLine: (line: string) => vo
     }
   }
   if (rest.trim()) onLine(rest);
+}
+
+/**
+ * Leser JSONL fra byte-posisjon `startByte` (HTTP Range; svarer serveren med hele fila,
+ * hoppes de første bytene over uten å tolkes). `onLine(linje, startByte)` får hver linje med
+ * posisjonen den begynner på, og returnerer true for å stoppe (strømmen avbrytes).
+ * Returnerer posisjonen etter siste leste linje. Ingen tolking av linjer her: bare bytes
+ * og en TextDecoder per linje, så en bit koster bare det den leser (pakke H del 1).
+ */
+export async function streamJsonlFrom(
+  url: string, startByte: number, onLine: (line: string, lineStart: number) => boolean | void,
+): Promise<number> {
+  const res = await fetch(url, startByte > 0 ? { headers: { Range: `bytes=${startByte}-` } } : undefined);
+  if (!res.ok || !res.body) throw new Error(`Kunne ikke hente bulk-resultat (HTTP ${res.status})`);
+  let skip = startByte > 0 && res.status !== 206 ? startByte : 0; // 200 = hele fila
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let pos = startByte;
+  let pending: Uint8Array[] = [];
+  const flush = (): boolean => {
+    let len = 0;
+    for (const c of pending) len += c.length;
+    const bytes = new Uint8Array(len);
+    let o = 0;
+    for (const c of pending) { bytes.set(c, o); o += c.length; }
+    pending = [];
+    const lineStart = pos;
+    pos += len + 1; // + linjeskiftet
+    return onLine(decoder.decode(bytes), lineStart) === true;
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    let chunk: Uint8Array = value;
+    if (skip) {
+      if (skip >= chunk.length) { skip -= chunk.length; continue; }
+      chunk = chunk.subarray(skip);
+      skip = 0;
+    }
+    let from = 0;
+    for (let i = chunk.indexOf(10, from); i >= 0; i = chunk.indexOf(10, from)) {
+      pending.push(chunk.subarray(from, i));
+      from = i + 1;
+      if (flush()) { await reader.cancel(); return pos; }
+    }
+    if (from < chunk.length) pending.push(chunk.subarray(from));
+  }
+  if (pending.length) { // siste linje uten linjeskift
+    const stop = flush();
+    pos -= 1;
+    if (stop) return pos;
+  }
+  return pos;
 }
 
 /** Hele resultatfila som tekst (resultater fra mutasjoner er små). */

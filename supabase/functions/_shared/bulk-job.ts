@@ -5,7 +5,7 @@
 //   query  → bulkOperationRunQuery leser hele katalogen; URL til fila lagres
 //   onix   → ONIX hentes til onix_cache i forkant (ONIX_CONCURRENCY parallelle
 //            kall) for ISBN-ene jobben ber om; ferske treff i cachen hoppes over
-//   plan   → BULK_CHUNK produkter om gangen: jobbens plan gir logg og (i
+//   plan   → små porsjoner (PLAN_CHUNK_START, lagres etter hver; se beginPlanSlice): jobbens plan gir logg og (i
 //            oppdateringsmodus) JSONL-linjer per mutasjon
 //   apply  → én bulkOperationRunMutation per mutasjon og bit, i rekkefølge;
 //            resultatfila leses og feil logges per bok
@@ -19,16 +19,75 @@
 
 import { splitRetries } from "./bulk-retry.ts";
 import { BulkProductAssembler, type BulkProduct, parseBulkResult, toJsonl } from "./book-bulk.ts";
-import { BULK_ACTIVE, fetchBulkText, startBulkMutation, startBulkQuery, streamJsonlLines, waitForBulkOperation } from "./shopify-bulk.ts";
+import { BULK_ACTIVE, fetchBulkText, startBulkMutation, startBulkQuery, streamJsonlFrom, streamJsonlLines, waitForBulkOperation } from "./shopify-bulk.ts";
 import { getOnixCached, ONIX_CACHE_MAX_AGE_DAYS } from "./onix-cache.ts";
 import { extractIsbn } from "./isbn.js";
 import { duplicateCounts } from "./duplicates.ts";
 import { isFatalJobError } from "./protected.ts";
 import { ensureProtectedMembers } from "./protected-load.ts";
 
-export const BULK_CHUNK = 1000;
+// Planfasen (pakke H del 1): små porsjoner, lagret etter hver, og et tidsbudsjett per puls.
+// «CPU Time exceeded» kommer av CPU-tid summert over pulsen, så planfasen stopper etter
+// PLAN_BUDGET_MS og pg_cron tar resten. En puls som dør mister aldri mer enn én porsjon.
+export const PLAN_CHUNK_START = 150;
+export const PLAN_CHUNK_MIN = 10;
+export const PLAN_MAX_ATTEMPTS = 5;
+export const PLAN_BUDGET_MS = 3_000;
 export const ONIX_CONCURRENCY = 4;
 export const BULK_DEADLINE_MS = 40_000;
+
+/** Framdriften i planfasen, lagret i jobbens `config.bulk`. */
+export interface PlanProgress {
+  planIndex: number;
+  /** Byte-posisjonen i produktfila der produkt nr. `planIndex` begynner (mangler i gamle jobber: les fra start) */
+  planByte?: number;
+  /** Porsjonsstørrelse; halveres når samme porsjon feiler gjentatte ganger */
+  chunk?: number;
+  /** Forsøk på porsjonen som starter ved `index`; lagres før arbeidet, slettes når den er ferdig */
+  attempt?: { index: number; n: number };
+}
+
+/**
+ * Starter et forsøk på neste porsjon. Første og andre forsøk bruker samme størrelse; fra
+ * tredje forsøk (to feil på samme planIndex) halveres den for hvert nytt forsøk.
+ * Etter PLAN_MAX_ATTEMPTS forsøk gis `stuck` (jobben stoppes med en tydelig melding).
+ */
+export function beginPlanSlice(state: PlanProgress): { size: number; stuck?: string } {
+  const at = state.attempt;
+  const n = at && at.index === state.planIndex ? at.n + 1 : 1;
+  let size = state.chunk ?? PLAN_CHUNK_START;
+  if (n >= 3) size = Math.max(PLAN_CHUNK_MIN, Math.floor(size / 2));
+  state.chunk = size;
+  state.attempt = { index: state.planIndex, n };
+  if (n > PLAN_MAX_ATTEMPTS) {
+    return {
+      size,
+      stuck: `Planleggingen stoppet: porsjonen som starter ved produkt ${state.planIndex} feilet ${PLAN_MAX_ATTEMPTS} ganger (siste størrelse ${size}). ` +
+        `Sannsynligvis CPU-grensen eller en feil i ett produkt. Se Supabase-loggen; start jobben på nytt når det er rettet.`,
+    };
+  }
+  return { size };
+}
+
+/**
+ * Leser porsjonen [planIndex, planIndex + size) fra produktfila: hopper til byte-posisjonen og
+ * stopper strømmen når neste produkt begynner. `nextByte` er der porsjonen etter begynner.
+ */
+export async function readPlanSlice(
+  state: PlanProgress & { productsUrl?: string }, size: number, total: number,
+): Promise<{ products: BulkProduct[]; to: number; nextByte: number }> {
+  const from = state.planIndex;
+  const to = Math.min(total, from + size);
+  const startByte = state.planByte ?? 0;
+  const startIndex = state.planByte === undefined ? 0 : from; // gammel jobb uten posisjon: les fra start
+  const a = new BulkProductAssembler((i) => i >= from && i < to, false, startIndex);
+  let stopAt: number | null = null;
+  const end = await streamJsonlFrom(state.productsUrl!, startByte, (line, lineStart) => {
+    a.add(line);
+    if (a.count > to) { stopAt = lineStart; return true; }
+  });
+  return { products: a.products, to, nextByte: stopAt ?? end };
+}
 
 export interface BulkRef { id: string; isbn: string | null; handle: string }
 
@@ -60,6 +119,9 @@ export interface BulkJobState {
   duplicates?: Record<string, number>;
   onixTodo?: string[];
   planIndex: number;
+  planByte?: number;
+  chunk?: number;
+  attempt?: { index: number; n: number };
   /** Mutasjoner som venter; den første kjører når opId er satt */
   pending?: PendingOp[];
   opId?: string;
@@ -193,6 +255,7 @@ export async function runBulkJob<C>(
     loadXml: (isbns) => loadOnixXml(supabase, isbns),
   };
 
+  let planMs = 0; // tid brukt i planfasen denne pulsen (PLAN_BUDGET_MS)
   const save = (extra: Record<string, unknown> = {}) => supabase.from("jobs").update({
     processed,
     ...spec.totals(ctx),
@@ -211,7 +274,7 @@ export async function runBulkJob<C>(
           state.queryOpId = await startBulkQuery(spec.query);
           await save();
         }
-        const op = await waitForBulkOperation(state.queryOpId, deadline);
+        const op = await waitForBulkOperation(state.queryOpId, deadline, 2000, () => save());
         if (!op) throw new Error("Fant ikke bulk-spørringen");
         if (BULK_ACTIVE.includes(op.status)) break;
         if (op.status !== "COMPLETED") throw new Error(`Bulk-spørringen endte med ${op.status} (${op.errorCode ?? "ingen feilkode"})`);
@@ -275,15 +338,27 @@ export async function runBulkJob<C>(
           await save();
           continue;
         }
-        const from = state.planIndex;
-        const to = Math.min(total, from + BULK_CHUNK);
-        const a = new BulkProductAssembler((i) => i >= from && i < to);
-        await streamJsonlLines(state.productsUrl!, (line) => a.add(line));
-        const { logs, ops } = await spec.planChunk(a.products, ctx);
-        processed += a.products.length;
-        await clearChunkLogs(supabase, jobId, a.products.map((p) => p.id));
+        // Tidsbudsjett per puls: resten tas av neste puls (pg_cron)
+        if (planMs >= PLAN_BUDGET_MS) break;
+        const tPlan = Date.now();
+        const slice = beginPlanSlice(state);
+        if (slice.stuck) {
+          await supabase.from("jobs").update({
+            status: "failed", error_message: slice.stuck, completed_at: new Date().toISOString(),
+            config: { ...job.config, counts: ctx.counts, bulk: state },
+          }).eq("id", jobId);
+          return;
+        }
+        await save(); // forsøket lagres før arbeidet: dør pulsen, teller det neste gang
+        const { products, to, nextByte } = await readPlanSlice(state, slice.size, total);
+        const { logs, ops } = await spec.planChunk(products, ctx);
+        processed += products.length;
+        await clearChunkLogs(supabase, jobId, products.map((p) => p.id));
         await insertLogs(supabase, logs);
         state.planIndex = to;
+        state.planByte = nextByte;
+        state.attempt = undefined;
+        planMs += Date.now() - tPlan;
         const pending = ops.filter((o) => o.lines.length).map((o) => ({
           kind: o.kind, mutation: o.mutation, field: o.field, jsonl: toJsonl(o.lines), refs: o.refs, filename: o.filename,
         }));
@@ -291,7 +366,7 @@ export async function runBulkJob<C>(
           state.pending = pending;
           state.phase = "apply";
         }
-        const last = a.products[a.products.length - 1];
+        const last = products[products.length - 1];
         await save({ current_isbn: last ? extractIsbn(last) ?? last.handle : null });
         continue;
       }
@@ -310,7 +385,7 @@ export async function runBulkJob<C>(
           state.stats.operations++;
           await save();
         }
-        const op = await waitForBulkOperation(state.opId, deadline);
+        const op = await waitForBulkOperation(state.opId, deadline, 2000, () => save());
         if (!op) throw new Error("Fant ikke bulk-operasjonen");
         if (BULK_ACTIVE.includes(op.status)) break;
         state.stats.operationMs += Date.now() - (state.opStartedAt ?? Date.now());
@@ -357,6 +432,8 @@ export async function runBulkJob<C>(
     const fatal = isFatalJobError(msg);
     // Tilstanden fra pulsstart, men en startet operasjon beholdes (ellers sendes den på nytt)
     const keep = state.opId && state.opId !== stateAtStart.opId ? state : stateAtStart;
+    // Forsøksmarkøren beholdes også når tilstanden rulles tilbake, ellers telles aldri feilen
+    if (keep !== state && state.attempt && state.attempt.index === keep.planIndex) { keep.attempt = state.attempt; keep.chunk = state.chunk; }
     await supabase.from("jobs").update({
       status: fatal ? "failed" : "paused",
       error_message: msg,

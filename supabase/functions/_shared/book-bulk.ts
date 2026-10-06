@@ -65,7 +65,9 @@ export class BulkProductAssembler {
    */
   private readonly keep: (index: number) => boolean;
   private readonly slim: readonly string[] | null;
-  constructor(keep: (index: number) => boolean = () => true, slim: boolean | readonly string[] = false) {
+  /** @param startIndex indeksen til første produkt i fila som leses (når en bit leses fra en byte-posisjon) */
+  constructor(keep: (index: number) => boolean = () => true, slim: boolean | readonly string[] = false, startIndex = 0) {
+    this.count = startIndex;
     this.keep = keep;
     this.slim = slim === true ? ["id", "handle", "tags", "vendor", "bokIsbn"] : slim === false ? null : slim;
   }
