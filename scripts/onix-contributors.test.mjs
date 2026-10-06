@@ -185,3 +185,35 @@ test("CorporateName som tittel: ikke institusjon og aldri forfatter", () => {
   const z = `<Product>${corp("A09", "Universitetet i Oslo", 1)}</Product>`;
   assert.equal(extractContributors(z).institutions[0].name, "Universitetet i Oslo");
 });
+
+// ---- Flere <Product> i ONIX: samme forfatter i hver post skal bare med én gang ----
+import { extractThema, extractSeries, extractLanguage, extractAudienceAge } from "../supabase/functions/_shared/onix.js";
+import { existsSync, readFileSync } from "node:fs";
+
+test("flere <Product>: like forfattere tas med én gang, rekkefølgen beholdes (Getting to Yes)", () => {
+  const inv = (name, seq) => `<Contributor><SequenceNumber>${seq}</SequenceNumber><ContributorRole>A01</ContributorRole><PersonNameInverted>${name}</PersonNameInverted></Contributor>`;
+  const post = `<Product><DescriptiveDetail>${inv("Fisher, Roger", 1)}${inv("Ury, William", 2)}</DescriptiveDetail></Product>`;
+  const xml = `<ONIXMessage>${post}${post}</ONIXMessage>`;
+  assert.deepEqual(extractContributors(xml).authors, ["Roger Fisher", "William Ury"]);
+  // ulik skrivemåte i de to postene og ulik bokstavstørrelse regnes som samme navn
+  const other = `<Product><DescriptiveDetail><Contributor><SequenceNumber>1</SequenceNumber><ContributorRole>A01</ContributorRole><PersonName>roger  fisher</PersonName></Contributor></DescriptiveDetail></Product>`;
+  assert.deepEqual(extractContributors(`<ONIXMessage>${post}${other}</ONIXMessage>`).authors, ["Roger Fisher", "William Ury"]);
+  // to ulike personer med samme rolle beholdes
+  assert.deepEqual(extractContributors(`<Product>${inv("Hansen, Per", 1)}${inv("Hansen, Pål", 2)}</Product>`).authors, ["Per Hansen", "Pål Hansen"]);
+});
+
+test("flere <Product>: institusjoner telles én gang, og thema, serie, språk og alder dobles ikke", () => {
+  const corp = `<Contributor><SequenceNumber>1</SequenceNumber><ContributorRole>Z03</ContributorRole><CorporateName>Norge</CorporateName></Contributor>`;
+  assert.deepEqual(extractContributors(`<ONIXMessage><Product>${corp}</Product><Product>${corp}</Product></ONIXMessage>`).institutions, [{ name: "Norge", role: "Z03", reason: "CorporateName" }]);
+  const subj = (c) => `<Subject><SubjectSchemeIdentifier>93</SubjectSchemeIdentifier><SubjectCode>${c}</SubjectCode></Subject>`;
+  const p = `<Product>${subj("FF")}${subj("FM")}<Collection><CollectionType>10</CollectionType><TitleDetail><TitleElement><TitleText>Serie</TitleText><PartNumber>2</PartNumber></TitleElement></TitleDetail></Collection><Language><LanguageRole>01</LanguageRole><LanguageCode>eng</LanguageCode></Language><AudienceRange><AudienceRangeQualifier>17</AudienceRangeQualifier><AudienceRangePrecision>03</AudienceRangePrecision><AudienceRangeValue>6</AudienceRangeValue></AudienceRange></Product>`;
+  const xml = `<ONIXMessage>${p}${p}</ONIXMessage>`;
+  assert.deepEqual(extractThema(xml), ["FF", "FM"]);
+  assert.equal(extractSeries(xml), "Serie (2)");
+  assert.equal(extractLanguage(xml), "Engelsk");
+  assert.equal(extractAudienceAge(xml), "fra 6 år");
+});
+
+test("rå ONIX 9781847940933 (Getting to Yes): Roger Fisher og William Ury, hver én gang", { skip: !existsSync("scripts/out/onix-gjennomgang/9781847940933.xml") }, () => {
+  assert.deepEqual(extractContributors(readFileSync("scripts/out/onix-gjennomgang/9781847940933.xml", "utf8")).authors, ["Roger Fisher", "William Ury"]);
+});

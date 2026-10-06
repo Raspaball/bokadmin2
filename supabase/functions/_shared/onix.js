@@ -261,11 +261,21 @@ export function extractAllContributors(xml) {
   return list;
 }
 
+/** Navnet i en form som ignorerer store/små bokstaver og mellomrom, til å kjenne igjen like navn. */
+const sameName = (n) => String(n ?? "").replace(/\s+/g, " ").trim().toLocaleLowerCase("nb");
+
+/** Navn uten like navn, i opprinnelig rekkefølge (flere <Product> gir samme bidragsyter flere ganger). */
+function uniqueNames(names) {
+  const seen = new Set();
+  return names.filter((n) => { const k = sameName(n); if (seen.has(k)) return false; seen.add(k); return true; });
+}
+
 /**
  * Forfatterne i rekkefølge, som «Fornavn Etternavn»: PersonName, ellers snudd
  * PersonNameInverted, ellers NamesBeforeKey + KeyNames. BARE PERSONER (pakke G del 3):
  * institusjoner (CorporateName, kjente navn som «Norge») tas ikke med
  * og returneres i `institutions`. En bok som bare har institusjon, får tom liste.
+ * Like navn tas med én gang (ONIX med flere <Product> har samme forfatter i hver post).
  * Bare rolle A01 (forfatter). Finnes ingen A01-person, brukes første person uansett
  * rolle (f.eks. B01 redaktør), og rollen står i `role`.
  * Hos Bokbasen (103 poster, 2026-10-02) står navnene nesten alltid som
@@ -275,9 +285,11 @@ export function extractAllContributors(xml) {
  */
 export function extractContributors(xml) {
   const all = extractAllContributors(xml);
-  const institutions = all.filter((c) => c.institution).map((c) => ({ name: c.name, role: c.role, reason: c.institution }));
+  const seenInst = new Set();
+  const institutions = all.filter((c) => c.institution).map((c) => ({ name: c.name, role: c.role, reason: c.institution }))
+    .filter((c) => { const k = `${sameName(c.name)}|${c.role}`; if (seenInst.has(k)) return false; seenInst.add(k); return true; });
   const people = all.filter((c) => !c.institution && !c.corporate);
-  const authors = people.filter((c) => c.role === "A01").map((c) => c.name);
+  const authors = uniqueNames(people.filter((c) => c.role === "A01").map((c) => c.name));
   if (authors.length) return { authors, role: "A01", institutions };
   if (people.length) return { authors: [people[0].name], role: people[0].role, institutions };
   return { authors: [], role: null, institutions };
