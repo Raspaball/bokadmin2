@@ -11,6 +11,8 @@
 
 export const SHOPIFY_API_VERSION = "2026-07";
 
+import { checkShopAllowed } from "./shop-guard.js";
+
 // Søkefilter for spørringer som skal treffe hele katalogen, også utkast og
 // arkiverte produkter: products(query: …) og productsCount(query: …).
 // Samme tekst står i _shared/handle-migration.js (ren JS, kan ikke importere TS).
@@ -51,7 +53,21 @@ function describeTokenError(body: string): string {
     .replace(/\s+/g, " ").trim().slice(0, 300);
 }
 
+// Sperre mot livebutikken (pakke I del B): Testbutikk er alltid tillatt, alt annet krever
+// LIVE_SHOP_CONFIRMED (hele domenet) og LIVE_SHOP_UNTIL (høyst 24 t fram). Reglene står i
+// shop-guard.js. Kalles før hvert token- og GraphQL-kall, så ingen jobb, heller ikke en
+// som gjenopptas av pg_cron etter at hemmelighetene er byttet, kan treffe live ved en feil.
+export function assertShopAllowed(): void {
+  const check = checkShopAllowed({
+    domain: Deno.env.get("SHOPIFY_SHOP_DOMAIN"),
+    confirmed: Deno.env.get("LIVE_SHOP_CONFIRMED"),
+    until: Deno.env.get("LIVE_SHOP_UNTIL"),
+  });
+  if (!check.ok) throw new Error(`Shopify-sperre: ${check.reason}`);
+}
+
 async function requestAccessToken(): Promise<string> {
+  assertShopAllowed();
   const res = await fetch(`https://${getShopDomain()}/admin/oauth/access_token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -109,6 +125,7 @@ export async function shopifyGraphQL<T = any>(
   let tokenRefreshed = false;
 
   while (true) {
+    assertShopAllowed();
     const accessToken = await getShopifyAccessToken();
     const res = await fetch(url, {
       method: "POST",
