@@ -1,6 +1,7 @@
 // supabase/functions/sjangre-sync/index.ts
 // Deploy: supabase functions deploy sjangre-sync --no-verify-jwt
 
+import { currentShopDomain, stopIfShopChanged } from "../_shared/job-shop.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
@@ -198,6 +199,7 @@ async function processSyncBatch(jobId: string) {
 
   const { data: job } = await supabase.from("jobs").select("*").eq("id", jobId).single();
   if (!job || (job.status !== "running" && job.status !== "paused")) return;
+  if (await stopIfShopChanged(supabase, job)) return;
   // Bulk-modus (pakke E del 5): koder, tagger og samlinger over hele katalogen
   if (job.config?.bulk) return runBulkJob(supabase, jobId, SJANGRE_BULK_SPEC, loadSjangreCounts);
 
@@ -576,6 +578,7 @@ async function processEnrichBatch(jobId: string) {
 
   const { data: job } = await supabase.from("jobs").select("*").eq("id", jobId).single();
   if (!job || (job.status !== "running" && job.status !== "paused")) return;
+  if (await stopIfShopChanged(supabase, job)) return;
 
   await supabase.from("jobs").update({
     status: "running",
@@ -801,7 +804,7 @@ serve(async (req) => {
       const totalProducts = ((countResult.data as Record<string, unknown>)?.productsCount as { count: number })?.count ?? 0;
 
       const { data: job, error } = await supabase.from("jobs").insert({
-        type: "sjangre_sync", status: "running", user_id: userId,
+        type: "sjangre_sync", status: "running", user_id: userId, shop_domain: currentShopDomain(),
         started_at: new Date().toISOString(), total_items: totalProducts, processed: 0,
         config: bulk
           ? { mode, bulk: emptyBulkJobState(), counts: {} }
@@ -862,7 +865,7 @@ serve(async (req) => {
       if (existing) return new Response(JSON.stringify({ error: "En henting kjøres allerede", jobId: existing.id }), { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
       const { data: job, error } = await supabase.from("jobs").insert({
-        type: "shopify_enrich", status: "running", user_id: userId,
+        type: "shopify_enrich", status: "running", user_id: userId, shop_domain: currentShopDomain(),
         started_at: new Date().toISOString(), total_items: 0, processed: 0,
         config: { cursor: null, total_products: 0, processed: 0, found_kode: 0, already_cached: 0, no_data: 0, errors: 0 },
       }).select().single();

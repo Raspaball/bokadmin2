@@ -2,6 +2,7 @@
 // Deploy: supabase functions deploy availability-check --no-verify-jwt
 
 import { resumableJobFilter } from "../_shared/job-resume.ts";
+import { currentShopDomain, stopIfShopChanged } from "../_shared/job-shop.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { ALL_PRODUCT_STATUSES, shopifyGraphQL } from "../_shared/shopify.ts";
@@ -283,6 +284,7 @@ async function processBatch(jobId: string) {
   if (job.status !== "running" && job.status !== "paused") {
     return;
   }
+  if (await stopIfShopChanged(supabase, job)) return;
   // Bulk-modus (pakke E del 5): hele katalogen med Shopify Bulk Operations og onix_cache
   if (job.config?.bulk) return runBulkJob(supabase, jobId, AVAILABILITY_BULK_SPEC, loadAvailabilityCounts);
 
@@ -842,6 +844,7 @@ serve(async (req) => {
           type: "availability_check",
           status: "running",
           user_id: userId,
+          shop_domain: currentShopDomain(),
           started_at: new Date().toISOString(),
           total_items: totalProducts,
           config: { mode, shopify_cursor: null, ...(bulk ? { bulk: emptyBulkJobState(), counts: {} } : {}) },

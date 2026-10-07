@@ -11,7 +11,7 @@
 
 export const SHOPIFY_API_VERSION = "2026-07";
 
-import { checkShopAllowed } from "./shop-guard.js";
+import { checkShopAllowed, checkWriteAllowed, liveReadOnly } from "./shop-guard.js";
 
 // Søkefilter for spørringer som skal treffe hele katalogen, også utkast og
 // arkiverte produkter: products(query: …) og productsCount(query: …).
@@ -57,12 +57,25 @@ function describeTokenError(body: string): string {
 // LIVE_SHOP_CONFIRMED (hele domenet) og LIVE_SHOP_UNTIL (høyst 24 t fram). Reglene står i
 // shop-guard.js. Kalles før hvert token- og GraphQL-kall, så ingen jobb, heller ikke en
 // som gjenopptas av pg_cron etter at hemmelighetene er byttet, kan treffe live ved en feil.
-export function assertShopAllowed(): void {
+export function assertShopAllowed(): { live: boolean } {
   const check = checkShopAllowed({
     domain: Deno.env.get("SHOPIFY_SHOP_DOMAIN"),
     confirmed: Deno.env.get("LIVE_SHOP_CONFIRMED"),
     until: Deno.env.get("LIVE_SHOP_UNTIL"),
   });
+  if (!check.ok) throw new Error(`Shopify-sperre: ${check.reason}`);
+  return { live: check.live };
+}
+
+// Skrivesperre (LIVE_READ_ONLY): i live er den på med mindre hemmeligheten er nøyaktig "false".
+// Gjelder alle GraphQL-kall, uansett jobb og modus. Bare bulkOperationRunQuery (lesing) slipper gjennom.
+export function isLiveReadOnly(): boolean {
+  return liveReadOnly(Deno.env.get("LIVE_READ_ONLY"));
+}
+
+export function assertWriteAllowed(query: string): void {
+  const { live } = assertShopAllowed();
+  const check = checkWriteAllowed({ live, readOnly: isLiveReadOnly(), query });
   if (!check.ok) throw new Error(`Shopify-sperre: ${check.reason}`);
 }
 
@@ -125,7 +138,7 @@ export async function shopifyGraphQL<T = any>(
   let tokenRefreshed = false;
 
   while (true) {
-    assertShopAllowed();
+    assertWriteAllowed(query);
     const accessToken = await getShopifyAccessToken();
     const res = await fetch(url, {
       method: "POST",

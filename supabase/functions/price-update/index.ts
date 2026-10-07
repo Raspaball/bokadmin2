@@ -1,6 +1,7 @@
 // supabase/functions/price-update/index.ts
 // Deploy: supabase functions deploy price-update --no-verify-jwt
 
+import { currentShopDomain, stopIfShopChanged } from "../_shared/job-shop.ts";
 import { resumableJobFilter } from "../_shared/job-resume.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
@@ -199,6 +200,7 @@ async function processBatch(jobId: string) {
   if (job.status !== "running" && job.status !== "paused") {
     return;
   }
+  if (await stopIfShopChanged(supabase, job)) return;
 
   await supabase.from("jobs").update({
     status: "running",
@@ -560,6 +562,7 @@ serve(async (req) => {
           type: "price_update",
           status: "running",
           user_id: userId,
+          shop_domain: currentShopDomain(),
           started_at: new Date().toISOString(),
           total_items: totalProducts,
           config: { mode, shopify_cursor: null },

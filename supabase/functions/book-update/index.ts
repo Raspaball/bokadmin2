@@ -14,6 +14,7 @@
 //
 // Deploy: supabase functions deploy book-update --no-verify-jwt --use-api --project-ref chwpqwblqummlufqdefe
 
+import { currentShopDomain, stopIfShopChanged } from "../_shared/job-shop.ts";
 import { resumableJobFilter } from "../_shared/job-resume.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
@@ -184,6 +185,7 @@ async function processBatch(jobId: string) {
 
   const { data: job } = await supabase.from("jobs").select("*").eq("id", jobId).single();
   if (!job || (job.status !== "running" && job.status !== "paused")) return;
+  if (await stopIfShopChanged(supabase, job)) return;
 
   await supabase.from("jobs").update({ status: "running", started_at: job.started_at || new Date().toISOString() }).eq("id", jobId);
   if (!await loadProtectedOrFail(supabase, jobId)) return;
@@ -357,6 +359,7 @@ async function processBulk(jobId: string) {
 
   const { data: job } = await supabase.from("jobs").select("*").eq("id", jobId).single();
   if (!job || (job.status !== "running" && job.status !== "paused")) return;
+  if (await stopIfShopChanged(supabase, job)) return;
   await supabase.from("jobs").update({ status: "running", started_at: job.started_at || new Date().toISOString() }).eq("id", jobId);
   if (!await loadProtectedOrFail(supabase, jobId)) return;
 
@@ -651,7 +654,7 @@ serve(async (req) => {
 
       const total = isbns?.length ?? await getProductCount();
       const { data: job, error } = await supabase.from("jobs").insert({
-        type: JOB_TYPE, status: "running", user_id: userId, started_at: new Date().toISOString(), total_items: total,
+        type: JOB_TYPE, status: "running", user_id: userId, shop_domain: currentShopDomain(), started_at: new Date().toISOString(), total_items: total,
         config: { mode, isbns: isbns?.length ? isbns : null, shopify_cursor: null, ...(bulk ? { bulk: emptyBulkState() } : {}) },
       }).select().single();
       if (error || !job) return json({ error: "Kunne ikke opprette jobb" }, 500);

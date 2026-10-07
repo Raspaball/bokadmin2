@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const API_VERSION = "2026-07"; // samme som supabase/functions/_shared/shopify.ts
-import { checkShopAllowed, SAFE_SHOPS } from "../../supabase/functions/_shared/shop-guard.js";
+import { checkShopAllowed, checkWriteAllowed, SAFE_SHOPS } from "../../supabase/functions/_shared/shop-guard.js";
 
 export const SAFE_STORES = SAFE_SHOPS;
 
@@ -83,12 +83,12 @@ export function enableLive({ allowedMutations = [] } = {}) {
 
 export const isLive = () => liveMode !== null;
 
-const WRITE_NAME = /\b([a-z]\w*(?:Create|Update|Delete|Set|Add|Remove|Publish|Unpublish|Run|Cancel|Upsert|Reorder|Redirect|Migrate|Archive))\s*\(/g;
+// Samme lesing av GraphQL-dokumentet som Edge Functions (shop-guard.js): rotfeltene i
+// hver mutasjon må være navngitt i allowedMutations, ellers avvises kallet.
 function assertAllowedOperation(query) {
-  if (!liveMode || !/\bmutation\b/.test(query)) return;
-  for (const m of query.matchAll(WRITE_NAME)) {
-    if (!liveMode.allowedMutations.includes(m[1])) throw new Error(`Live: mutasjonen ${m[1]} er ikke tillatt i dette skriptet.`);
-  }
+  if (!liveMode) return;
+  const check = checkWriteAllowed({ live: true, readOnly: true, query, allowed: liveMode.allowedMutations });
+  if (!check.ok) throw new Error(`Live: ${check.reason}`);
 }
 
 let shopToken = null;

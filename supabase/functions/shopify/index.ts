@@ -3,6 +3,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { ALL_PRODUCT_STATUSES, getShopDomain, shopifyGraphQL } from "../_shared/shopify.ts";
+import { currentShopDomain, jobShopError } from "../_shared/job-shop.ts";
 import { getCaller } from "../_shared/auth.ts";
 import { BOKBASEN_ONIX_URL, type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
 import { buildBookHandle, normalizeIsbn } from "../_shared/handle.js";
@@ -1768,6 +1769,7 @@ async function startHandleMigration(productIds: string[] | undefined, skipFlagge
       total_items: rows.length,
       skipped: blocked.length,
       user_id: userId,
+      shop_domain: currentShopDomain(),
       started_at: new Date().toISOString(),
       config: { shop: getShopDomain(), rows: jobRows, skippedBlocked: blocked.length },
     }),
@@ -1787,6 +1789,12 @@ async function startHandleMigration(productIds: string[] | undefined, skipFlagge
 // deno-lint-ignore no-explicit-any
 async function refreshHandleJob(job: any): Promise<any> {
   if (job?.status !== "running" || !job.config?.bulkOperationId) return job;
+  // Butikken byttet siden kjøringen startet: ikke spør den nye butikken om bulk-operasjonen
+  const shopErr = jobShopError(job);
+  if (shopErr) {
+    await patchHandleJob(job.id, { status: "failed", error_message: shopErr, completed_at: new Date().toISOString() });
+    return { ...job, status: "failed", error_message: shopErr };
+  }
 
   const r = await shopifyGraphQL(
     `query ($id: ID!) { node(id: $id) { ... on BulkOperation { id status errorCode objectCount url partialDataUrl } } }`,
@@ -1857,6 +1865,8 @@ async function refreshHandleJob(job: any): Promise<any> {
 async function verifyHandleJob(jobId: string | null) {
   const job = jobId ? await getHandleJob(jobId) : await latestHandleJob("&status=eq.completed");
   if (!job) throw new HttpError(404, "Fant ingen utført handle-migrering.");
+  const shopErrVerify = jobShopError(job);
+  if (shopErrVerify) throw new HttpError(409, shopErrVerify);
   const changes = await activeHandleChanges(job.id);
   const step = Math.max(1, Math.ceil(changes.length / 50));
   const sample = changes.filter((_, i) => i % step === 0);
@@ -1896,6 +1906,8 @@ async function rollbackHandleJob(jobId: string | null, userId: string | null) {
     ? await getHandleJob(jobId)
     : await latestHandleJob("&status=eq.completed&result->>rolledBackAt=is.null");
   if (!job) throw new HttpError(404, "Fant ingen kjøring å angre.");
+  const shopErrRollback = jobShopError(job);
+  if (shopErrRollback) throw new HttpError(409, shopErrRollback);
   if (job.status !== "completed" && job.status !== "failed") throw new HttpError(409, "Kjøringen er ikke ferdig ennå.");
 
   const pending = await activeHandleChanges(job.id);
