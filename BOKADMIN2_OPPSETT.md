@@ -717,3 +717,13 @@ Alt kjørt mot Testbutikk (snapshot `foer-rettinger`, 9 050 produkter) og Bokbas
 - Deretter deploy av `shopify`, `bokbasen`, `book-update` og `availability-check` (`--project-ref chwpqwblqummlufqdefe`), sjekkmodus i Testbutikk med de ekte jobbene, og først etter ja fra Eirik oppdateringsmodus for bokdata og tilgjengelighet.
 - Etter oppdateringen: kontroller 50 tilfeldige bøker i Testbutikk (SEO, `bok.forfatter`, format, sporing av, status) og bekreft at beskyttede produkter har 0 endringer (også `updatedAt`).
 - Prosjektdokumentet `status-generalprove-fullkatalog.md` fantes ikke på disken; det ble ikke lest.
+
+## Live-sjekk 1: sperrer før tilkobling til live (2026-10-07)
+
+Detaljer og framdrift: `oppgaver/live-sjekk-1.md`.
+
+- **Skrivesperre (LIVE_READ_ONLY):** når aktiv butikk er live, avviser `shopifyGraphQL()` alle mutasjoner unntatt `bulkOperationRunQuery`, også i oppdateringsmodus. På som standard; av bare med nøyaktig `LIVE_READ_ONLY=false`. Regel: `checkWriteAllowed()` i `_shared/shop-guard.js` (leser rotfeltene i dokumentet). Lokale skript bruker samme regel.
+- **Butikkstempel:** `jobs.shop_domain` (migrasjon 20261007033904). Settes når jobben lages; hver puls stopper jobben (`failed`) hvis butikken er byttet eller stempelet mangler (`_shared/job-shop.ts`).
+- **Ikke deployet ennå** (heller ikke live-sperren fra pakke I del B). Deploy samlet etter Del 2 (butikker i Innstillinger).
+- Live er tillatt for **lesing og sjekkmodus** under sperrene (prosjektinstruksen), men er ikke koblet til ennå. Prosjektinstruksene oppdateres av Eirik.
+
