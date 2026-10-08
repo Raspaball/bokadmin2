@@ -15,8 +15,8 @@ Denne fila er både framdriftslogg og (til slutt) rapporten i punkt 19. Ingen he
 | | 8. Tester og deploy | 352/352 tester. SQL-test av byttereglene 11/11 (transaksjon angret). Etter deploy: anon får 403 på /shops og /shops/switch; /test svarer Testbutikk, 9 059 produkter, live av |
 | 3 Koble til live | 9–11 | **Delvis ferdig 08.10 kl. 17.49.** Profilen «Bø bok og papir» er lagret med secret. Første test: `app_not_installed`. Andre test: ok, «Bø bok og papir», 162 samlinger. **Tellingen viste 10000 produkter: det er Shopifys standardtak (`productsCount` uten `limit: null`), ikke riktig antall (ca. 17 169).** Tilgangene er ikke kontrollert ennå. Live er ikke gjort aktiv |
 | 4 Bare lesing | 12–14 | **Ferdig 08.10 kl. 18.13.** Live-eksport tatt (bare lesing), tellingene stemmer, ingen avvik over 3 %. Se «Del 4: resultat» under. Punkt 14 delvis (Bokbasen ikke sjekket) |
-| 5 Sjekkmodus | 15–18 | Ikke startet |
-| 6 Rapport og pilotplan | 19–23 | Ikke startet |
+| 5 Sjekkmodus | 15–18 | **Fire av fem ferdige 08.10, pris 85 % (full kjøring pågår).** 0 skrivinger i alle. Se «Del 5: resultat» |
+| 6 Rapport og pilotplan | 19–23 | **Foreløpig rapport skrevet 09.10 (pris basert på 85 %).** Pilotliste, Liquid-forslag og punkt 22–23 gjenstår |
 
 **Deployet 08.10 kl. 17.41:** shopify, price-update, availability-check, book-update, sjangre-sync, bokbasen (alle med sperrene). Live kobles til via Innstillinger → Butikker, ikke ved å endre `SHOPIFY_*`-hemmelighetene.
 
@@ -120,6 +120,84 @@ Eksport `live-sjekk-1` ligger bare lokalt i `scripts/data/` (git-ignorert). Kjø
 - **Kanaler:** 3 280 aktive er i 6 kanaler (mangler Online Store), 11 413 i alle 7, og 2 476 i ingen (det er de 2 449 utkastene og 27 arkiverte).
 - Bare 1 produkt har produkttypen «Bok» i dag.
 - **Ikke sjekket:** hvor mange av de 16 914 som er fysiske bøker og hvor mange som ikke finnes hos Bokbasen. Det krever ONIX-oppslag og kommer fram i sjekkmodus (Del 5), ikke i eksporten.
+
+## Del 5: resultat (sjekkmodus mot live, 08.10.2026)
+
+Alle jobbene er kjørt med `mode: analyze` mens live var aktiv med skrivesperre på (`read_only`) og «åpen til» innenfor 24 timer. Alle jobbradene har butikkstempel som stemmer med live. **Ingen jobb sendte noen skriving**: «Bulk: 0 operasjoner» i alle fire ferdige jobber, og skrivesperren avviser alt annet. Handles-analysen lager ingen jobbrad (se under).
+
+| Jobb | Tid | Resultat |
+|---|---|---|
+| Handles (analyse) | ca. 40 s | Plan for 17 169 produkter |
+| Sjangre (bokgrupper og samlinger) | 1 t 31 min | Ferdig, 0 feil |
+| Bokdata (book-update, bulk) | 1 t 03 min | Ferdig, 0 feil |
+| Tilgjengelighet (bulk) | 1 t 47 min | Ferdig, 0 feil |
+| Pris | 1 t 35 min til 85 %, stoppet av utløpt «åpen til» | **Ikke ferdig.** 14 664 av 17 169. Ny full kjøring pågår |
+
+### 17a Handles
+- 16 546 ISBN-adresser får ny adresse (tittel-forfatter-ISBN); 14 525 uten merknad og 1 973 «mangler forfatter» (da blir adressen tittel-ISBN).
+- Hoppet over: 58 duplikater (flagget), 58 uten ISBN, 197 beskyttede, 368 lesbare adresser som beholdes (de 422 lesbare = 368 + 54 beskyttede). Kollisjoner: 0.
+- Migrering er ikke tillatt i live (`allowed: false`).
+
+### 17b Produkter uten ISBN (201)
+58 uten ISBN og ikke beskyttet, 143 beskyttede. I alle jobbene er de hoppet over (58 «ingen_isbn» i sjangre, bokdata og tilgjengelighet, 197 beskyttede i hver); 0 planlagte endringer. Medlemskort og bokpakker er blant dem uten ISBN og er dermed uberørt. Ikke kontrollert enkeltvis på tittel.
+
+### 17c Forsiden
+Samlingene Nyheter (6 produkter) og Anbefalinger (5): **ingen** har statusendring. Ingen settes til utkast eller arkivert.
+
+### 17d Status (tilgjengelighet)
+1 042 produkter får ny status; CSV ligger lokalt (`scripts/out/statusendringer-2026-10-08.csv`, ikke i git).
+- Aktiv → utkast: **564**. 549 av dem har ONIX-kode 40, resten 42 (2), 51 (4) og 97 (9).
+- Utkast → aktiv: **174** (mest 21: 92, 31: 51, 33: 23).
+- Utkast → arkivert: 224. Aktiv → arkivert: 80 (kode 41: 75, 43: 3, 46: 1, 47: 1).
+- 129 av dem som er skjult i dag (aktive, ikke publisert i nettbutikken) får ny status: 106 til utkast og 23 til arkivert.
+- Videresending: 303 til samling, 0 til ny utgave, 1 uten mål.
+- 46 produkter får sporing av beholdning slått av.
+- Hoppet over: 197 beskyttede, 25 arkiverte, 118 duplikater, 58 uten ISBN, 348 ikke bok.
+
+### 17e Salgskanaler
+Bokdata: 306 aktive bøker ville blitt publisert på 306 kanaler de mangler. Tilgjengelighet: 16 bøker (112 kanaler). Dette er langt under de 3 280 skjulte. **Årsaken er ikke undersøkt**; mulige forklaringer er at mange blir utkast (106), er ikke bok, beskyttet eller duplikat. Fordeling per kanal er ikke hentet. Åpne spørsmål 1 og 5 er ikke avgjort.
+
+### 17f Produkttype og forfatter
+16 446 får produkttypen «Bok». 0 bøker hoppes over fordi de mangler hos Bokbasen (0 «uten ONIX»). Dagens forfatter i produkttypen byttes dermed for nesten alle.
+
+### 17g Tagger
+Sjangre: 856 produkter får bkg-tagger, 15 591 har dem, 0 uten bokgruppekode. Bokdata: tagger endres på 766. 16 447 får `bok.bokgruppe`. Hva som skjer med hver enkelt emnetagg (skjoenn-rom, Faglitteratur osv.) er ikke telt opp.
+
+### 17h SEO
+SEO-tittel settes på 16 441, metabeskrivelse på 16 435. Står som manuelle: 5 titler og 12 beskrivelser. Beskrivelsen er en annen tekst enn forlagsteksten og overskrives ikke: 1 763.
+
+### 17i Institusjoner og forfattere
+124 institusjonsnavn på 485 bøker (ikke forfatter). `bok.forfatter` settes på 16 131. Bøker med flere forfattere er ikke telt, og 5 eksempler er ikke hentet.
+
+### 17j Kategori
+13 031 får kategori (fra «Media > Books» og tom til «Print Books»).
+
+### Bokgrupper og samlinger
+2 samlinger ville blitt laget (82 og 824), 68 ville fått nytt navn (for eksempel «Lærebøker og fagbøker» til «Skolebøker»), 85 finnes.
+
+### Pris (foreløpig, basert på 85 %: 14 664 av 17 169)
+- Uendret: 13 275. Ville fått ny pris: **749** (5,1 % av dem som er sjekket).
+- Hoppet over: 348 ikke bok, 139 beskyttede, 78 duplikater, 51 uten ISBN, 1 egen pris.
+- **23 «feil»** er ikke tekniske: alle har meldingen «Ingen endring: ingen gyldig pris i dag» (ingen godkjent pris fra Bokbasen). Hvilke bøker det gjelder (ONIX-kode) er ikke undersøkt.
+- Rader til prisgodkjenning (over 30 % endring): ikke undersøkt for denne kjøringen; 0 nye rader i `price_approvals`.
+- Tallene lagret lokalt i `scripts/out/live-pris-85prosent.json`. Den nye fulle kjøringen avløser dem.
+
+### Hendelser under kjøringen
+1. En testjobb som skulle gå mot Testbutikk gikk mot live, fordi live allerede var aktiv. Den var bare sjekk, 0 loggrader, og stoppet av seg selv da live ble lukket.
+2. Prisjobben stoppet (`failed`, ikke pause) da «åpen til» gikk ut. En `failed`-jobb kan ikke gjenopptas; en ny jobb må startes.
+
+## Del 6: foreløpig rapport (09.10.2026)
+
+**Live er nå tillatt for lesing og sjekkmodus** under sperrene (bekreftet domene, «åpen til» høyst 24 t, skrivesperre, butikkstempel på jobber). Prosjektinstruksene må oppdateres av Eirik.
+
+### Ikke sjekket ennå
+- Pris: full kjøring pågår (85 % er foreløpig). De 23 uten gyldig pris, godkjenningsrader.
+- Punkt 14: hvor mange av 16 914 bøker som er fysiske ifølge Bokbasen (bare «ikke bok»: 348–349 hoppet over av format).
+- 17e: fordeling per kanal, og hvorfor bare 306 av 3 280 skjulte ville bli publisert.
+- 17g: tellinger per emnetagg. 17i: bøker med flere forfattere og 5 eksempler hver.
+- Punkt 18: sammenligning av 10 tilfeldige bøker med eksporten.
+- Punkt 21–23: pilotliste (50 ISBN, kun lokalt, ikke i git), Liquid-forslag for «Forfatter» og listen over det som må være klart før piloten.
+- Ingen pilot og ingen oppdateringsmodus er startet.
 
 ## Del 3–6: oppskrift for neste økt
 - **Del 3:** Profilen er lagt inn (08.10). Gjenstår: ny «Test tilkobling» etter rettingen av tellingen, og kontroll av tilgangene mot `pakke-i-del-b-live.md` punkt 1. Ikke «Gjør aktiv» før Del 5 (live-eksporten i Del 4 går med lokale skript og `LIVE_SHOPIFY_*` i `scripts/.env.local`).

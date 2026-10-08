@@ -728,3 +728,5 @@ Detaljer og framdrift: `oppgaver/live-sjekk-1.md`.
 - Live er tillatt for **lesing og sjekkmodus** under sperrene (prosjektinstruksen), men er ikke koblet til ennå. Prosjektinstruksene oppdateres av Eirik.
 - **Butikker i Innstillinger (08.10):** aktiv butikk velges i Innstillinger («Butikker»). Client secret ligger i Vault. Bytte krever at ingen jobb kjører eller står på pause, at domenet skrives som bekreftelse, og for live «åpen til» (høyst 24 t). «Lukk live» virker alltid. Uten valgt profil brukes `SHOPIFY_*` (Testbutikk). Migrasjon 20261008151207. Ikke deployet ennå.
 
+## Live-sjekk 1 (08.–09.10.2026): kort oppsummering
+Live er nå tillatt for **lesing og sjekkmodus** under sperrene (skrivesperre, bekreftet domene, «åpen til» høyst 24 t, butikkstempel på jobber). Live-eksport (17 169 produkter, 162 samlinger) stemmer med kontrolltallene fra 2. oktober. Sjekkmodus kjørt for handles, sjangre, bokdata og tilgjengelighet med 0 skrivinger; pris er 85 % sjekket (full kjøring pågår). Ingen pilot og ingen oppdateringsmodus. Full rapport: `oppgaver/live-sjekk-1.md`. Prosjektinstruksene må oppdateres av eier.
