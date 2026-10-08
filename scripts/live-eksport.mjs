@@ -95,7 +95,7 @@ console.log(`Butikk: ${SHOP}${isLive() ? "  (LIVE, bare lesing)" : "  (Testbutik
 const butikk = {};
 butikk.shop = (await shopifyGql(`{ shop { name myshopifyDomain primaryDomain { url } currencyCode } }`)).shop;
 butikk.tellinger = {
-  produkter: (await shopifyGql(`{ productsCount(query: "status:active OR status:draft OR status:archived") { count } }`)).productsCount.count,
+  produkter: (await shopifyGql(`{ productsCount(query: "status:active OR status:draft OR status:archived", limit: null) { count precision } }`)).productsCount.count,
   samlinger: (await shopifyGql(`{ collectionsCount { count } }`)).collectionsCount.count,
 };
 butikk.publications = (await shopifyGql(`{ publications(first: 50) { nodes { id name } } }`)).publications.nodes;

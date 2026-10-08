@@ -204,7 +204,7 @@ async function main() {
   // Hent total antall for progress bar
   let totalProducts = 0;
   try {
-    const countData = await shopifyGql(shopDomain, accessToken, `{ productsCount { count } }`);
+    const countData = await shopifyGql(shopDomain, accessToken, `{ productsCount(limit: null) { count precision } }`);
     totalProducts = countData?.productsCount?.count ?? 0;
     console.log(`Totalt i Shopify: ${totalProducts} produkter`);
   } catch (e) {

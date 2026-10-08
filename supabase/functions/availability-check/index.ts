@@ -145,7 +145,7 @@ async function fetchShopifyProductsPage(
 async function getShopifyProductCount(_userId: string | null): Promise<number> {
   try {
     const { data } = await shopifyGraphQL<{ productsCount: { count: number } }>(
-      `{ productsCount(query: "${ALL_PRODUCT_STATUSES}") { count } }`
+      `{ productsCount(query: "${ALL_PRODUCT_STATUSES}", limit: null) { count } }`
     );
     return data.productsCount?.count || 0;
   } catch {

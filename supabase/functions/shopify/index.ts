@@ -2140,7 +2140,7 @@ serve(async (req: Request) => {
     // POST /shopify/test — verify the server's Shopify connection (Dev Dashboard app,
     // credentials from Supabase secrets). Returns shop name, domain and product count.
     if (path === "test" && req.method === "POST") {
-      const result = await shopifyGraphQL(`{ shop { name myshopifyDomain } productsCount(query: "${ALL_PRODUCT_STATUSES}") { count } }`, {});
+      const result = await shopifyGraphQL(`{ shop { name myshopifyDomain } productsCount(query: "${ALL_PRODUCT_STATUSES}", limit: null) { count } }`, {});
       const active = await getActiveShop();
       return new Response(JSON.stringify({
         success: true,
@@ -2250,7 +2250,7 @@ serve(async (req: Request) => {
 
     // GET /shopify/count — hent totalt antall produkter med én query
     if (path === "count" && req.method === "GET") {
-      const result = await shopifyGraphQL(`{ productsCount(query: "${ALL_PRODUCT_STATUSES}") { count } }`, {});
+      const result = await shopifyGraphQL(`{ productsCount(query: "${ALL_PRODUCT_STATUSES}", limit: null) { count } }`, {});
       const count: number = result.data?.productsCount?.count ?? 0;
       return new Response(JSON.stringify({ count }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },

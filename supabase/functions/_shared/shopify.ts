@@ -299,7 +299,7 @@ export async function waitForShopifyBudget(extensions: Record<string, unknown> |
 // kan endres. Secret leses fra Vault her og forlater aldri serveren.
 export const SHOP_TEST_QUERY = `{
   shop { name myshopifyDomain primaryDomain { host } }
-  productsCount(query: "${ALL_PRODUCT_STATUSES}") { count }
+  productsCount(query: "${ALL_PRODUCT_STATUSES}", limit: null) { count }
   collectionsCount { count }
   currentAppInstallation { accessScopes { handle } }
 }`;

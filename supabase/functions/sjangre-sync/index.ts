@@ -232,7 +232,7 @@ async function processSyncBatch(jobId: string) {
     delete config.dup_scan;
     if (config.phase === "tagging") {
       if (!config.total_products) {
-        const countResult = await shopifyGraphQL(`{ productsCount(query: "${ALL_PRODUCT_STATUSES}") { count } }`, {});
+        const countResult = await shopifyGraphQL(`{ productsCount(query: "${ALL_PRODUCT_STATUSES}", limit: null) { count } }`, {});
         config.total_products = ((countResult.data as Record<string, unknown>)?.productsCount as { count: number })?.count ?? 0;
         await supabase.from("jobs").update({ total_items: config.total_products, config }).eq("id", jobId);
       }
@@ -603,7 +603,7 @@ async function processEnrichBatch(jobId: string) {
 
   try {
     if (!config.total_products) {
-      const countResult = await shopifyGraphQL(`{ productsCount(query: "${ALL_PRODUCT_STATUSES}") { count } }`, {});
+      const countResult = await shopifyGraphQL(`{ productsCount(query: "${ALL_PRODUCT_STATUSES}", limit: null) { count } }`, {});
       config.total_products = ((countResult.data as Record<string, unknown>)?.productsCount as { count: number })?.count ?? 0;
       await supabase.from("jobs").update({ total_items: config.total_products, config }).eq("id", jobId);
     }
@@ -734,7 +734,7 @@ serve(async (req) => {
     // GET /sjangre-sync/analyze
     if (path === "analyze" && req.method === "GET") {
 
-      const countResult = await shopifyGraphQL(`{ productsCount(query: "${ALL_PRODUCT_STATUSES}") { count } }`, {});
+      const countResult = await shopifyGraphQL(`{ productsCount(query: "${ALL_PRODUCT_STATUSES}", limit: null) { count } }`, {});
       const totalShopifyProducts = ((countResult.data as Record<string, unknown>)?.productsCount as { count: number })?.count ?? 0;
 
       const { count: withKode } = await supabase
@@ -800,7 +800,7 @@ serve(async (req) => {
       const { data: existing } = await exQ.single();
       if (existing) return new Response(JSON.stringify({ error: "En synk kjøres allerede", jobId: existing.id }), { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
-      const countResult = await shopifyGraphQL(`{ productsCount(query: "${ALL_PRODUCT_STATUSES}") { count } }`, {});
+      const countResult = await shopifyGraphQL(`{ productsCount(query: "${ALL_PRODUCT_STATUSES}", limit: null) { count } }`, {});
       const totalProducts = ((countResult.data as Record<string, unknown>)?.productsCount as { count: number })?.count ?? 0;
 
       const { data: job, error } = await supabase.from("jobs").insert({
