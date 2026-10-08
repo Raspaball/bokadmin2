@@ -155,7 +155,7 @@ Samlingene Nyheter (6 produkter) og Anbefalinger (5): **ingen** har statusendrin
 - Hoppet over: 197 beskyttede, 25 arkiverte, 118 duplikater, 58 uten ISBN, 348 ikke bok.
 
 ### 17e Salgskanaler
-Bokdata: 306 aktive bøker ville blitt publisert på 306 kanaler de mangler. Tilgjengelighet: 16 bøker (112 kanaler). Dette er langt under de 3 280 skjulte. **Årsaken er ikke undersøkt**; mulige forklaringer er at mange blir utkast (106), er ikke bok, beskyttet eller duplikat. Fordeling per kanal er ikke hentet. Åpne spørsmål 1 og 5 er ikke avgjort.
+Bokdata: 306 aktive bøker ville blitt publisert på 306 kanaler de mangler. Tilgjengelighet: 16 bøker (112 kanaler). Dette er langt under de 3 280 skjulte. Årsaken er funnet: se «De 3 280 skjulte bøkene». Alle 3 280 er på de samme 6 kanalene og mangler bare Online Store. Åpne spørsmål 1 og 5 er ikke avgjort.
 
 ### 17f Produkttype og forfatter
 16 446 får produkttypen «Bok». 0 bøker hoppes over fordi de mangler hos Bokbasen (0 «uten ONIX»). Dagens forfatter i produkttypen byttes dermed for nesten alle.
@@ -185,6 +185,58 @@ SEO-tittel settes på 16 441, metabeskrivelse på 16 435. Står som manuelle: 5 
 ### Hendelser under kjøringen
 1. En testjobb som skulle gå mot Testbutikk gikk mot live, fordi live allerede var aktiv. Den var bare sjekk, 0 loggrader, og stoppet av seg selv da live ble lukket.
 2. Prisjobben stoppet (`failed`, ikke pause) da «åpen til» gikk ut. En `failed`-jobb kan ikke gjenopptas; en ny jobb må startes.
+
+## De 3 280 skjulte bøkene: kartlegging (09.10.2026, bare lesing)
+
+Kjørt mot live i sjekkmodus: én lesespørring for kanalene, ONIX fra Bokbasen og de samme reglene som jobbene bruker. Ingenting er publisert eller endret. Detaljer per bok ligger i en Excel-fil lokalt (`scripts/out/skjulte-boker-3280-detaljert.xlsx`, ikke i git). Skriptene er `scripts/skjulte-boker.mjs` og `scripts/skjulte-boker-xlsx.py`.
+
+### Hvorfor bare 306 av 3 280? (det enkle svaret)
+Regelen som publiserer bøker, rører ikke en bok der **produkttypen allerede er noe annet enn «Bok»**. I live står forfatteren i produkttypen (for eksempel «Herresthal, Harald»), og det gjelder **2 956 av de 3 280**. De hoppes over, og bare de **324 som har tom produkttype**, kan publiseres. Jobben endrer produkttypen til «Bok» først i samme kjøring, men sjekker kanalene med den gamle verdien. Tilgjengelighetsjobben publiserer dessuten bare når en bok *blir* aktiv, og disse er allerede aktive; derfor ble det bare 16 der.
+
+### Trinn for trinn (antall igjen etter hvert trinn)
+| Trinn | Igjen |
+|---|---|
+| Aktive, ikke publisert i Online Store | 3 280 |
+| har ISBN | 3 278 |
+| ikke beskyttet | 3 278 |
+| ikke duplikat-ISBN | 3 275 |
+| finnes hos Bokbasen | 3 275 |
+| er fysisk bok (ProductForm B, A, E og boktype «Bok») | 3 224 |
+| blir eller forblir aktiv etter ONIX-regelen | 3 095 |
+| **produkttype er tom eller «Bok» i dag** | **284** |
+| mangler kanaler, altså publiseres | 284 |
+
+**306 i bokdata-sjekken = 284 + 22.** Bokdata-jobben ser på statusen i dag (aktiv), ikke på statusen ONIX-regelen gir. De 22 er bøker som tilgjengelighetsjobben ville gjort til utkast (11) eller arkivert (11), men som bokdata-jobben likevel ville publisert. Det er verdt å vite: rekkefølgen mellom jobbene betyr noe.
+
+Kanalregelen ser på alle kanaler en bok mangler, ikke bare Online Store. Alle 3 280 mangler nøyaktig Online Store (de er på de 6 andre kanalene: Facebook & Instagram, Google & YouTube, Point of Sale, Snapchat Ads, Inbox og App). Ingen andre aktive produkter mangler noen kanal.
+
+### Fakta om de 3 280
+- **Opprettet:** alle i februar 2025. Største forlag: Gyldendal 1 415, Cappelen Damm 434, Vigmostad & Bjørke 317 (+68 under annet navn), Fagbokforlaget 248.
+- **ONIX-kode i dag:** 21 «tilgjengelig» 2 969, 20: 69, 23: 59, 22: 1, 31–34: 43, 40: 109 (ikke tilgjengelig), 41: 22 (utgått), 42: 1, 46: 1, 51: 3, 97: 1, tom: 2.
+- **Ny status etter regelen:** 3 141 forblir aktive, 114 blir utkast, 23 blir arkivert, 2 uten ONIX.
+- **Fysisk bok:** 3 227 ja, 51 nei (blant annet ProductForm PF, SA, ZZ, PR, XM), 2 uten ISBN. Alle 3 278 med ISBN finnes hos Bokbasen.
+- **Pris:** ingen har pris 0 i dag. 2 mangler gyldig pris hos Bokbasen (de uten ISBN). 243 har en dagens pris som avviker mer enn 0,50 kr fra Bokbasen (prisjobben tar seg av dem). **Kommende bøker (kode 10–12): 0.** Ingen har utgivelsesdato i 2026 eller senere.
+- **Duplikat-ISBN:** 3. **Beskyttede:** 0. **Uten ISBN:** 2.
+
+### Anbefaling (bare sjekkmodus-regelen)
+| Anbefaling | Antall | Hva det betyr |
+|---|---|---|
+| Publiser | 284 | Regelen publiserer dem allerede i dag |
+| Sjekk manuelt | 2 811 | Ville blitt publisert så snart produkttypen er «Bok» (**antakelse**: at bokdata-oppdateringen er gjort først) |
+| Hold utenfor | 185 | 102 + 3 + 1 blir utkast (ONIX 40, 51, 42), 22 + 1 blir arkivert (41, 46), 51 er ikke fysiske bøker, 3 duplikater, 2 uten ISBN |
+
+Sammen er det **3 095 bøker som kan bli synlige** i nettbutikken hvis produkttypen settes til «Bok» først, og **185 som bør holdes utenfor**. Dette er ikke et vedtak; det er regelens svar.
+
+### Det Eirik må avgjøre
+1. Skal de ca. 3 095 bøkene synliggjøres i nettbutikken (åpen avgjørelse 1 og 5), og i så fall skal det gjøres i to omganger (først produkttype «Bok», så kanaler), eller skal vi endre regelen slik at kanaler sjekkes etter at produkttypen er satt? Å endre regelen er ikke gjort.
+2. De 129 som blir utkast eller arkivert (ONIX 40 m.fl.): skal de heller forbli aktive, men skjulte, eller følge ONIX-regelen?
+3. Skal de 51 som ikke er fysiske bøker (lydbøker, e-bøker, annet) få en egen vurdering?
+4. Rekkefølgen mellom bokdata og tilgjengelighet: bokdata ser på dagens status, og kan publisere bøker som tilgjengelighetsjobben siden gjør til utkast.
+
+### Det som er antakelse eller ikke sjekket
+- «Sjekk manuelt» bygger på antakelsen over (produkttype «Bok» satt først). Det er ikke gjort i live.
+- ONIX er hentet i dag (09.10), så koder og priser er som Bokbasen sier nå.
+- Hvorfor Gyldendal-bøkene (1 415) ble skjult i februar 2025 er ikke undersøkt.
 
 ## Del 6: foreløpig rapport (09.10.2026)
 
