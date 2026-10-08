@@ -1,17 +1,27 @@
-# Fortsett her (overlevering 07.10.2026, kl. 05.45)
+# Fortsett her (overlevering 08.10.2026, kl. 18.00)
 
-**Gjeldende oppdrag: live-sjekk 1** (koble 2.0 til livebutikken, bare lesing og sjekkmodus). Oppdraget og framdriften står i `oppgaver/live-sjekk-1.md`. Les den først, sammen med CLAUDE.md og prosjektdokumentene `live-analyse-2026-10-07`, `plan-veien-til-live` og `oppgaver/pakke-i-del-b-live.md`.
+**Gjeldende oppdrag: live-sjekk 1** (koble 2.0 til livebutikken, bare lesing og sjekkmodus). Framdrift og oppskrift for Del 3–6 står i `oppgaver/live-sjekk-1.md`. Les den først, og deretter CLAUDE.md.
 
 ## Kort status
-- Del 1 ferdig: skrivesperre (LIVE_READ_ONLY) og butikkstempel på jobber (commit c3b324c, migrasjon 20261007033904 kjørt). **Ikke deployet.**
-- Del 2: forslag til lagring av butikker gitt, venter på Eiriks svar på tre spørsmål (Vault, bare Eirik kan endre, dobbel lås).
-- Ingen jobber kjører i 2.0. Live er ikke koblet til. Ingenting er skrevet til live.
-- Lokale commits ikke pushet til GitHub (main er 3 foran origin).
+- Del 1 (skrivesperre LIVE_READ_ONLY, butikkstempel `jobs.shop_domain`) og Del 2 (Innstillinger → Butikker, secret i Vault, regler for bytte i databasen) er ferdige, testet og deployet til 2.0 (08.10 kl. 17.41).
+- Migrasjonene `20261007033904` og `20261008151207` er kjørt.
+- Alt til og med 8abb2ee er på GitHub, og Vercel har bygget det.
+- Del 3: profilen for livebutikken er lagret, og «Test tilkobling» virker (bare lesing). Live er ikke gjort aktiv.
+- **Funn:** produkttellingen stopper på 10 000 (`productsCount` uten `limit: null`). Se `live-sjekk-1.md` («Funnet 08.10»). Må rettes før live-eksporten.
+- Testbutikk er aktiv. Ingenting er skrevet til live. Ingen jobber kjører.
+
+## Neste
+1. Lagre i git og send til GitHub: `oppgaver/fortsett-her.md`, `live-sjekk-1.md`, `live-sjekk-1-oppdrag.md` og `pakke-h-mot-live.md`. Slett `scripts/out/live-sjekk.bundle`.
+2. Rett produkttellingen (`limit: null`) i funksjonene og skriptene, kjør testene, og deploy etter ja.
+3. Kjør én liten jobb i sjekkmodus mot Testbutikk (`shop_domain` skal bli satt).
+4. Eirik tester live-tilkoblingen på nytt og sender tilgangene. Deretter Del 4 (live-eksport).
 
 ## Ikke gjør
-- Ikke sett `SHOPIFY_SHOP_DOMAIN` til live før sperrene er deployet.
+- Ikke endre `SHOPIFY_*`-hemmelighetene for å koble til live. Bruk Innstillinger → Butikker.
+- Ikke slå av skrivesperren (`shop_settings.read_only`, `LIVE_READ_ONLY`).
 - Ingen deploy eller migrasjon uten ja fra Eirik.
-- Git i Cowork: sletting i mappa må være tillatt (git rydder egne låsefiler), ellers blir `.git/index.lock` liggende.
+- Ikke skriv live-domenet, nøkler eller ISBN-lister fra live i git (repoet er offentlig).
+- Rør aldri gamle Bokadmin (`C:\Bokadmin`, Supabase `cvrnkeboqvhvfoxcdbbz`).
 
 ---
 

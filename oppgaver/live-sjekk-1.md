@@ -3,22 +3,22 @@
 Startet 07.10.2026. Oppdrag fra Eirik (Opus 5.5). Live skal bare leses. Ingen mutasjoner, ingen oppdateringsmodus, ingen push, ingen metafelt-definisjoner.
 Denne fila er både framdriftslogg og (til slutt) rapporten i punkt 19. Ingen hemmeligheter, live-domener eller ISBN-lister fra live her (repoet er offentlig).
 
-## Status per 07.10.2026 kl. 05.45
+## Status per 08.10.2026 kl. 18.00 (tabellen er oppdatert; detaljene under er historikk)
 
 | Del | Punkt | Status |
 |---|---|---|
 | 1 Før tilkobling | 1. Ingen jobber/planlagte oppgaver | **Ferdig.** 0 jobber running/paused, 0 planlagte oppgaver. 5 pg_cron-jobber aktive, men de bare gjenopptar pausede jobber og starter planlagte oppgaver (det finnes ingen) |
-| | 2. Skrivesperre LIVE_READ_ONLY | **Ferdig i kode, ikke deployet.** Commit c3b324c |
-| | 3. Butikkstempel på jobber | **Ferdig.** Migrasjon 20261007033904 kjørt (ja fra Eirik). Kode i c3b324c, ikke deployet |
+| | 2. Skrivesperre LIVE_READ_ONLY | **Ferdig og deployet 08.10.** Commit c3b324c |
+| | 3. Butikkstempel på jobber | **Ferdig og deployet 08.10.** Migrasjon 20261007033904 |
 | 2 Innstillinger | 4. Lagring | **Ferdig 08.10.** Eirik sa ja til Vault, bare administrator og dobbel lås. Migrasjon 20261008151207 kjørt (først prøvekjørt i en transaksjon som ble angret). Eirik er satt som administrator |
-| | 5–7. Skjerm «Butikker», bytte, logg | **Ferdig i kode** (commit 4ad7c6a), ikke deployet |
-| | 8. Tester og deploy | 352/352 tester. SQL-test av byttereglene venter på godkjenning. Deploy venter på ja |
-| 3 Koble til live | 9–11 | Ikke startet |
+| | 5–7. Skjerm «Butikker», bytte, logg | **Ferdig og deployet 08.10 kl. 17.41** (commit 4ad7c6a). Pushet til GitHub (8abb2ee); Vercel-bygget er klart (READY) |
+| | 8. Tester og deploy | 352/352 tester. SQL-test av byttereglene 11/11 (transaksjon angret). Etter deploy: anon får 403 på /shops og /shops/switch; /test svarer Testbutikk, 9 059 produkter, live av |
+| 3 Koble til live | 9–11 | **Delvis ferdig 08.10 kl. 17.49.** Profilen «Bø bok og papir» er lagret med secret. Første test: `app_not_installed`. Andre test: ok, «Bø bok og papir», 162 samlinger. **Tellingen viste 10000 produkter: det er Shopifys standardtak (`productsCount` uten `limit: null`), ikke riktig antall (ca. 17 169).** Tilgangene er ikke kontrollert ennå. Live er ikke gjort aktiv |
 | 4 Bare lesing | 12–14 | Ikke startet |
 | 5 Sjekkmodus | 15–18 | Ikke startet |
 | 6 Rapport og pilotplan | 19–23 | Ikke startet |
 
-**Viktig:** Sperren mot live (pakke I del B, commit 6b69f7a) og skrivesperren er IKKE deployet. Funksjonene i Supabase er fra 06.10. Ingen må sette `SHOPIFY_SHOP_DOMAIN` til live før deploy. Deploy gjøres samlet etter Del 2 (Eirik sa ja 07.10).
+**Deployet 08.10 kl. 17.41:** shopify, price-update, availability-check, book-update, sjangre-sync, bokbasen (alle med sperrene). Live kobles til via Innstillinger → Butikker, ikke ved å endre `SHOPIFY_*`-hemmelighetene.
 
 ## Del 1, detaljer
 
@@ -67,7 +67,29 @@ Neste steg når Eirik har svart: vis SQL for tabellene og Vault-funksjonene (ven
 - Edge Functions: `deno check` med kart for nettadressene som ikke nås fra maskinen. Ingen nye feil. De som gjenstår, fantes før: availability-check 4, shopify 4, price-update 1.
 - `SHOP_TEST_QUERY` er validert mot Shopifys skjema.
 
-### Gjenstår før Del 3
-1. SQL-test av byttereglene i en transaksjon som angres: avvist uten secret, annen bruker, feil bekreftelse, over 24 t, uten «åpen til», pauset jobb; gyldig bytte; «Lukk live» med jobb; ingen secret i loggen. Første forsøk ble stoppet ved godkjenningen. Ingenting ble endret.
-2. Deploy av seks funksjoner (`shopify`, `price-update`, `availability-check`, `book-update`, `sjangre-sync`, `bokbasen`) og frontend (Vercel bygger fra `main` på GitHub).
-3. Test mot Testbutikk etter deploy: «Test tilkobling», en jobb i sjekkmodus, bytte avvist mens jobben kjører, «Lukk live».
+### Testet 08.10
+- SQL-test av byttereglene (transaksjon som ble angret), 11/11: ugyldig domene, uten secret, annen bruker, feil bekreftelse, over 24 t, uten «åpen til», pauset jobb avvist; gyldig bytte med skrivesperre; aktiv profil kan ikke slettes; «Lukk live» med jobb; ingen secret i loggen.
+- Etter deploy (kalt fra databasen med pg_net, fordi Cowork ikke når Supabase direkte): anon → 403 på `/shops` og `/shops/switch`; `/test` → Testbutikk, 9 059 produkter, `live: false`, `source: env`.
+
+### Funnet 08.10: produkttellingen stopper på 10 000
+`productsCount` har et standardtak på 10 000. Live har ca. 17 169 produkter. Rettingen er `productsCount(query: …, limit: null) { count precision }` (validert mot Shopifys skjema). Steder:
+- `_shared/shopify.ts` (`SHOP_TEST_QUERY`)
+- `shopify/index.ts` (`/test` og `/count`)
+- `availability-check`, `book-update`, `price-update` (`getShopifyProductCount` / `getProductCount`)
+- `sjangre-sync` (4 steder)
+- `scripts/live-eksport.mjs` linje 98: kontrollen av antall i manifestet ville ellers sagt at 17 169 ≠ 10 000
+- `scripts/clean-tags.mjs`
+
+Samlingenes `productsCount` (bkg, under 5 000) trenger ikke endres. Dette må rettes, testes og deployes (etter ja) før Del 4.
+
+### Gjenstår før Del 4
+1. Rett tellingen (over), kjør testene, si fra før deploy, og deploy `shopify`, `availability-check`, `book-update`, `price-update` og `sjangre-sync`.
+2. Slett hjelpefila `scripts/out/live-sjekk.bundle` (git-ignorert).
+3. Kjør én jobb i sjekkmodus mot Testbutikk (for eksempel bokdata med ett ISBN) og se at den får `shop_domain`.
+4. Eirik kjører «Test tilkobling» for live på nytt (skal vise ca. 17 169 produkter) og sender lista over tilganger. Kontroller den mot `pakke-i-del-b-live.md` punkt 1.
+
+## Del 3–6: oppskrift for neste økt
+- **Del 3:** Profilen er lagt inn (08.10). Gjenstår: ny «Test tilkobling» etter rettingen av tellingen, og kontroll av tilgangene mot `pakke-i-del-b-live.md` punkt 1. Ikke «Gjør aktiv» før Del 5 (live-eksporten i Del 4 går med lokale skript og `LIVE_SHOPIFY_*` i `scripts/.env.local`).
+- **Del 4:** Live-eksport med `scripts/live-eksport.mjs --live --bekreft-butikk <domene> --name sjekk-1` (bare lesing, lokale variabler `LIVE_SHOPIFY_*` i `scripts/.env.local`). Sammenlign med kontrolltallene (punkt 13) og rapporter avvik over 3 %. Gi tall for bøker, ikke-bøker og bøker som mangler i Bokbasen (punkt 14).
+- **Del 5:** Eirik gjør live aktiv i Innstillinger («åpen til» noen timer, skrivesperren er på). Sjekkmodus i denne rekkefølgen: handles, sjangre, bokdata (bulk), tilgjengelighet, pris. Etter hver jobb: 0 skrivinger (loggen og `sync_log`), og rapport etter punkt 17 a–j. Stopper en jobb på CPU, rapporteres det, uten nye forsøk i det uendelige. Etterpå «Lukk live».
+- **Del 6:** Rapport i denne fila og en kort oppsummering i `BOKADMIN2_OPPSETT.md`, pilotliste (50 ISBN, punkt 21), forslag til Liquid for «Forfatter» (punkt 22) og listen i punkt 23. Ingen pilot og ingen oppdateringsmodus.
