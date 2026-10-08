@@ -14,7 +14,7 @@ Denne fila er både framdriftslogg og (til slutt) rapporten i punkt 19. Ingen he
 | | 5–7. Skjerm «Butikker», bytte, logg | **Ferdig og deployet 08.10 kl. 17.41** (commit 4ad7c6a). Pushet til GitHub (8abb2ee); Vercel-bygget er klart (READY) |
 | | 8. Tester og deploy | 352/352 tester. SQL-test av byttereglene 11/11 (transaksjon angret). Etter deploy: anon får 403 på /shops og /shops/switch; /test svarer Testbutikk, 9 059 produkter, live av |
 | 3 Koble til live | 9–11 | **Delvis ferdig 08.10 kl. 17.49.** Profilen «Bø bok og papir» er lagret med secret. Første test: `app_not_installed`. Andre test: ok, «Bø bok og papir», 162 samlinger. **Tellingen viste 10000 produkter: det er Shopifys standardtak (`productsCount` uten `limit: null`), ikke riktig antall (ca. 17 169).** Tilgangene er ikke kontrollert ennå. Live er ikke gjort aktiv |
-| 4 Bare lesing | 12–14 | Ikke startet |
+| 4 Bare lesing | 12–14 | **Ferdig 08.10 kl. 18.13.** Live-eksport tatt (bare lesing), tellingene stemmer, ingen avvik over 3 %. Se «Del 4: resultat» under. Punkt 14 delvis (Bokbasen ikke sjekket) |
 | 5 Sjekkmodus | 15–18 | Ikke startet |
 | 6 Rapport og pilotplan | 19–23 | Ikke startet |
 
@@ -87,6 +87,39 @@ Samlingenes `productsCount` (bkg, under 5 000) trenger ikke endres. Dette må re
 2. Slett hjelpefila `scripts/out/live-sjekk.bundle` (git-ignorert).
 3. Kjør én jobb i sjekkmodus mot Testbutikk (for eksempel bokdata med ett ISBN) og se at den får `shop_domain`.
 4. Eirik kjører «Test tilkobling» for live på nytt (skal vise ca. 17 169 produkter) og sender lista over tilganger. Kontroller den mot `pakke-i-del-b-live.md` punkt 1.
+
+## Del 4: resultat (08.10.2026 kl. 18.13, bare lesing)
+
+Eksport `live-sjekk-1` ligger bare lokalt i `scripts/data/` (git-ignorert). Kjørt med `--live`, som bare tillater lesing (utskriften: «mutasjoner tillatt: ingen»). Tellingen bruker nå `limit: null`; commit 9b3c8f1 og Edge Functions deployet 08.10.
+
+**Kontroll mot butikkens egne tall:** 17 169 av 17 169 produkter og 162 av 162 samlinger → OK. Filene: 17 169 produkter og varianter, 77 101 metafelt, 17 121 bilder, 162 samlinger (48 245 medlemskap), 2 videresendinger, 7 salgskanaler, 83 metafeltdefinisjoner.
+
+### Sammenligning med kontrolltallene fra 2. oktober (punkt 13)
+
+| Kontrolltall (02.10) | Nå (08.10) | Avvik |
+|---|---|---|
+| 17 169 produkter: 14 693 aktive, 2 449 utkast, 27 arkiverte | Samme | 0 % |
+| 162 samlinger, ingen over 5 000, størst bkg-4 med 4 152 | 162, ingen over 5 000, bkg-4 4 152 (så bkg-2 3 653 og bkg-21 2 617) | 0 % |
+| Wrendale 57, Nyheter 6, Anbefalinger 5 | Samme. Samlingen wrendale finnes (kravet om å stoppe gjelder ikke). Lokalhistorie 63, Gaveartikler 83 | 0 % |
+| 60 ISBN på 121 produkter (duplikater) | 60 ISBN på 121 produkter | 0 % |
+| 422 lesbare adresser, 16 580 ISBN-adresser | 422 og 16 546 | 0 % / 0,2 % (34 færre; mitt telleskript leser ISBN fra strekkode, SKU eller adresse, og den gamle tellingen kan ha brukt en annen definisjon) |
+| 201 produkter uten ISBN | 201 | 0 % |
+| 3 280 aktive ikke publisert i Online Store, hvorav 1 415 Gyldendal | 3 280, hvorav 1 415 Gyldendal (3 278 har ISBN) | 0 % |
+| 7 salgskanaler, 2 videresendinger | 7 (Online Store, Point of Sale, Google & YouTube, Facebook & Instagram, Snapchat Ads, Inbox, App) og 2 | 0 % |
+| Ingen bok.*-definisjoner og ingen bok.*-felt | 0 definisjoner, 0 produkter med bok.*-felt | 0 % |
+| Ca. 1 157 uten bkg-tagger, 1 173 med andre tagger enn bkg | 1 157 og 1 173 | 0 % |
+| Kategori: «Media > Books» 12 656, tom 762 | 12 656 og 762 (Print Books 3 559) | 0 % |
+
+**Ingen avvik over 3 %.** Katalogen er med andre ord uendret siden 2. oktober.
+
+### Tall til punkt 14
+- **Med ISBN:** 16 968 produkter (16 952 med 978, 16 med 979). **Uten ISBN:** 201.
+- **Uten ISBN:** 143 av de 201 er beskyttede (lokal, gave, Wrendale). De 58 øvrige er blant annet 47 uten produkttype og noen med forfatternavn som produkttype.
+- **Beskyttede totalt:** 197 produkter (tagg, leverandør eller samlingen wrendale). 54 av dem har ISBN.
+- **Bøker som ikke er beskyttet og har ISBN:** 16 914.
+- **Kanaler:** 3 280 aktive er i 6 kanaler (mangler Online Store), 11 413 i alle 7, og 2 476 i ingen (det er de 2 449 utkastene og 27 arkiverte).
+- Bare 1 produkt har produkttypen «Bok» i dag.
+- **Ikke sjekket:** hvor mange av de 16 914 som er fysiske bøker og hvor mange som ikke finnes hos Bokbasen. Det krever ONIX-oppslag og kommer fram i sjekkmodus (Del 5), ikke i eksporten.
 
 ## Del 3–6: oppskrift for neste økt
 - **Del 3:** Profilen er lagt inn (08.10). Gjenstår: ny «Test tilkobling» etter rettingen av tellingen, og kontroll av tilgangene mot `pakke-i-del-b-live.md` punkt 1. Ikke «Gjør aktiv» før Del 5 (live-eksporten i Del 4 går med lokale skript og `LIVE_SHOPIFY_*` i `scripts/.env.local`).
