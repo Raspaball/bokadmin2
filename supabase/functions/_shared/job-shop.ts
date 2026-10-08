@@ -8,14 +8,14 @@ import { getShopDomain } from "./shopify.ts";
 import { jobShopMismatch } from "./shop-guard.js";
 
 /** Den aktive butikken, slik den lagres i jobs.shop_domain. */
-export function currentShopDomain(): string {
-  return getShopDomain().trim().toLowerCase();
+export async function currentShopDomain(): Promise<string> {
+  return (await getShopDomain()).trim().toLowerCase();
 }
 
 // deno-lint-ignore no-explicit-any
-export function jobShopError(job: any): string | null {
+export async function jobShopError(job: any): Promise<string | null> {
   let current = "";
-  try { current = currentShopDomain(); } catch { /* ikke satt: jobShopMismatch gir meldingen */ }
+  try { current = await currentShopDomain(); } catch { /* ikke satt: jobShopMismatch gir meldingen */ }
   // Handle-jobbene har hatt butikken i config.shop fra før
   return jobShopMismatch(job?.shop_domain ?? job?.config?.shop, current);
 }
@@ -23,7 +23,7 @@ export function jobShopError(job: any): string | null {
 /** Stopper jobben (failed) hvis butikken ikke stemmer. Returnerer true når jobben ble stoppet. */
 // deno-lint-ignore no-explicit-any
 export async function stopIfShopChanged(supabase: any, job: any): Promise<boolean> {
-  const err = jobShopError(job);
+  const err = await jobShopError(job);
   if (!err) return false;
   console.error(`Jobb ${job?.id}: ${err}`);
   await supabase.from("jobs").update({

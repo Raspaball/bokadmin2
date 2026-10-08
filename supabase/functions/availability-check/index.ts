@@ -478,7 +478,7 @@ async function processBatch(jobId: string) {
         completed_at: new Date().toISOString(),
         total_items: processed,
         result: { total: processed, processed, succeeded, failed, skipped, skippedProtected, skippedDuplicate, skippedOwnAvailability: skippedOwn, skippedArchived,
-          statusChanges, shopDomain: Deno.env.get("SHOPIFY_SHOP_DOMAIN") ?? null,
+          statusChanges, shopDomain: job.shop_domain ?? null,
         },
       } : {}),
     }).eq("id", jobId);
@@ -782,7 +782,7 @@ const AVAILABILITY_BULK_SPEC: BulkJobSpec<AvailabilityCounts> = {
       redirectReplacement: c.redirectReplacement, redirectCollection: c.redirectCollection, redirectNone: c.redirectNone, redirectRemoved: c.redirectRemoved,
       redirectExamples: ctx.state.extra.redirectExamples ?? [],
       archive41: c.archive41, archive47: c.archive47, archive48: c.archive48,
-      statusChanges: ctx.state.extra.statusChanges ?? [], shopDomain: Deno.env.get("SHOPIFY_SHOP_DOMAIN") ?? null,
+      statusChanges: ctx.state.extra.statusChanges ?? [], shopDomain: ctx.shopDomain,
       summary: `${summarizeAvailability(c, ctx.mode)}. ${summarizeBulkStats(ctx.state.stats)}`,
     };
   },
@@ -844,7 +844,7 @@ serve(async (req) => {
           type: "availability_check",
           status: "running",
           user_id: userId,
-          shop_domain: currentShopDomain(),
+          shop_domain: await currentShopDomain(),
           started_at: new Date().toISOString(),
           total_items: totalProducts,
           config: { mode, shopify_cursor: null, ...(bulk ? { bulk: emptyBulkJobState(), counts: {} } : {}) },

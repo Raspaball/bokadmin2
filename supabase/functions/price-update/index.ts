@@ -562,7 +562,7 @@ serve(async (req) => {
           type: "price_update",
           status: "running",
           user_id: userId,
-          shop_domain: currentShopDomain(),
+          shop_domain: await currentShopDomain(),
           started_at: new Date().toISOString(),
           total_items: totalProducts,
           config: { mode, shopify_cursor: null },

@@ -2,7 +2,8 @@
 // Deploy: supabase functions deploy shopify --no-verify-jwt
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { ALL_PRODUCT_STATUSES, getShopDomain, shopifyGraphQL } from "../_shared/shopify.ts";
+import { ALL_PRODUCT_STATUSES, clearShopCache, getActiveShop, getShopDomain, isReadOnly, shopifyGraphQL, testShopProfile } from "../_shared/shopify.ts";
+import { liveReadOnly } from "../_shared/shop-guard.js";
 import { currentShopDomain, jobShopError } from "../_shared/job-shop.ts";
 import { getCaller } from "../_shared/auth.ts";
 import { BOKBASEN_ONIX_URL, type BokbasenCredentials, getBokbasenCredentials, getBokbasenToken } from "../_shared/bokbasen-auth.ts";
@@ -599,7 +600,7 @@ async function pushOneBook(
   const publishType = fields ? fields.productType : isUpdate ? null : "Bok";
   if (publishType === "Bok") {
     try {
-      await publishToAllChannels(product.id as string, getShopDomain()); // felles regel: _shared/publish.ts
+      await publishToAllChannels(product.id as string); // felles regel: _shared/publish.ts
     } catch (_) { /* non-critical — product still exists, just unpublished */ }
   }
 
@@ -1647,13 +1648,13 @@ interface HandleJobRow {
 
 // Migrering (endring av handles) er bare lov mot Testbutikk, eller når
 // hemmeligheten ALLOW_HANDLE_MIGRATION=true er satt bevisst.
-function handleMigrationAllowed(): boolean {
-  return SAFE_STORES.includes(getShopDomain()) || Deno.env.get("ALLOW_HANDLE_MIGRATION") === "true";
+async function handleMigrationAllowed(): Promise<boolean> {
+  return SAFE_STORES.includes(await getShopDomain()) || Deno.env.get("ALLOW_HANDLE_MIGRATION") === "true";
 }
 
-function requireHandleMigrationAllowed(): void {
-  if (!handleMigrationAllowed()) {
-    throw new HttpError(403, `Endring av handles er ikke tillatt mot ${getShopDomain()}. ` +
+async function requireHandleMigrationAllowed(): Promise<void> {
+  if (!await handleMigrationAllowed()) {
+    throw new HttpError(403, `Endring av handles er ikke tillatt mot ${await getShopDomain()}. ` +
       `Kun Testbutikk, eller med hemmeligheten ALLOW_HANDLE_MIGRATION=true.`);
   }
 }
@@ -1744,7 +1745,7 @@ async function startHandleBulk(rows: HandlePlanRow[]): Promise<string> {
 
 // POST /handles/migrate
 async function startHandleMigration(productIds: string[] | undefined, skipFlagged: boolean, userId: string | null) {
-  requireHandleMigrationAllowed();
+  await requireHandleMigrationAllowed();
   const running = await latestHandleJob("&status=in.(running,finalizing)");
   if (running) throw new HttpError(409, "En handle-migrering kjører allerede. Vent til den er ferdig.");
 
@@ -1769,9 +1770,9 @@ async function startHandleMigration(productIds: string[] | undefined, skipFlagge
       total_items: rows.length,
       skipped: blocked.length,
       user_id: userId,
-      shop_domain: currentShopDomain(),
+      shop_domain: await currentShopDomain(),
       started_at: new Date().toISOString(),
-      config: { shop: getShopDomain(), rows: jobRows, skippedBlocked: blocked.length },
+      config: { shop: await getShopDomain(), rows: jobRows, skippedBlocked: blocked.length },
     }),
   });
 
@@ -1790,7 +1791,7 @@ async function startHandleMigration(productIds: string[] | undefined, skipFlagge
 async function refreshHandleJob(job: any): Promise<any> {
   if (job?.status !== "running" || !job.config?.bulkOperationId) return job;
   // Butikken byttet siden kjøringen startet: ikke spør den nye butikken om bulk-operasjonen
-  const shopErr = jobShopError(job);
+  const shopErr = await jobShopError(job);
   if (shopErr) {
     await patchHandleJob(job.id, { status: "failed", error_message: shopErr, completed_at: new Date().toISOString() });
     return { ...job, status: "failed", error_message: shopErr };
@@ -1865,7 +1866,7 @@ async function refreshHandleJob(job: any): Promise<any> {
 async function verifyHandleJob(jobId: string | null) {
   const job = jobId ? await getHandleJob(jobId) : await latestHandleJob("&status=eq.completed");
   if (!job) throw new HttpError(404, "Fant ingen utført handle-migrering.");
-  const shopErrVerify = jobShopError(job);
+  const shopErrVerify = await jobShopError(job);
   if (shopErrVerify) throw new HttpError(409, shopErrVerify);
   const changes = await activeHandleChanges(job.id);
   const step = Math.max(1, Math.ceil(changes.length / 50));
@@ -1901,12 +1902,12 @@ async function verifyHandleJob(jobId: string | null) {
 
 // POST /handles/rollback — setter tilbake fra sync_log, i pulser
 async function rollbackHandleJob(jobId: string | null, userId: string | null) {
-  requireHandleMigrationAllowed();
+  await requireHandleMigrationAllowed();
   const job = jobId
     ? await getHandleJob(jobId)
     : await latestHandleJob("&status=eq.completed&result->>rolledBackAt=is.null");
   if (!job) throw new HttpError(404, "Fant ingen kjøring å angre.");
-  const shopErrRollback = jobShopError(job);
+  const shopErrRollback = await jobShopError(job);
   if (shopErrRollback) throw new HttpError(409, shopErrRollback);
   if (job.status !== "completed" && job.status !== "failed") throw new HttpError(409, "Kjøringen er ikke ferdig ennå.");
 
@@ -1994,6 +1995,120 @@ function toCatalogProduct(node: Record<string, unknown>) {
   };
 }
 
+// ── Butikker (Innstillinger) ─────────────────────────────────────────────────
+// Tabellene shop_profiles / shop_settings / shop_switch_log har RLS uten policyer; bare
+// service-nøkkelen (her) når dem. Reglene for bytte håndheves i databasen (shop_switch).
+
+const SHOP_DOMAIN_RE = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
+const CLIENT_ID_RE = /^[A-Za-z0-9_-]{10,100}$/;
+const TESTBUTIKK = "testbutikk-9434.myshopify.com";
+
+// deno-lint-ignore no-explicit-any
+async function shopRpc(fn: string, args: Record<string, unknown>): Promise<any> {
+  const res = await supabaseRest(`rpc/${fn}`, { method: "POST", body: JSON.stringify(args) });
+  const text = await res.text();
+  if (!res.ok) {
+    // Databasefeil fra shop_switch o.l. («Bekreftelsen må være hele domenet …»). Aldri argumentene.
+    let msg = `Supabase ${res.status}`;
+    try { msg = JSON.parse(text).message ?? msg; } catch { /* behold */ }
+    throw new HttpError(res.status === 400 || res.status === 409 ? 409 : 500, msg);
+  }
+  return text ? JSON.parse(text) : null;
+}
+
+async function shopLog(row: Record<string, unknown>): Promise<void> {
+  await supabaseRest("shop_switch_log", { method: "POST", body: JSON.stringify(row) }).then((r) => r.body?.cancel());
+}
+
+// deno-lint-ignore no-explicit-any
+async function handleShops(path: string, method: string, body: any, userId: string | null): Promise<unknown> {
+  const [settings] = await restJson("shop_settings?select=active_profile_id,live_until,read_only,admin_user_id,changed_at&limit=1") ?? [];
+  const isAdmin = !!userId && !!settings?.admin_user_id && userId === settings.admin_user_id;
+  if (!isAdmin) throw new HttpError(403, "Bare administrator kan se og endre butikker.");
+
+  if (path === "shops" && method === "GET") {
+    const profiles = await restJson("shop_profiles?select=id,name,domain,client_id,secret_id,updated_at&order=name") ?? [];
+    const log = await restJson("shop_switch_log?select=at,action,from_domain,to_domain,live_until,ok,message&order=at.desc&limit=15") ?? [];
+    const activeJobs = await restJson("jobs?select=id,type,status&status=in.(running,paused,pending,finalizing)") ?? [];
+    let active: unknown = null, activeError: string | null = null;
+    try {
+      const a = await getActiveShop();
+      active = { ...a, readOnly: a.live ? isReadOnly(a) : false };
+    } catch (e) { activeError = e instanceof Error ? e.message : String(e); }
+    return {
+      // deno-lint-ignore no-explicit-any
+      profiles: profiles.map((p: any) => ({
+        id: p.id, name: p.name, domain: p.domain, clientId: p.client_id,
+        secretSaved: !!p.secret_id, live: p.domain !== TESTBUTIKK, updatedAt: p.updated_at,
+      })),
+      activeProfileId: settings.active_profile_id, liveUntil: settings.live_until,
+      readOnlyDb: settings.read_only !== false, readOnlyEnv: liveReadOnly(Deno.env.get("LIVE_READ_ONLY")),
+      changedAt: settings.changed_at, active, activeError, activeJobs, log,
+    };
+  }
+
+  if (path === "shops/save" && method === "POST") {
+    const name = String(body?.name ?? "").trim();
+    const domain = String(body?.domain ?? "").trim().toLowerCase();
+    const clientId = String(body?.clientId ?? "").trim();
+    if (!name || name.length > 40) throw new HttpError(400, "Navnet må ha 1–40 tegn.");
+    if (!SHOP_DOMAIN_RE.test(domain)) throw new HttpError(400, "Domenet må være butikkens myshopify.com-adresse, f.eks. navn.myshopify.com.");
+    if (!CLIENT_ID_RE.test(clientId)) throw new HttpError(400, "Client ID ser ikke riktig ut (10–100 tegn, bokstaver og tall).");
+    const id = body?.id ? String(body.id) : null;
+    if (id && id === settings.active_profile_id) throw new HttpError(409, "Butikken er aktiv. Bytt til en annen butikk før du endrer den.");
+    const row = { name, domain, client_id: clientId, updated_at: new Date().toISOString(), updated_by: userId };
+    const saved = id
+      ? await restJson(`shop_profiles?id=eq.${encodeURIComponent(id)}`, { method: "PATCH", headers: { Prefer: "return=representation" }, body: JSON.stringify(row) })
+      : await restJson("shop_profiles", { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(row) });
+    if (!saved?.length) throw new HttpError(404, "Fant ikke butikken.");
+    await shopLog({ user_id: userId, action: "profile_saved", to_domain: domain, message: `Profil «${name}» lagret` });
+    return { ok: true, id: saved[0].id };
+  }
+
+  if (path === "shops/secret" && method === "POST") {
+    const id = String(body?.id ?? "");
+    const secret = typeof body?.secret === "string" ? body.secret : "";
+    if (!id) throw new HttpError(400, "Mangler butikk.");
+    if (secret.trim().length < 10) throw new HttpError(400, "Client secret ser for kort ut.");
+    if (id === settings.active_profile_id) throw new HttpError(409, "Butikken er aktiv. Bytt til en annen butikk før du endrer secret.");
+    await shopRpc("shop_secret_set", { p_profile_id: id, p_secret: secret, p_user: userId });
+    return { ok: true, secretSaved: true };   // aldri selve verdien tilbake
+  }
+
+  if (path === "shops/test" && method === "POST") {
+    const id = String(body?.id ?? "");
+    const [p] = await restJson(`shop_profiles?id=eq.${encodeURIComponent(id)}&select=id,name,domain,client_id`) ?? [];
+    if (!p) throw new HttpError(404, "Fant ikke butikken.");
+    try {
+      const r = await testShopProfile(p);
+      await shopLog({ user_id: userId, action: "test", to_domain: p.domain, ok: true,
+        message: `${r.shopName ?? "?"}: ${r.productsCount ?? "?"} produkter, ${r.collectionsCount ?? "?"} samlinger` });
+      return { ok: true, ...r };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      await shopLog({ user_id: userId, action: "test", to_domain: p.domain, ok: false, message: msg.slice(0, 300) });
+      return { ok: false, error: msg };
+    }
+  }
+
+  if (path === "shops/switch" && method === "POST") {
+    const id = body?.id ? String(body.id) : null;
+    const until = body?.until ? new Date(String(body.until)) : null;
+    if (until && isNaN(until.getTime())) throw new HttpError(400, "«Åpen til» er ikke et gyldig tidspunkt.");
+    await shopRpc("shop_switch", { p_profile_id: id, p_confirm: String(body?.confirm ?? ""), p_until: until?.toISOString() ?? null, p_user: userId });
+    clearShopCache();
+    return { ok: true };
+  }
+
+  if (path === "shops/close" && method === "POST") {
+    await shopRpc("shop_close", { p_user: userId });
+    clearShopCache();
+    return { ok: true };
+  }
+
+  throw new HttpError(404, "Ukjent forespørsel.");
+}
+
 // ── Main handler ─────────────────────────────────────────────────────────────
 
 serve(async (req: Request) => {
@@ -2008,12 +2123,29 @@ serve(async (req: Request) => {
     const userId = (await getCaller(req)).userId;
     const bokbasen = await getBokbasenCredentials(userId);
 
+    // /shopify/shops/* — butikker i Innstillinger (live-sjekk 1, Del 2). Bare administrator
+    // (shop_settings.admin_user_id) kan endre. Client secret går bare inn (Vault), aldri ut.
+    if (path === "shops" || path.startsWith("shops/")) {
+      const out = (data: unknown, status = 200) => new Response(JSON.stringify(data), {
+        status, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+      try {
+        return out(await handleShops(path, req.method, body, userId));
+      } catch (e) {
+        const status = e instanceof HttpError ? e.status : 500;
+        return out({ error: e instanceof Error ? e.message : String(e) }, status);
+      }
+    }
+
     // POST /shopify/test — verify the server's Shopify connection (Dev Dashboard app,
     // credentials from Supabase secrets). Returns shop name, domain and product count.
     if (path === "test" && req.method === "POST") {
       const result = await shopifyGraphQL(`{ shop { name myshopifyDomain } productsCount(query: "${ALL_PRODUCT_STATUSES}") { count } }`, {});
+      const active = await getActiveShop();
       return new Response(JSON.stringify({
         success: true,
+        live: active.live, source: active.source, profileName: active.profileName,
+        liveUntil: active.until, readOnly: active.live ? isReadOnly(active) : false,
         shopName: result.data?.shop?.name,
         shopDomain: result.data?.shop?.myshopifyDomain,
         productsCount: result.data?.productsCount?.count ?? 0,
@@ -2037,9 +2169,9 @@ serve(async (req: Request) => {
           // Radlisten i config er stor og trengs ikke i nettleseren
           if (refreshed?.config) refreshed.config = { ...refreshed.config, rows: undefined };
           return json({
-            shopDomain: shop.data?.shop?.myshopifyDomain ?? getShopDomain(),
+            shopDomain: shop.data?.shop?.myshopifyDomain ?? await getShopDomain(),
             shopName: shop.data?.shop?.name ?? null,
-            allowed: handleMigrationAllowed(),
+            allowed: await handleMigrationAllowed(),
             job: refreshed,
           });
         }
@@ -2047,7 +2179,7 @@ serve(async (req: Request) => {
         // POST /handles/analyze — tørrkjøring, endrer ingenting
         if (path === "handles/analyze" && req.method === "POST") {
           const result = planHandleMigration(await fetchMigrationProducts());
-          return json({ shopDomain: getShopDomain(), allowed: handleMigrationAllowed(), ...result });
+          return json({ shopDomain: await getShopDomain(), allowed: await handleMigrationAllowed(), ...result });
         }
 
         // POST /handles/migrate { productIds?: string[], skipFlagged?: boolean }

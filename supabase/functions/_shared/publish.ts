@@ -7,7 +7,7 @@
 // Rene funksjoner (channelsToPublish, publishBulkLine) testes i scripts/publish.test.mjs.
 // Beskyttede produkter, lydbøker, e-bøker og ikke-bøker røres aldri her.
 
-import { shopifyGraphQL } from "./shopify.ts";
+import { getShopDomain, shopifyGraphQL } from "./shopify.ts";
 import { protectedProduct, type ProtectableProduct } from "./protected.ts";
 
 export const PUBLICATIONS_QUERY = `
@@ -38,7 +38,9 @@ interface PublicationsCacheEntry { ids: string[]; expiry: number }
 const publicationsCache = new Map<string, PublicationsCacheEntry>();
 
 /** Alle salgskanalene i butikken. Hurtigbufret i 30 min per funksjonsinstans (kanalene endres sjelden). */
-export async function getAllPublicationIds(shopKey = "shop"): Promise<string[]> {
+export async function getAllPublicationIds(_shopKey = "shop"): Promise<string[]> {
+  // Nøkkelen er den aktive butikken, så kanaler fra en annen butikk aldri gjenbrukes etter bytte
+  const shopKey = await getShopDomain();
   const cached = publicationsCache.get(shopKey);
   if (cached && Date.now() < cached.expiry) return cached.ids;
   const result = await shopifyGraphQL(PUBLICATIONS_QUERY, {});

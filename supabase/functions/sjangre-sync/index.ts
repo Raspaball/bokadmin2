@@ -804,7 +804,7 @@ serve(async (req) => {
       const totalProducts = ((countResult.data as Record<string, unknown>)?.productsCount as { count: number })?.count ?? 0;
 
       const { data: job, error } = await supabase.from("jobs").insert({
-        type: "sjangre_sync", status: "running", user_id: userId, shop_domain: currentShopDomain(),
+        type: "sjangre_sync", status: "running", user_id: userId, shop_domain: await currentShopDomain(),
         started_at: new Date().toISOString(), total_items: totalProducts, processed: 0,
         config: bulk
           ? { mode, bulk: emptyBulkJobState(), counts: {} }
@@ -865,7 +865,7 @@ serve(async (req) => {
       if (existing) return new Response(JSON.stringify({ error: "En henting kjøres allerede", jobId: existing.id }), { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
       const { data: job, error } = await supabase.from("jobs").insert({
-        type: "shopify_enrich", status: "running", user_id: userId, shop_domain: currentShopDomain(),
+        type: "shopify_enrich", status: "running", user_id: userId, shop_domain: await currentShopDomain(),
         started_at: new Date().toISOString(), total_items: 0, processed: 0,
         config: { cursor: null, total_products: 0, processed: 0, found_kode: 0, already_cached: 0, no_data: 0, errors: 0 },
       }).select().single();

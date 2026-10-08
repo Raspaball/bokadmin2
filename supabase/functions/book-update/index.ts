@@ -654,7 +654,7 @@ serve(async (req) => {
 
       const total = isbns?.length ?? await getProductCount();
       const { data: job, error } = await supabase.from("jobs").insert({
-        type: JOB_TYPE, status: "running", user_id: userId, shop_domain: currentShopDomain(), started_at: new Date().toISOString(), total_items: total,
+        type: JOB_TYPE, status: "running", user_id: userId, shop_domain: await currentShopDomain(), started_at: new Date().toISOString(), total_items: total,
         config: { mode, isbns: isbns?.length ? isbns : null, shopify_cursor: null, ...(bulk ? { bulk: emptyBulkState() } : {}) },
       }).select().single();
       if (error || !job) return json({ error: "Kunne ikke opprette jobb" }, 500);

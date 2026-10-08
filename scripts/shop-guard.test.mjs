@@ -145,12 +145,12 @@ test("alle steder som lager en jobb, stempler butikken, og alle pulser sjekker d
   for (const f of ["availability-check", "price-update", "book-update", "sjangre-sync", "shopify"]) {
     const src = read(f);
     const inserts = [...src.matchAll(/from\("jobs"\)\s*\.insert\(|restJson\("jobs", \{\s*method: "POST"/g)].length;
-    const stamps = [...src.matchAll(/shop_domain: currentShopDomain\(\)/g)].length;
+    const stamps = [...src.matchAll(/shop_domain: await currentShopDomain\(\)/g)].length;
     assert.ok(inserts > 0, f);
     assert.equal(stamps, inserts, `${f}: ${inserts} jobber lages, ${stamps} stemples`);
   }
   for (const [f, n] of [["availability-check", 1], ["price-update", 1], ["book-update", 2], ["sjangre-sync", 2]]) {
     assert.equal([...read(f).matchAll(/stopIfShopChanged\(supabase, job\)/g)].length, n, f);
   }
-  assert.equal([...read("shopify").matchAll(/jobShopError\(job\)/g)].length, 3);
+  assert.equal([...read("shopify").matchAll(/await jobShopError\(job\)/g)].length, 3);
 });

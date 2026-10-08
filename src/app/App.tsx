@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { ContentArea } from './components/ContentArea';
+import { LiveStripe } from './components/Butikker';
 import { Toaster } from './components/ui/sonner';
 import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
@@ -135,9 +136,12 @@ export default function App() {
 
   // Authenticated dashboard
   return (
-    <div className="h-screen flex overflow-hidden">
-      <Sidebar activeItem={activeItem} onSelectItem={setActiveItem} onLogout={handleLogout} shopDomain={shopDomain} shopName={shopName} userEmail={user?.email} />
-      <ContentArea activeItem={activeItem} />
+    <div className="h-screen flex flex-col overflow-hidden">
+      <LiveStripe />
+      <div className="flex flex-1 overflow-hidden">
+        <Sidebar activeItem={activeItem} onSelectItem={setActiveItem} onLogout={handleLogout} shopDomain={shopDomain} shopName={shopName} userEmail={user?.email} />
+        <ContentArea activeItem={activeItem} />
+      </div>
       <Toaster />
     </div>
   );

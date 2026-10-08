@@ -427,6 +427,55 @@ async function callEdgeFunction(path: string, options: RequestInit = {}): Promis
   return res;
 }
 
+// ── Butikker (Innstillinger, live-sjekk 1) ───────────────────────────────────
+// Client secret sendes bare inn (lagres i Vault på serveren) og kommer aldri tilbake.
+
+export interface ShopProfile {
+  id: string; name: string; domain: string; clientId: string;
+  secretSaved: boolean; live: boolean; updatedAt: string;
+}
+export interface ActiveShopInfo {
+  domain: string; clientId: string; source: "profile" | "env"; profileId: string | null; profileName: string | null;
+  live: boolean; confirmed: string | null; until: string | null; readOnly: boolean;
+}
+export interface ShopsState {
+  profiles: ShopProfile[];
+  activeProfileId: string | null;
+  liveUntil: string | null;
+  readOnlyDb: boolean;
+  readOnlyEnv: boolean;
+  changedAt: string | null;
+  active: ActiveShopInfo | null;
+  activeError: string | null;
+  activeJobs: { id: string; type: string; status: string }[];
+  log: { at: string; action: string; from_domain: string | null; to_domain: string | null; live_until: string | null; ok: boolean; message: string | null }[];
+}
+export interface ShopTestResult {
+  ok: boolean; error?: string; shopName?: string | null; shopDomain?: string | null; primaryDomain?: string | null;
+  productsCount?: number | null; collectionsCount?: number | null; scopes?: string[];
+}
+
+export const shops = {
+  async state(): Promise<ShopsState> {
+    return (await callEdgeFunction("shopify/shops")).json();
+  },
+  async save(p: { id?: string; name: string; domain: string; clientId: string }): Promise<{ ok: boolean; id: string }> {
+    return (await callEdgeFunction("shopify/shops/save", { method: "POST", body: JSON.stringify(p) })).json();
+  },
+  async saveSecret(id: string, secret: string): Promise<void> {
+    await callEdgeFunction("shopify/shops/secret", { method: "POST", body: JSON.stringify({ id, secret }) });
+  },
+  async test(id: string): Promise<ShopTestResult> {
+    return (await callEdgeFunction("shopify/shops/test", { method: "POST", body: JSON.stringify({ id }) })).json();
+  },
+  async switchTo(id: string | null, confirm: string, until: string | null): Promise<void> {
+    await callEdgeFunction("shopify/shops/switch", { method: "POST", body: JSON.stringify({ id, confirm, until }) });
+  },
+  async close(): Promise<void> {
+    await callEdgeFunction("shopify/shops/close", { method: "POST", body: "{}" });
+  },
+};
+
 // ── User Settings ─────────────────────────────────────────────────────────────
 
 export const userSettings = {

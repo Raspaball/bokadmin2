@@ -152,6 +152,8 @@ export interface BulkJobContext<C> {
   supabase: Supabase;
   jobId: string;
   userId: string | null;
+  /** Butikken jobben ble startet mot (jobs.shop_domain) */
+  shopDomain: string | null;
   mode: "analyze" | "update";
   counts: C;
   state: BulkJobState;
@@ -249,7 +251,7 @@ export async function runBulkJob<C>(
   const processedAtStart: number = job.processed || 0;
   let processed = processedAtStart;
   const ctx: BulkJobContext<C> = {
-    supabase, jobId, userId: job.user_id || null,
+    supabase, jobId, userId: job.user_id || null, shopDomain: job.shop_domain ?? null,
     mode: job.config?.mode === "update" ? "update" : "analyze",
     counts: loadCounts(job.config?.counts), state, deadline,
     loadXml: (isbns) => loadOnixXml(supabase, isbns),

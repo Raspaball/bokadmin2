@@ -4,6 +4,7 @@ import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { CheckCircle2, AlertCircle, Loader2, Store, BookOpen, Database, KeyRound, Activity, XCircle } from 'lucide-react';
+import { Butikker } from './Butikker';
 import { userSettings, supabase, jobs, jobTypeLabel, type UserSettings, type Job } from '../utils/api';
 
 export function Innstillinger() {
@@ -265,6 +266,9 @@ export function Innstillinger() {
           )}
         </CardContent>
       </Card>
+
+      {/* ── Butikker (live-sjekk 1) ── */}
+      <Butikker />
 
       {/* ── Shopify ── */}
       <Card>
