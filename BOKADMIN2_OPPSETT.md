@@ -726,4 +726,5 @@ Detaljer og framdrift: `oppgaver/live-sjekk-1.md`.
 - **Butikkstempel:** `jobs.shop_domain` (migrasjon 20261007033904). Settes når jobben lages; hver puls stopper jobben (`failed`) hvis butikken er byttet eller stempelet mangler (`_shared/job-shop.ts`).
 - **Ikke deployet ennå** (heller ikke live-sperren fra pakke I del B). Deploy samlet etter Del 2 (butikker i Innstillinger).
 - Live er tillatt for **lesing og sjekkmodus** under sperrene (prosjektinstruksen), men er ikke koblet til ennå. Prosjektinstruksene oppdateres av Eirik.
+- **Butikker i Innstillinger (08.10):** aktiv butikk velges i Innstillinger («Butikker»). Client secret ligger i Vault. Bytte krever at ingen jobb kjører eller står på pause, at domenet skrives som bekreftelse, og for live «åpen til» (høyst 24 t). «Lukk live» virker alltid. Uten valgt profil brukes `SHOPIFY_*` (Testbutikk). Migrasjon 20261008151207. Ikke deployet ennå.
 
