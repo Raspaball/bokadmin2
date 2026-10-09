@@ -11,3 +11,4 @@ export declare function checkWriteAllowed(p: {
   live: boolean; readOnly: boolean; query: string; allowed?: string[];
 }): { ok: boolean; reason?: string; fields?: string[] };
 export declare function jobShopMismatch(jobDomain?: string | null, currentDomain?: string | null): string | null;
+export declare function checkMutationAllowlist(p: { query: string; allowedOnly: string[] }): { ok: boolean; reason?: string; fields?: string[] };

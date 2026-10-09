@@ -12,7 +12,7 @@
 
 export const SHOPIFY_API_VERSION = "2026-07";
 
-import { checkShopAllowed, checkWriteAllowed, liveReadOnly } from "./shop-guard.js";
+import { checkMutationAllowlist, checkShopAllowed, checkWriteAllowed, liveReadOnly } from "./shop-guard.js";
 
 // Søkefilter for spørringer som skal treffe hele katalogen, også utkast og
 // arkiverte produkter: products(query: …) og productsCount(query: …).
@@ -233,6 +233,7 @@ export interface ShopifyGraphQLResponse<T = any> {
 export async function shopifyGraphQL<T = any>(
   query: string,
   variables: Record<string, unknown> = {},
+  opts: { onlyMutations?: string[] } = {},
 ): Promise<ShopifyGraphQLResponse<T>> {
   let throttleAttempt = 0;
   let tokenRefreshed = false;
@@ -240,6 +241,11 @@ export async function shopifyGraphQL<T = any>(
   while (true) {
     const shop = await resolveShop();
     writeCheck(shop, query);
+    if (opts.onlyMutations) {
+      // Smal liste: kalleren tillater bare disse mutasjonene, også når skrivesperren er åpen
+      const narrow = checkMutationAllowlist({ query, allowedOnly: opts.onlyMutations });
+      if (!narrow.ok) throw new Error(`Shopify-sperre: ${narrow.reason}`);
+    }
     const accessToken = await tokenFor(shop);
     const url = `https://${shop.domain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
     const res = await fetch(url, {

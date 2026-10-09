@@ -125,6 +125,22 @@ export function checkWriteAllowed({ live, readOnly, query, allowed = READ_ONLY_M
   return { ok: true };
 }
 
+/**
+ * Smal liste (publiseringsfasen 09.10.2026): kalleren sier hvilke mutasjoner den selv har lov til å sende.
+ * Gjelder i tillegg til skrivesperren og også når sperren er åpen: alt annet avvises. bulkOperationRunQuery
+ * (lesing) er alltid tillatt. Kan ikke teksten leses sikkert, avvises den.
+ * @param {{ query: string, allowedOnly: string[] }} p
+ * @returns {{ ok: boolean, reason?: string, fields?: string[] }}
+ */
+export function checkMutationAllowlist({ query, allowedOnly }) {
+  const ops = graphQLOperations(query);
+  if (!ops.ok) return { ok: false, reason: "Smal mutasjonsliste: kallet kunne ikke leses sikkert og avvises." };
+  const allowed = [...allowedOnly, ...READ_ONLY_MUTATIONS];
+  const blocked = ops.mutations.flat().filter((f) => !allowed.includes(f));
+  if (blocked.length) return { ok: false, fields: blocked, reason: `Smal mutasjonsliste: ${blocked.join(", ")} er ikke tillatt her (bare ${allowedOnly.join(", ")}).` };
+  return { ok: true };
+}
+
 // ── Butikkstempel på jobber (jobs.shop_domain, live-sjekk 1 punkt 3) ─────────────────────
 /**
  * Sammenligner butikken jobben ble startet mot med butikken som er aktiv nå.
