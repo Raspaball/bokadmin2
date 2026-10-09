@@ -90,7 +90,8 @@ for (const p of all) { const i = isbnOf(p); if (i) isbnCount.set(i, (isbnCount.g
 const hidden = all.filter((p) => p.status === "ACTIVE" && !p.publishedAt);
 
 // ── 3. ONIX (bare lesing, hurtigbuffer lokalt) ──────────────────────────────
-const cacheDir = join(outDir, "onix-gjennomgang");
+// --fersk: tom hurtigbuffer, så all ONIX hentes på nytt fra Bokbasen (brukes rett før publisering)
+const cacheDir = args.includes("--fersk") ? join(outDir, `onix-fersk-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}`) : join(outDir, "onix-gjennomgang");
 mkdirSync(cacheDir, { recursive: true });
 async function onixFor(isbn, attempt = 0) {
   const file = join(cacheDir, `${isbn}.xml`);
@@ -124,6 +125,7 @@ for (const p of hidden) {
   const xml = isbn ? xmlOf.get(isbn) : null;
   const channels = have.get(p.id) ?? null;
   const row = {
+    _id: p.id,
     tittel: p.title, isbn: isbn ?? "", forlag: p.vendor ?? "", produkttype_i_dag: p.productType ?? "",
     pris_i_dag: p.variants[0]?.price != null ? Number(p.variants[0].price) : null, opprettet: String(p.createdAt ?? "").slice(0, 10),
     kanaler_i_dag: channels ? channels.map((c) => channelName[c] ?? c).join(", ") : "(ukjent)",
@@ -208,6 +210,11 @@ const sammendrag = {
   // Alle aktive bøker som regelen ville gitt kanaler (også de som ikke er skjulte): til å forklare 306
   aktiveMedManglendeKanaler: [...have.entries()].filter(([, c]) => c.length < allChannels.length).length,
 };
-for (const r of rows) delete r._steg;
+// Eksakt publiseringsliste (lokal fil, ikke i git): aktive, mangler Online Store og oppfyller alle kravene
+const liste = rows.filter((r) => r.publiseres_hvis_produkttype_bok === "ja" && r.antall_kanaler === allChannels.length - 1)
+  .map((r) => ({ id: r._id, isbn: r.isbn, forlag: r.forlag, produkttype: r.produkttype_i_dag, tittel: r.tittel }));
+writeFileSync(join(outDir, "publiseringsliste.json"), JSON.stringify({ laget: new Date().toISOString(), fersk: args.includes("--fersk"), antall: liste.length, items: liste }));
+sammendrag.publiseringsliste = liste.length;
+for (const r of rows) { delete r._steg; delete r._id; }
 writeFileSync(join(outDir, "skjulte-detaljer.json"), JSON.stringify({ sammendrag, rows }, null, 1));
 console.log(JSON.stringify(sammendrag, null, 1));
