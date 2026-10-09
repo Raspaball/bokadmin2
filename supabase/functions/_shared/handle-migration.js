@@ -145,6 +145,6 @@ export function planHandleMigration(products, { includeCustom = false, limit = I
  */
 export function handleUpdateInput(row) {
   const product = { id: row.id, handle: row.newHandle, redirectNewHandle: true };
-  if (row.setIsbn) product.metafields = [{ namespace: "bok", key: "isbn", value: row.isbn }];
+  if (row.setIsbn) product.metafields = [{ namespace: "bok", key: "isbn", type: "id", value: row.isbn }];
   return product;
 }

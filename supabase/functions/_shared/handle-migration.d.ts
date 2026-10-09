@@ -35,5 +35,5 @@ export declare function handleUpdateInput(row: { id: string; newHandle: string; 
   id: string;
   handle: string;
   redirectNewHandle: boolean;
-  metafields?: Array<{ namespace: string; key: string; value: string }>;
+  metafields?: Array<{ namespace: string; key: string; type: string; value: string }>;
 };

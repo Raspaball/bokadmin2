@@ -136,5 +136,5 @@ test("handleUpdateInput: 301 og bok.isbn bare når det mangler", () => {
   assert.deepEqual(handleUpdateInput({ id: "gid://shopify/Product/1", newHandle: "a-b-9788203461392", isbn: "9788203461392", setIsbn: false }),
     { id: "gid://shopify/Product/1", handle: "a-b-9788203461392", redirectNewHandle: true });
   assert.deepEqual(handleUpdateInput({ id: "x", newHandle: "h", isbn: "9788203461392", setIsbn: true }).metafields,
-    [{ namespace: "bok", key: "isbn", value: "9788203461392" }]);
+    [{ namespace: "bok", key: "isbn", type: "id", value: "9788203461392" }]);
 });
