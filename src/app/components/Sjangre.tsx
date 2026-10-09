@@ -6,6 +6,7 @@ import { Input } from './ui/input';
 import { shopify, sjangreSync, syncLog, type Job, type SjangreSyncJobResult, type SyncLogEntry } from '../utils/api';
 import { toast } from 'sonner';
 import { JobHealth, JobLogCsvButton } from './JobHealth';
+import { RyddTagger } from './RyddTagger';
 
 // ── Forleggerforeningen bokgruppekode lookup ──────────────────────────────────
 // Komplett mapping basert på offisiell tosifret/tresifret bokgruppeinndeling.
@@ -493,6 +494,7 @@ export function Sjangre() {
 
   return (
     <div className="space-y-6">
+      <RyddTagger />
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between gap-3 flex-wrap">

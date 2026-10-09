@@ -75,8 +75,9 @@ async function bulkQuery(name, query) {
     const res = await fetch(op.url);
     if (!res.ok) fail(`${name}: nedlasting feilet (HTTP ${res.status}).`);
     let buf = "";
+    const decoder = new TextDecoder("utf-8"); // stream: en bit kan slutte midt i et tegn (æ, ø, å)
     for await (const chunk of res.body) {
-      buf += Buffer.from(chunk).toString("utf8");
+      buf += decoder.decode(chunk, { stream: true });
       const lines = buf.split("\n");
       buf = lines.pop();
       for (const l of lines) if (l.trim()) count(l);

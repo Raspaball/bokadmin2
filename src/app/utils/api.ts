@@ -59,7 +59,7 @@ export interface SyncLogEntry {
   id: string;
   isbn: string | null;
   title: string | null;
-  action: "push" | "update" | "csv_export" | "sjangre_enrich" | "sjangre_sync" | "bygg_meny" | "availability_check" | "availability_update" | "import_skipped" | "import_failed" | "handle_migrate" | "handle_rollback" | "book_update";
+  action: "push" | "update" | "csv_export" | "sjangre_enrich" | "sjangre_sync" | "bygg_meny" | "availability_check" | "availability_update" | "import_skipped" | "import_failed" | "handle_migrate" | "handle_rollback" | "book_update" | "tag_cleanup" | "tag_cleanup_rollback";
   status: "success" | "error" | "info";
   message: string;
   shopify_id: string | null;
@@ -372,6 +372,23 @@ export const syncLog = {
         .eq("job_id", jobId)
         .or("outcome.in.(hoppet_over,feil),status.eq.error")
         .order("created_at", { ascending: true })
+        .range(from, from + 999);
+      if (error) throw error;
+      all.push(...(data ?? []));
+      if (!data || data.length < 1000) return all;
+    }
+  },
+
+  /** Alle rader i jobben der noe ble (eller ville blitt) endret, 1000 om gangen (CSV for taggjobben). */
+  async getJobChanges(jobId: string): Promise<SyncLogEntry[]> {
+    const all: SyncLogEntry[] = [];
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await supabase
+        .from("sync_log")
+        .select("*")
+        .eq("job_id", jobId)
+        .eq("outcome", "endret")
+        .order("id", { ascending: true })
         .range(from, from + 999);
       if (error) throw error;
       all.push(...(data ?? []));
@@ -909,6 +926,55 @@ export const bookUpdateJobs = {
   },
 };
 
+// ── Rydd tagger (tag_cleanup) ────────────────────────────────────────────────
+
+export interface TagCleanupResult {
+  summary?: string;
+  mode?: "analyze" | "update";
+  counts?: { cleaned: number; tagsRemoved: number; alreadyClean: number; errors: number; skippedNoIsbn: number; skippedProtected: number; skippedDuplicate: number; notInScope: number };
+  topTags?: Array<[string, number]>;
+  topTagsComplete?: boolean;
+  examples?: Array<{ handle: string; fjernes: string[]; beholdes: string[] }>;
+  rolledBackAt?: string;
+}
+
+export interface TagRollbackResult {
+  mode: "analyze" | "update";
+  products?: number; alreadyRestored?: number; remaining: number; tagsToRestore?: number;
+  restored?: number; errors?: number; timedOut?: boolean; error?: string;
+}
+
+export const tagCleanup = {
+  /** Sjekk (analyze) er standard. onlyIds = bare disse produktene (til en test). */
+  async start(mode: "analyze" | "update" = "analyze", onlyIds?: string[]): Promise<{ jobId: string; status: string }> {
+    const res = await callEdgeFunction("tag-cleanup/start", { method: "POST", body: JSON.stringify({ mode, ...(onlyIds?.length ? { onlyIds } : {}) }) });
+    return res.json();
+  },
+  async getStatus(jobId: string): Promise<Job> {
+    const res = await callEdgeFunction(`tag-cleanup/status/${jobId}`);
+    return res.json();
+  },
+  async getActive(): Promise<Job | null> {
+    const res = await callEdgeFunction("tag-cleanup/active");
+    return res.json();
+  },
+  async getRecent(limit = 5): Promise<Job[]> {
+    const res = await callEdgeFunction(`tag-cleanup/recent?limit=${limit}`);
+    return res.json();
+  },
+  async resume(jobId: string): Promise<void> {
+    await callEdgeFunction(`tag-cleanup/resume/${jobId}`, { method: "POST" });
+  },
+  async cancel(jobId: string): Promise<void> {
+    await callEdgeFunction(`tag-cleanup/cancel/${jobId}`, { method: "POST" });
+  },
+  /** Legger de fjernede taggene tilbake. Sjekk først (standard); kall igjen mens timedOut er true. */
+  async rollback(jobId: string, mode: "analyze" | "update" = "analyze", productIds?: string[]): Promise<TagRollbackResult> {
+    const res = await callEdgeFunction("tag-cleanup/rollback", { method: "POST", body: JSON.stringify({ jobId, mode, ...(productIds?.length ? { productIds } : {}) }) });
+    return res.json();
+  },
+};
+
 // ── Sjangre Sync Jobs ────────────────────────────────────────────────────────
 
 export interface SjangreSyncAnalyzeResult {
@@ -1197,6 +1263,7 @@ const JOB_TYPE_LABELS: Record<string, string> = {
   price_update: "Prisoppdatering",
   availability_check: "Tilgjengelighetssjekk",
   sjangre_sync: "Sjangre-sync",
+  tag_cleanup: "Rydd tagger",
   shopify_enrich: "Shopify-berikelse",
   handle_migration: "Handle-migrering",
 };
@@ -1261,6 +1328,7 @@ const api = {
   priceJobs,
   availabilityJobs,
   sjangreSync,
+  tagCleanup,
   shopifyEnrich,
   scheduledTasks,
   feeds,

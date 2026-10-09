@@ -70,3 +70,21 @@ export function cleanBookTags(
   for (const t of addTags) if (!kept.some((k) => norm(k) === norm(t))) kept.push(t);
   return { tags: kept, removed };
 }
+
+// ── Rydd tagger (taggjobben tag_cleanup, oppdrag 09.10.2026) ────────────────────
+// Regel: bare bkg-N, bkg-NN, bkg-NNN (1–3 sifre) og de beskyttede taggene (gave, lokal, lokalhistorie,
+// lokallitteratur, uten forskjell på store og små bokstaver) beholdes. Alt annet fjernes: navn, titler,
+// emnetagger (skjoenn-rom, sakpr, Faglitteratur, 9+) og formattagger. Ingen tagger legges til.
+
+const BKG_TAG = /^bkg-\d{1,3}$/i;
+
+/** true = taggen står igjen etter rydding. */
+export function isKeptTag(tag: unknown): boolean {
+  const t = String(tag ?? "").trim();
+  return BKG_TAG.test(t) || isProtectedTag(t);
+}
+
+/** Taggene som fjernes (i den rekkefølgen de står). Tom liste = ingenting å gjøre. */
+export function tagsToRemove(tags: readonly unknown[] | null | undefined): string[] {
+  return (tags ?? []).map((t) => String(t ?? "")).filter((t) => t.trim() !== "" && !isKeptTag(t));
+}
