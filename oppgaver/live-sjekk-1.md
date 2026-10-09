@@ -15,8 +15,8 @@ Denne fila er både framdriftslogg og (til slutt) rapporten i punkt 19. Ingen he
 | | 8. Tester og deploy | 352/352 tester. SQL-test av byttereglene 11/11 (transaksjon angret). Etter deploy: anon får 403 på /shops og /shops/switch; /test svarer Testbutikk, 9 059 produkter, live av |
 | 3 Koble til live | 9–11 | **Delvis ferdig 08.10 kl. 17.49.** Profilen «Bø bok og papir» er lagret med secret. Første test: `app_not_installed`. Andre test: ok, «Bø bok og papir», 162 samlinger. **Tellingen viste 10000 produkter: det er Shopifys standardtak (`productsCount` uten `limit: null`), ikke riktig antall (ca. 17 169).** Tilgangene er ikke kontrollert ennå. Live er ikke gjort aktiv |
 | 4 Bare lesing | 12–14 | **Ferdig 08.10 kl. 18.13.** Live-eksport tatt (bare lesing), tellingene stemmer, ingen avvik over 3 %. Se «Del 4: resultat» under. Punkt 14 delvis (Bokbasen ikke sjekket) |
-| 5 Sjekkmodus | 15–18 | **Fire av fem ferdige 08.10, pris 85 % (full kjøring pågår).** 0 skrivinger i alle. Se «Del 5: resultat» |
-| 6 Rapport og pilotplan | 19–23 | **Foreløpig rapport skrevet 09.10 (pris basert på 85 %).** Pilotliste, Liquid-forslag og punkt 22–23 gjenstår |
+| 5 Sjekkmodus | 15–18 | **Alle fem jobbene ferdige (pris 09.10).** 0 skrivinger i alle. Se «Del 5: resultat». Punkt 18 (10 tilfeldige bøker) ikke gjort |
+| 6 Rapport og pilotplan | 19–23 | **Rapport skrevet 09.10 (pris ferdig).** Pilotliste, Liquid-forslag og punkt 22–23 gjenstår |
 
 **Deployet 08.10 kl. 17.41:** shopify, price-update, availability-check, book-update, sjangre-sync, bokbasen (alle med sperrene). Live kobles til via Innstillinger → Butikker, ikke ved å endre `SHOPIFY_*`-hemmelighetene.
 
@@ -131,7 +131,7 @@ Alle jobbene er kjørt med `mode: analyze` mens live var aktiv med skrivesperre 
 | Sjangre (bokgrupper og samlinger) | 1 t 31 min | Ferdig, 0 feil |
 | Bokdata (book-update, bulk) | 1 t 03 min | Ferdig, 0 feil |
 | Tilgjengelighet (bulk) | 1 t 47 min | Ferdig, 0 feil |
-| Pris | 1 t 35 min til 85 %, stoppet av utløpt «åpen til» | **Ikke ferdig.** 14 664 av 17 169. Ny full kjøring pågår |
+| Pris | 2 t 20 min (første forsøk stoppet på 85 % da «åpen til» gikk ut; ny full kjøring 09.10) | Ferdig, 17 169 av 17 169, 0 feil |
 
 ### 17a Handles
 - 16 546 ISBN-adresser får ny adresse (tittel-forfatter-ISBN); 14 525 uten merknad og 1 973 «mangler forfatter» (da blir adressen tittel-ISBN).
@@ -175,12 +175,12 @@ SEO-tittel settes på 16 441, metabeskrivelse på 16 435. Står som manuelle: 5 
 ### Bokgrupper og samlinger
 2 samlinger ville blitt laget (82 og 824), 68 ville fått nytt navn (for eksempel «Lærebøker og fagbøker» til «Skolebøker»), 85 finnes.
 
-### Pris (foreløpig, basert på 85 %: 14 664 av 17 169)
-- Uendret: 13 275. Ville fått ny pris: **749** (5,1 % av dem som er sjekket).
-- Hoppet over: 348 ikke bok, 139 beskyttede, 78 duplikater, 51 uten ISBN, 1 egen pris.
-- **23 «feil»** er ikke tekniske: alle har meldingen «Ingen endring: ingen gyldig pris i dag» (ingen godkjent pris fra Bokbasen). Hvilke bøker det gjelder (ONIX-kode) er ikke undersøkt.
-- Rader til prisgodkjenning (over 30 % endring): ikke undersøkt for denne kjøringen; 0 nye rader i `price_approvals`.
-- Tallene lagret lokalt i `scripts/out/live-pris-85prosent.json`. Den nye fulle kjøringen avløser dem.
+### Pris (full kjøring 09.10, sjekkmodus)
+- **749** ville fått ny pris, **15 633** har samme pris. 33 av endringene ville krevd godkjenning (over 30 %); det opprettes ingen rader i sjekkmodus.
+- Hoppet over 374: 58 uten ISBN, 197 beskyttede, 118 duplikater, 1 tilbud, 0 egen pris.
+- 380 manglet godkjent pris: 349 er ikke bøker og **31 har ingen gyldig pris i dag** fra Bokbasen. Det er ikke tekniske feil (jobben viser 0 feil, men loggen merker de 31 som «feil»). De 31 er fordelt slik på ONIX-kode: 27 kode 21 (tilgjengelig), 1 kode 20, 1 kode 31, 2 kode 40 (blir utkast). 29 er aktive i dag og forblir aktive etter regelen. Årsaken hos Bokbasen (pris utløpt eller gjelder ikke Norge) er ikke undersøkt.
+- Avvikene er typisk prisøkninger på 20–50 kr (for eksempel 229 til 249).
+- Første forsøk (85 %, 14 664 behandlet) ga samme bilde: 749 ville endret, 23 uten gyldig pris. Tallene er lagret lokalt (`scripts/out/live-pris-85prosent.json`); den fulle kjøringen avløser dem.
 
 ### Hendelser under kjøringen
 1. En testjobb som skulle gå mot Testbutikk gikk mot live, fordi live allerede var aktiv. Den var bare sjekk, 0 loggrader, og stoppet av seg selv da live ble lukket.
@@ -238,12 +238,12 @@ Sammen er det **3 095 bøker som kan bli synlige** i nettbutikken hvis produktty
 - ONIX er hentet i dag (09.10), så koder og priser er som Bokbasen sier nå.
 - Hvorfor Gyldendal-bøkene (1 415) ble skjult i februar 2025 er ikke undersøkt.
 
-## Del 6: foreløpig rapport (09.10.2026)
+## Del 6: rapport (09.10.2026)
 
 **Live er nå tillatt for lesing og sjekkmodus** under sperrene (bekreftet domene, «åpen til» høyst 24 t, skrivesperre, butikkstempel på jobber). Prosjektinstruksene må oppdateres av Eirik.
 
 ### Ikke sjekket ennå
-- Pris: full kjøring pågår (85 % er foreløpig). De 23 uten gyldig pris, godkjenningsrader.
+- Pris: hvorfor de 31 mangler gyldig pris hos Bokbasen.
 - Punkt 14: hvor mange av 16 914 bøker som er fysiske ifølge Bokbasen (bare «ikke bok»: 348–349 hoppet over av format).
 - 17e: fordeling per kanal, og hvorfor bare 306 av 3 280 skjulte ville bli publisert.
 - 17g: tellinger per emnetagg. 17i: bøker med flere forfattere og 5 eksempler hver.
