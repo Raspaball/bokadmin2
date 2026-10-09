@@ -1,0 +1,37 @@
+{%- comment -%}
+  FORSLAG (ikke tatt i bruk): «Forfatter:» på produktsiden.
+  I dag: Forfatter: {{ product.type }}  (produkttypen har hittil inneholdt forfatteren).
+  Bokadmin setter produkttypen til «Bok» og lagrer forfatterne i metafeltet bok.forfatter (liste, ONIX-form «Etternavn, Fornavn»).
+
+  Regler:
+  1. Har produktet bok.forfatter, vises den: «Fornavn Etternavn», flere skilles med komma.
+  2. Mangler bok.forfatter, faller teksten tilbake til produkttypen, men aldri «Bok», «Lydbok» eller «E-bok».
+  3. Finnes ingen av delene, vises ingen «Forfatter»-linje.
+
+  Slik prøver du den: lag en kopi av temaet, lim inn der «Forfatter: {{ product.type }}» står i dag, og se på en bok med og en uten bok.forfatter.
+  Antakelse: metafeltet heter bok.forfatter og er en liste av tekster (definisjonen lages før piloten).
+{%- endcomment -%}
+{%- liquid
+  assign forfattere = product.metafields.bok.forfatter.value
+  assign visning = ''
+  if forfattere != blank
+    for navn in forfattere
+      if navn contains ', '
+        assign deler = navn | split: ', '
+        assign pent = deler[1] | append: ' ' | append: deler[0]
+      else
+        assign pent = navn
+      endif
+      if visning == blank
+        assign visning = pent
+      else
+        assign visning = visning | append: ', ' | append: pent
+      endif
+    endfor
+  elsif product.type != blank and product.type != 'Bok' and product.type != 'Lydbok' and product.type != 'E-bok'
+    assign visning = product.type
+  endif
+-%}
+{%- if visning != blank -%}
+  <p class="product__author">Forfatter: {{ visning }}</p>
+{%- endif -%}

@@ -15,8 +15,8 @@ Denne fila er både framdriftslogg og (til slutt) rapporten i punkt 19. Ingen he
 | | 8. Tester og deploy | 352/352 tester. SQL-test av byttereglene 11/11 (transaksjon angret). Etter deploy: anon får 403 på /shops og /shops/switch; /test svarer Testbutikk, 9 059 produkter, live av |
 | 3 Koble til live | 9–11 | **Delvis ferdig 08.10 kl. 17.49.** Profilen «Bø bok og papir» er lagret med secret. Første test: `app_not_installed`. Andre test: ok, «Bø bok og papir», 162 samlinger. **Tellingen viste 10000 produkter: det er Shopifys standardtak (`productsCount` uten `limit: null`), ikke riktig antall (ca. 17 169).** Tilgangene er ikke kontrollert ennå. Live er ikke gjort aktiv |
 | 4 Bare lesing | 12–14 | **Ferdig 08.10 kl. 18.13.** Live-eksport tatt (bare lesing), tellingene stemmer, ingen avvik over 3 %. Se «Del 4: resultat» under. Punkt 14 delvis (Bokbasen ikke sjekket) |
-| 5 Sjekkmodus | 15–18 | **Alle fem jobbene ferdige (pris 09.10).** 0 skrivinger i alle. Se «Del 5: resultat». Punkt 18 (10 tilfeldige bøker) ikke gjort |
-| 6 Rapport og pilotplan | 19–23 | **Rapport skrevet 09.10 (pris ferdig).** Pilotliste, Liquid-forslag og punkt 22–23 gjenstår |
+| 5 Sjekkmodus | 15–18 | **Alle fem jobbene ferdige (pris 09.10).** 0 skrivinger i alle. Se «Del 5: resultat». Punkt 18 ferdig |
+| 6 Rapport og pilotplan | 19–23 | **Rapport skrevet 09.10 (pris ferdig).** Pilotliste, Liquid-forslag og punkt 22–23 er skrevet (09.10) |
 
 **Deployet 08.10 kl. 17.41:** shopify, price-update, availability-check, book-update, sjangre-sync, bokbasen (alle med sperrene). Live kobles til via Innstillinger → Butikker, ikke ved å endre `SHOPIFY_*`-hemmelighetene.
 
@@ -238,6 +238,56 @@ Sammen er det **3 095 bøker som kan bli synlige** i nettbutikken hvis produktty
 - ONIX er hentet i dag (09.10), så koder og priser er som Bokbasen sier nå.
 - Hvorfor Gyldendal-bøkene (1 415) ble skjult i februar 2025 er ikke undersøkt.
 
+## Stikkprøve, pilotforslag og det som må være klart før piloten (09.10.2026)
+
+Alt dette er regnet lokalt på live-eksporten og ONIX fra den lokale hurtigbufferen (11 755 av bøkene hadde ONIX der). Ingenting er sendt til Shopify eller Bokbasen. Skript: `scripts/pilot-og-stikkprove.mjs`. Listene ligger bare lokalt (`scripts/out/`), ikke i git.
+
+### Punkt 18: 10 tilfeldige bøker mot live-eksporten
+Alle 10 stemmer: feltene sjekkmodus-jobben logget for hver bok er nøyaktig de samme som den lokale planen gir (bok.*-felt, produkttype, SEO, omslagstekst, beskrivelse, kategori). Det som endres, ser slik ut i eksemplene:
+- **Handle:** ISBN-adresse blir tittel-forfatter-ISBN (9 av 10); den ene lesbare adressen beholdes.
+- **Produkttype:** forfatteren («Sulebak, Jan R.» o.l.) blir «Bok»; forfatteren flyttes til bok.forfatter.
+- **SEO-tittel:** fra tom eller bare tittel til «Tittel – Forfatter (Format)».
+- **SEO-beskrivelse:** den gamle «Kjøp … hos Bø bok og papir» byttes med «Tittel av Forfatter …». En gammel beskrivelse som var HTML, byttes også.
+- **Beskrivelse:** der den er en annen tekst enn forlagsteksten, står den (ett eksempel).
+- **Status:** alle ti forblir aktive (ONIX 21 og 31).
+- **Tagger:** bokdata endrer ikke taggene på disse; bkg-taggene tas av sjangre-jobben. Én bok har ingen tagger i dag.
+
+### Punkt 21: pilotforslag, 50 bøker (bare lokal liste)
+Minst én bok fra hver gruppe, uten beskyttede, uten duplikater og uten bøker uten ISBN. Tilfeldig utvalg med fast frø, så det kan lages på nytt. Antall valgt per gruppe (tilgjengelig i parentes): norsk 3 (11 574), utenlandsk 3 (181; «utenlandsk» betyr ISBN-prefiks utenom 978-82, en antakelse), kommende 3 (41), uten forlagstekst 4 (108), flere forfattere 4 (2 295), institusjon 4 (335), lesbar adresse 4 (258), utkast som blir aktiv 4 (116), aktiv som blir utkast eller arkivert 5 (474), aktiv men skjult i nettbutikken 5 (3 224, merket i lista). Resten er vanlige bøker.
+**Gruppen «ikke i Bokbasen» er tom:** alle bøkene i utvalget finnes hos Bokbasen (sjekkjobbene fant 0 som mangler). Hvis piloten skal dekke den, må vi lage en test med en bok vi vet mangler.
+
+### Punkt 22: det som må være klart før piloten
+1. **Tema:** forslag til «Forfatter:»-linjen ligger i `oppgaver/forslag-forfatter-liquid.liquid` (ikke tatt i bruk). Den viser bok.forfatter som «Fornavn Etternavn», faller tilbake til produkttypen så lenge feltet er tomt (aldri «Bok», «Lydbok» eller «E-bok»), og viser ingenting ellers. Eirik prøver den i en kopi av temaet.
+2. **Filtrene «Forfatter» og «Utgivelsesår» i Search & Discovery:** Eirik sjekker hvilket felt de bruker. Utgivelsesåret finnes i dag på 770 produkter i en annen app («app-ibp-book.publication_year»), men ikke som bok.utgivelsesaar.
+3. **Gamle Bokadmin, «Prisoppdatering BB», ONIXEDIT, Matrixify, Flow og egne apper:** Eirik stopper eller kontrollerer dem. Jeg kan ikke se hva de skriver til; to eksisterende felt kan tyde på ONIXEDIT og Google-kanalene (`custom.utgtt`, `mm-google-shopping.*`, `mc-facebook.*`).
+4. **Ny live-eksport rett før piloten** og tilbakerulling laget og testet (planen bygges fra to eksporter). Eksporten fra 08.10 er utgangspunktet.
+5. **Metafelt-definisjonene** (bok.isbn som id og de andre) lages først etter ja fra Eirik. Det er i dag 0 bok.*-definisjoner i live.
+6. **Skrivesperren** må slås av bevisst (både i Innstillinger og i hemmeligheten) og bare for piloten. Det er ikke gjort.
+
+### Punkt 23
+**(a) Det som må avgjøres**
+1. Skal de ca. 3 095 skjulte bøkene synliggjøres (åpne spørsmål 1 og 5)?
+2. Skal bøker som blir utkast eller arkivert etter ONIX-regelen (564 aktive til utkast, 80 til arkivert, hvorav 129 er skjulte i dag) følge regelen, eller bli stående aktive?
+3. Beholdes de 368 lesbare adressene? (Planen beholder dem.) Hvilken av to duplikater skal stå for de 60 ISBN-ene (åpent spørsmål 3)?
+4. Skal emnetaggene fjernes (åpent spørsmål 4)? Tellingen per tagg er ikke gjort.
+5. Skal regelen for kanaler endres så den sjekkes etter at produkttypen er satt, eller gjøres det i to omganger?
+6. De 31 bøkene uten gyldig pris fra Bokbasen: skal de bli stående som i dag?
+7. Hvem stopper de andre appene som skriver til butikken (punkt 22.3), og når?
+
+**(b) Forslag til rekkefølge og tidsbruk for piloten** (anslag, ikke prøvd)
+1. Avgjørelsene over og tema-forslaget (en kveld).
+2. Ny eksport og tilbakerullingsplan, test av tilbakerulling mot Testbutikk (1–2 timer).
+3. Definisjonene lages (etter ja), deretter skrivesperren av for piloten.
+4. Pilot på de 50 bøkene: bokdata, så tilgjengelighet, så sjangre og pris, hver med oppdateringsmodus på bare disse ISBN-ene (hver tar minutter). Kontroll mot sjekkresultatet.
+5. Kontroll av beskyttede (0 endringer), tema og søk. Skrivesperren på igjen.
+6. Full katalog først etter at piloten er godkjent. Anslag fra sjekkmodus: ca. 6–8 timer samlet kjøretid for fem jobber, i faser.
+
+**(c) Anbefaling før Eirik sier ja**
+- Ikke start piloten før punkt 22.3 (de andre appene) og tilbakerullingen er på plass.
+- Behold prisjobben i sjekkmodus til etter piloten; 33 endringer krever godkjenning.
+- Løs rekkefølgen mellom bokdata og tilgjengelighet før full kjøring.
+- Oppdater prosjektinstruksene (live er tillatt for lesing og sjekkmodus; oppdateringsmodus bare etter ja).
+
 ## Del 6: rapport (09.10.2026)
 
 **Live er nå tillatt for lesing og sjekkmodus** under sperrene (bekreftet domene, «åpen til» høyst 24 t, skrivesperre, butikkstempel på jobber). Prosjektinstruksene må oppdateres av Eirik.
@@ -247,8 +297,7 @@ Sammen er det **3 095 bøker som kan bli synlige** i nettbutikken hvis produktty
 - Punkt 14: hvor mange av 16 914 bøker som er fysiske ifølge Bokbasen (bare «ikke bok»: 348–349 hoppet over av format).
 - 17e: fordeling per kanal, og hvorfor bare 306 av 3 280 skjulte ville bli publisert.
 - 17g: tellinger per emnetagg. 17i: bøker med flere forfattere og 5 eksempler hver.
-- Punkt 18: sammenligning av 10 tilfeldige bøker med eksporten.
-- Punkt 21–23: pilotliste (50 ISBN, kun lokalt, ikke i git), Liquid-forslag for «Forfatter» og listen over det som må være klart før piloten.
+- Pilot og oppdateringsmodus er ikke startet. Pilotlista er et forslag.
 - Ingen pilot og ingen oppdateringsmodus er startet.
 
 ## Del 3–6: oppskrift for neste økt
