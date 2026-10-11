@@ -151,7 +151,7 @@ export function planBookUpdate(product: ShopifyBookProduct, xml: string): BookUp
   if (decision.title !== null) changes.push({ field: "seoTitle", from: short(product.seoTitleMf?.value), to: decision.title });
   if (decision.description !== null) changes.push({ field: "seoDescription", from: short(product.seoDescMf?.value), to: short(decision.description) });
 
-  // Omslag (del 5): alt-tekst og filnavn, uten ny opplasting
+  // Omslag (del 5): alt-tekst, uten ny opplasting. Filnavn bare hvis COVER_RENAME (av: gammel adresse gir 404)
   let cover: BookUpdatePlan["cover"] = null;
   const media = product.media?.nodes?.[0];
   if (media?.image?.url) {

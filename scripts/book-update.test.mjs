@@ -39,7 +39,7 @@ test("gammelt produkt: alle feltene fra del 1–7 rettes, pris/status/handle/tit
   const fields = plan.changes.map((c) => c.field).sort();
   assert.deepEqual(fields, [
     "bok.format", "bok.sider", "bok.spraak", "bok.thema", "bok.utgivelsesaar",
-    "category", "coverAlt", "coverFilename", "description", "productType", "seoDescription", "seoTitle", "tags",
+    "category", "coverAlt", "description", "productType", "seoDescription", "seoTitle", "tags",
   ]);
   assert.deepEqual(plan.product, {
     productType: "Bok",
@@ -48,7 +48,8 @@ test("gammelt produkt: alle feltene fra del 1–7 rettes, pris/status/handle/tit
     tags: ["bkg-3", "folio-test"],
   });
   for (const k of ["price", "status", "handle", "title"]) assert.equal(k in plan.product, false, k);
-  assert.deepEqual(plan.cover, { mediaId: "gid://shopify/MediaImage/9", change: { alt: "Omslag: Avkledd av Nina Brochmann", filename: "avkledd-nina-brochmann-9788203461392-omslag.jpg" } });
+  assert.deepEqual(plan.cover, { mediaId: "gid://shopify/MediaImage/9", change: { alt: "Omslag: Avkledd av Nina Brochmann" } });
+  assert.ok(!plan.changes.some((c) => c.field === "coverFilename"), "filnavn endres ikke");
   assert.ok(plan.metafields.some((m) => m.namespace === "bokadmin" && m.key === "seo_auto"));
   assert.ok(!plan.metafields.some((m) => m.key === "forfatter"), "forfatter er allerede riktig");
 });
@@ -60,7 +61,7 @@ test("produkt som allerede følger standarden: ingen endringer", () => {
   const done = {
     ...p, ...once.product, category: { id: once.product.category },
     seoTitleMf: { value: seo.title }, seoDescMf: { value: seo.description }, seoAuto: { value: JSON.stringify(seo) },
-    media: { nodes: [{ id: "gid://shopify/MediaImage/9", alt: once.cover.change.alt, image: { url: `https://cdn.shopify.com/s/files/1/0/files/${once.cover.change.filename}?v=2` } }] },
+    media: { nodes: [{ id: "gid://shopify/MediaImage/9", alt: once.cover.change.alt, image: { url: "https://cdn.shopify.com/s/files/1/0/files/jpg_old.jpg?v=2" } }] },
   };
   for (const m of once.metafields.filter((m) => m.namespace === "bok")) done[`mf_${m.key}`] = { value: m.value };
   const again = planBookUpdate(done, onix);

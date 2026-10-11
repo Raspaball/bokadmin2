@@ -81,7 +81,7 @@ test("JSONL-linje: produktfelt og metafelt i én productUpdate, uten ownerId", (
   // pris, status, handle og tittel sendes aldri
   for (const k of ["handle", "title", "status", "variants"]) assert.equal(line.product[k], undefined, k);
   const cover = bulkCoverLine(p, plan);
-  assert.deepEqual(Object.keys(cover.files[0]).sort(), ["alt", "filename", "id"]);
+  assert.deepEqual(Object.keys(cover.files[0]).sort(), ["alt", "id"]);
   assert.equal(cover.files[0].id, "gid://shopify/MediaImage/9");
   assert.equal(JSON.parse(toJsonl([line, line]).split("\n")[1]).product.id, P1);
 });

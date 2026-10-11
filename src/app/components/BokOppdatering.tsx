@@ -26,10 +26,12 @@ const FIELD_LABELS: Record<string, string> = {
   seoTitle: 'SEO-tittel',
   seoDescription: 'Metabeskrivelse',
   coverAlt: 'Alt-tekst på omslag',
-  coverFilename: 'Filnavn på omslag',
   description: 'Beskrivelse',
   tags: 'Tagger (fjernet)',
 };
+
+// Filnavn på omslag endres ikke lenger (COVER_RENAME = false, test 11.10.2026). Gamle jobber har feltet i resultatet; det vises ikke.
+const HIDDEN_FIELDS = new Set(['coverFilename']);
 
 const isBulk = (job: Job) => !!(job.config as { bulk?: unknown })?.bulk;
 const bulkSummary = (job: Job) => (job.result as { summary?: string })?.summary?.match(/Bulk: .*$/)?.[0] ?? null;
@@ -38,7 +40,7 @@ const modeOf = (job: Job) => ((job.config as { mode?: string })?.mode === 'updat
 const countsOf = (job: Job) => ((job.result as { counts?: BookUpdateCounts })?.counts ?? (job.config as { counts?: BookUpdateCounts })?.counts ?? null);
 
 function FieldSummary({ counts }: { counts: BookUpdateCounts }) {
-  const fields = Object.entries(counts.fields).sort((a, b) => b[1].count - a[1].count);
+  const fields = Object.entries(counts.fields).filter(([f]) => !HIDDEN_FIELDS.has(f)).sort((a, b) => b[1].count - a[1].count);
   const notes = Object.entries(counts.notes);
   return (
     <div className="space-y-2 text-sm">

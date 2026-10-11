@@ -53,7 +53,7 @@ Prøv i så stor grad som mulig å bruke felles datakilder for viktige data som 
 | Forfatterne som liste | `extractContributors()` i `_shared/onix.js` → `books.authors text[]` | bokbasen (import), push, book-update |
 | Format, productType og kategori | `bookFormat()` / `CATEGORY_IDS` i `_shared/book-format.ts` (godkjent formatliste) | bokbasen, push, CSV, book-update |
 | SEO-tittel og metabeskrivelse | `bookSeo()` / `decideSeo()` i `_shared/book-seo.ts` (+ `bokadmin.seo_auto`) | push, book-update |
-| Omslag (alt-tekst, filnavn) | `coverAlt()` / `coverFilename()` i `_shared/book-cover.ts` | push, book-update |
+| Omslag (alt-tekst; filnavn er av) | `coverAlt()` / `coverFilename()` / `COVER_RENAME = false` i `_shared/book-cover.ts`. Filnavn på eksisterende bilder endres ikke (test 11.10.2026: ny cdn-adresse, gammel gir 404 uten videresending, annonsekanalene mister bildet). Nye bilder får `{handle}-omslag.jpg`. Se `oppgaver/test-omslagsfilnavn-5.md` | push, book-update |
 | Tagger | `cleanBookTags()` i `_shared/book-tags.ts` (bare bkg-*, forfatter/tittel fjernes) | push, book-update |
 | Tittel og forlagstekst fra ONIX | `onixText()` / `extractTitle()` / `extractDescription()` i `_shared/onix.js` | bokbasen, push, book-update |
 | ONIX-cache | tabellen `onix_cache` via `getOnixCached()` i `_shared/onix-cache.ts` (7 dager) | book-update, push |

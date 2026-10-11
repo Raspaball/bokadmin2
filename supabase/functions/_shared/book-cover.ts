@@ -30,6 +30,14 @@ export function fileNameFromUrl(url: string | null | undefined): string {
 
 const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "webp", "gif"];
 
+/**
+ * Nytt filnavn på omslag til bøker som allerede finnes er AV (test på 5 live-bøker 11.10.2026,
+ * oppgaver/test-omslagsfilnavn-5.md): fileUpdate gir ny cdn-adresse, og den gamle gir 404 med en
+ * gang, uten videresending. Google og Facebook har den gamle lagret og mister bildet til neste
+ * henting. Alt-tekst endres fortsatt. Nye bilder (ingen gammel adresse) får fortsatt navnet.
+ */
+export const COVER_RENAME = false;
+
 export function coverFilename(handle: string, currentUrl?: string | null): string {
   const name = fileNameFromUrl(currentUrl);
   const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
@@ -45,9 +53,10 @@ export interface CoverChange {
 export function coverChanges(
   current: { alt?: string | null; url?: string | null },
   wanted: { alt: string; filename: string },
+  rename: boolean = COVER_RENAME,
 ): CoverChange {
   const out: CoverChange = {};
   if ((current.alt ?? "").trim() !== wanted.alt) out.alt = wanted.alt;
-  if (fileNameFromUrl(current.url) !== wanted.filename) out.filename = wanted.filename;
+  if (rename && fileNameFromUrl(current.url) !== wanted.filename) out.filename = wanted.filename;
   return out;
 }
