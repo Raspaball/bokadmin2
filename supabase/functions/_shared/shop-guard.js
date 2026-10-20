@@ -3,14 +3,13 @@
 // og av scripts/lib/clients.mjs (Node), slik at regelen står ett sted.
 //
 // Regel: Testbutikk er alltid tillatt. Enhver annen butikk (live) er bare tillatt
-// når BEGGE hemmelighetene er satt bevisst:
+// når domenet er bekreftet:
 //   LIVE_SHOP_CONFIRMED = butikkdomenet skrevet ut i sin helhet (må være lik SHOPIFY_SHOP_DOMAIN)
-//   LIVE_SHOP_UNTIL     = tidspunkt (ISO 8601) som ligger fram i tid, høyst 24 timer unna
-// Vinduet utløper av seg selv: glemmer man å skru av, stopper alle Shopify-kall etter
-// høyst 24 timer. Fjern begge hemmelighetene for å lukke med en gang.
+//   LIVE_SHOP_UNTIL     = valgfritt. Tomt = åpen uten tidsgrense (besluttet av Eirik 20.10.2026,
+//                         testingen er ferdig). Satt = må ligge fram i tid; live stenger da av seg selv.
+// Skrivingen styres fortsatt av skrivesperren (LIVE_READ_ONLY + shop_settings.read_only) under.
 
 export const SAFE_SHOPS = ["testbutikk-9434.myshopify.com"];
-export const MAX_LIVE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
  * @param {{ domain?: string|null, confirmed?: string|null, until?: string|null, now?: number }} p
@@ -25,10 +24,10 @@ export function checkShopAllowed({ domain, confirmed, until, now = Date.now() })
   if (String(confirmed ?? "").trim().toLowerCase() !== d) {
     return { ok: false, live: true, reason: `${fix} Mangler LIVE_SHOP_CONFIRMED=${d} (hele domenet, som bekreftelse).` };
   }
-  const t = Date.parse(String(until ?? ""));
-  if (!Number.isFinite(t)) return { ok: false, live: true, reason: `${fix} Mangler LIVE_SHOP_UNTIL (ISO-tidspunkt, høyst 24 timer fram).` };
+  if (until == null || String(until).trim() === "") return { ok: true, live: true };  // uten tidsgrense
+  const t = Date.parse(String(until));
+  if (!Number.isFinite(t)) return { ok: false, live: true, reason: `${fix} LIVE_SHOP_UNTIL (${until}) er ikke et gyldig tidspunkt.` };
   if (t <= now) return { ok: false, live: true, reason: `${fix} LIVE_SHOP_UNTIL (${until}) er utløpt.` };
-  if (t - now > MAX_LIVE_WINDOW_MS) return { ok: false, live: true, reason: `${fix} LIVE_SHOP_UNTIL ligger mer enn 24 timer fram.` };
   return { ok: true, live: true, expiresAt: new Date(t).toISOString() };
 }
 

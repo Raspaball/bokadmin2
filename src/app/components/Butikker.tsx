@@ -2,7 +2,8 @@
 // Profiler for Testbutikk og livebutikken: domene, Client ID og Client secret (bare skrivbar,
 // lagres i Vault på serveren og vises aldri igjen). «Test tilkobling» leser bare.
 // Bytte krever at ingen jobb kjører, at domenet skrives som bekreftelse og, for live,
-// «åpen til» høyst 24 timer fram. Skrivesperren mot live er alltid på herfra.
+// eventuelt «åpen til» (tom = uten tidsgrense, fra 20.10.2026). Bytte setter skrivesperren på;
+// den skrus av i databasen (shop_settings.read_only) og med LIVE_READ_ONLY=false.
 import { useEffect, useState } from 'react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -13,13 +14,6 @@ import { shops, type ShopProfile, type ShopsState, type ShopTestResult } from '.
 
 const fmt = (iso: string | null | undefined) =>
   iso ? new Date(iso).toLocaleString('nb-NO', { dateStyle: 'short', timeStyle: 'short' }) : '';
-
-/** Standard «åpen til»: om 6 timer, som verdi for <input type="datetime-local"> */
-function defaultUntil(hours = 6): string {
-  const d = new Date(Date.now() + hours * 3600e3);
-  d.setSeconds(0, 0);
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60e3).toISOString().slice(0, 16);
-}
 
 function ProfileForm({ profile, onSaved, disabled }: { profile?: ShopProfile; onSaved: () => void; disabled?: boolean }) {
   const [name, setName] = useState(profile?.name ?? '');
@@ -84,7 +78,7 @@ export function Butikker() {
   const [tests, setTests] = useState<Record<string, ShopTestResult | 'loading'>>({});
   const [switchFor, setSwitchFor] = useState<string | null>(null);
   const [confirm, setConfirm] = useState('');
-  const [until, setUntil] = useState(defaultUntil());
+  const [until, setUntil] = useState('');
   const [busy, setBusy] = useState(false);
   const [switchMsg, setSwitchMsg] = useState('');
 
@@ -103,7 +97,7 @@ export function Butikker() {
   const doSwitch = async (p: ShopProfile | null) => {
     setBusy(true); setSwitchMsg('');
     try {
-      const untilIso = p?.live ? new Date(until).toISOString() : null;
+      const untilIso = p?.live && until ? new Date(until).toISOString() : null;
       await shops.switchTo(p?.id ?? null, p ? confirm : '', untilIso);
       setSwitchFor(null); setConfirm('');
       await load();
@@ -143,7 +137,7 @@ export function Butikker() {
           {active ? (
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
               <span className="font-semibold">{active.live ? 'LIVE' : 'Aktiv'}: {active.profileName ?? 'Testbutikk (hemmeligheter)'} – {active.domain}</span>
-              {active.live && <span>Åpen til {fmt(active.until)}</span>}
+              {active.live && <span>{active.until ? `Åpen til ${fmt(active.until)}` : 'Uten tidsgrense'}</span>}
               {active.live && <span className="flex items-center gap-1"><Lock className="size-4" />{active.readOnly ? 'Bare lesing (skrivesperre på)' : 'SKRIVING TILLATT'}</span>}
               {active.live && (
                 <Button size="sm" variant="secondary" onClick={close} disabled={busy}>Lukk live</Button>
@@ -179,7 +173,7 @@ export function Butikker() {
                 </Button>
                 {!isActive && (
                   <Button variant={p.live ? 'destructive' : 'outline'} size="sm" disabled={!p.secretSaved || jobsBusy}
-                    onClick={() => { setSwitchFor(p.id); setConfirm(''); setUntil(defaultUntil()); setSwitchMsg(''); }}>
+                    onClick={() => { setSwitchFor(p.id); setConfirm(''); setUntil(''); setSwitchMsg(''); }}>
                     Gjør aktiv{p.live ? ' (live)' : ''}
                   </Button>
                 )}
@@ -211,7 +205,7 @@ export function Butikker() {
                     </div>
                     {p.live && (
                       <div className="space-y-1">
-                        <Label>Åpen til (høyst 24 timer)</Label>
+                        <Label>Åpen til (tom = uten tidsgrense)</Label>
                         <Input type="datetime-local" value={until} onChange={(e) => setUntil(e.target.value)} />
                       </div>
                     )}
@@ -276,7 +270,7 @@ export function LiveStripe() {
   return (
     <div className="bg-red-600 text-white text-sm font-semibold px-4 py-1.5 flex flex-wrap gap-x-4">
       <span>LIVE: {info.domain}</span>
-      <span>Åpen til {fmt(info.until)}</span>
+      <span>{info.until ? `Åpen til ${fmt(info.until)}` : 'Uten tidsgrense'}</span>
       <span>{info.readOnly ? 'Bare lesing' : 'SKRIVING TILLATT'}</span>
     </div>
   );

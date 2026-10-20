@@ -22,17 +22,17 @@ test("bekreftelse for en annen butikk stoppes", () => {
   assert.equal(checkShopAllowed({ domain: LIVE, confirmed: "testbutikk-9434.myshopify.com", until: inHours(2), now: NOW }).ok, false);
   assert.equal(checkShopAllowed({ domain: LIVE, confirmed: "bo-bok-og-papir", until: inHours(2), now: NOW }).ok, false);
 });
-test("bekreftet, men uten tidsvindu", () => {
-  const r = checkShopAllowed({ domain: LIVE, confirmed: LIVE, now: NOW });
-  assert.equal(r.ok, false); assert.match(r.reason, /LIVE_SHOP_UNTIL/);
+test("bekreftet uten tidsvindu: åpen uten tidsgrense (20.10.2026)", () => {
+  assert.deepEqual(checkShopAllowed({ domain: LIVE, confirmed: LIVE, now: NOW }), { ok: true, live: true });
+  assert.equal(checkShopAllowed({ domain: LIVE, confirmed: LIVE, until: "", now: NOW }).ok, true);
   assert.equal(checkShopAllowed({ domain: LIVE, confirmed: LIVE, until: "i morgen", now: NOW }).ok, false);
 });
 test("utløpt vindu stoppes", () => {
   const r = checkShopAllowed({ domain: LIVE, confirmed: LIVE, until: inHours(-1), now: NOW });
   assert.equal(r.ok, false); assert.match(r.reason, /utløpt/);
 });
-test("vindu over 24 timer stoppes", () => {
-  assert.equal(checkShopAllowed({ domain: LIVE, confirmed: LIVE, until: inHours(25), now: NOW }).ok, false);
+test("vindu over 24 timer er tillatt (20.10.2026)", () => {
+  assert.equal(checkShopAllowed({ domain: LIVE, confirmed: LIVE, until: inHours(25), now: NOW }).ok, true);
 });
 test("bekreftet og innenfor vinduet er tillatt", () => {
   const r = checkShopAllowed({ domain: LIVE, confirmed: ` ${LIVE.toUpperCase()} `, until: inHours(6), now: NOW });
