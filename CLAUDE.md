@@ -19,6 +19,7 @@ supabase secrets set KEY=value --project-ref chwpqwblqummlufqdefe
 
 Frontend env vars go in `.env` (see `.env.example`). Edge Function secrets are set via `supabase secrets set`.
 See `BOKADMIN2_OPPSETT.md` for the separation from live Bokadmin and the current setup status.
+**Gjeldende arbeid «Bokbasen ny»:** status og trinn i `oppgaver/bokbasen-ny/STATUS.md` (les den først).
 
 
 ## Eierens ønske — felles datakilder
@@ -252,6 +253,10 @@ Jobber kjører i 45s-pulser (Supabase Edge Function timeout). Hvert kall til `pr
 | `resume-paused-availability-jobs` | hvert minutt | `/availability-check/resume-paused` | Gjenopptar pauset tilgjengelighetsjobb |
 | `resume-paused-book-update-jobs` | hvert minutt | `/book-update/resume-paused` | Gjenopptar pauset «Oppdater eksisterende bøker» |
 | `run-scheduled-tasks` | hvert minutt | `/price-update/start` eller `/availability-check/start` | Trigger planlagte oppgaver fra `scheduled_tasks`-tabellen |
+| `resume-paused-sjangre-sync-jobs` | hvert minutt | `/sjangre-sync/resume-paused` | Gjenopptar pauset sjangre-synk (migrasjon `20261006120000`) |
+| `resume-paused-tag-cleanup-jobs` | hvert minutt | `/tag-cleanup/resume-paused` | Gjenopptar pauset «Rydd tagger» (migrasjon `20261009120000`) |
+| `rydd-cron-logg` | hver natt 02:17 UTC | SQL | Sletter `cron.job_run_details` eldre enn 7 dager (migrasjon `20261112060000`) |
+| `rydd-sync-log` | hver natt 02:47 UTC | SQL | Sletter `sync_log` eldre enn 90 dager for `book_update`, `sjangre_sync`, `update`, `availability_update`, `availability_check`. Andre handlinger beholdes (angre for handles og tagger leser dem). Migrasjon `20261116060000` (Bokbasen ny, trinn 0) |
 
 `run-scheduled-tasks` sender `user_id` i POST-body (siden migrasjon `20260226000002`) slik at per-bruker credentials fungerer. Siden `20261001130000` sender den også `mode` for prisjobber (`scheduled_tasks.config.mode`, uten mode: `analyze`), regner tidene i Europe/Oslo, og venter (flytter ikke `next_run_at`) mens en prisjobb for samme bruker kjører. Høyst én prisjobb startes per minutt; oppdatering går foran sjekk. URL og nøkkel hentes fra Vault (`project_url`, `anon_key`).
 
