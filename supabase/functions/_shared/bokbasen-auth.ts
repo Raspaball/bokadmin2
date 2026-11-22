@@ -16,6 +16,12 @@ const TOKEN_REFRESH_MARGIN_S = 60;
 /** ONIX-eksport fra metadata-API-et: `${BOKBASEN_ONIX_URL}/<isbn>` eller `?<parametere>`. */
 export const BOKBASEN_ONIX_URL = "https://api.bokbasen.io/metadata/export/onix/v2";
 
+/**
+ * ONIX v3 (listeoppslaget i «Bokbasen ny», utkast 22.11.2026). Dagens fane og jobbene bruker fortsatt v2 over.
+ * Når trinn 1 (oppgaver/bokbasen-ny/trinn-1-v3.md) gjøres, blir dette den eneste adressen.
+ */
+export const BOKBASEN_ONIX_V3_URL = "https://api.bokbasen.io/metadata/export/onix/v3";
+
 export interface BokbasenCredentials {
   clientId: string;
   clientSecret: string;

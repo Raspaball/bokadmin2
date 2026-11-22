@@ -2,6 +2,7 @@ import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Plus } from 'lucide-react';
 import { Import } from './Import';
+import { BokbasenNy } from './BokbasenNy';
 import { Oppdatering } from './Oppdatering';
 import { Sjangre } from './Sjangre';
 import { ShopifyKatalog } from './ShopifyKatalog';
@@ -21,6 +22,9 @@ export function ContentArea({ activeItem }: ContentAreaProps) {
 
       case 'import':
         return <Import />;
+
+      case 'bokbasen-ny':
+        return <BokbasenNy />;
 
       case 'update':
         return <Oppdatering />;

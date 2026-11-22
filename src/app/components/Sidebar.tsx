@@ -1,4 +1,4 @@
-import { Settings, Upload, RefreshCw, Rss, Layout, LogOut, BookOpen, Tags, Store, Link2 } from 'lucide-react';
+import { Settings, Upload, RefreshCw, Rss, Layout, LogOut, BookOpen, Tags, Store, Link2, DownloadCloud } from 'lucide-react';
 
 interface MenuItem {
   id: string;
@@ -9,6 +9,7 @@ interface MenuItem {
 const menuItems: MenuItem[] = [
   { id: 'katalog', label: 'Shopifykatalog', icon: <Store className="size-4" /> },
   { id: 'import', label: 'Bokbasen', icon: <Upload className="size-4" /> },
+  { id: 'bokbasen-ny', label: 'Bokbasen ny', icon: <DownloadCloud className="size-4" /> },
   { id: 'update', label: 'Oppdatering', icon: <RefreshCw className="size-4" /> },
   { id: 'genres', label: 'Sjangre', icon: <Tags className="size-4" /> },
   { id: 'handles', label: 'Handles', icon: <Link2 className="size-4" /> },

@@ -592,6 +592,38 @@ export const bokbasen = {
   },
 };
 
+// ── «Bokbasen ny» (utkast 22.11.2026): listeoppslaget i ONIX v3 ────────────────
+// Edge Function bokbasen-ny. Bare lesing mot Bokbasen; funksjonen lagrer ingenting.
+
+export interface BokbasenNyBook extends BokbasenSearchResult {
+  bookFormat?: string; // bok.format (Innbundet, Heftet, Pocket …)
+  productType?: string; // Bok / Lydbok / E-bok
+  publicationDate?: string | null;
+}
+
+export interface BokbasenNyStats {
+  products: number; books: number; deleted: number; skipped: number; withoutIsbn: number; failed: number;
+  notificationTypes: Record<string, number>;
+  kB: number; fetchMs: number; parseMs: number; pagesize: number;
+  hasNextHeader: boolean; hasLinkHeader: boolean; onixRelease: string | null;
+}
+
+export interface BokbasenNyPage {
+  books: BokbasenNyBook[];
+  deleted: string[]; // ISBN slettet i Bokbasen (NotificationType 05)
+  next: string | null; // bokmerke til neste bunke
+  done: boolean; // true = ingen flere endringer nå
+  stats: BokbasenNyStats;
+}
+
+export const bokbasenNy = {
+  // Én bunke fra listeoppslaget. `next` (bokmerke) går foran `after` (dato).
+  async hent(args: { after?: string; next?: string | null; pagesize?: number; notificationType?: "updated" | "deleted" }): Promise<BokbasenNyPage> {
+    const res = await callEdgeFunction("bokbasen-ny/hent", { method: "POST", body: JSON.stringify(args) });
+    return res.json();
+  },
+};
+
 export const shopify = {
   // Push one book to Shopify
   async pushBook(book: BokbasenSearchResult | Book): Promise<{ shopifyId: string; handle: string; variantId?: string; created?: boolean; warning?: string; priceNote?: string; availabilityNote?: string; status?: string; seoNote?: string; descriptionNote?: string; tagNote?: string; protectedNote?: string; skipNote?: string }> {

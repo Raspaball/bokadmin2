@@ -12,6 +12,8 @@ Den som får den, skriver her: «Hos <hvem> siden <dato kl.>, for trinn N». Cow
 
 ## Fase nå
 
+**Utkast 22.11.2026 (Eirik):** fanen «Bokbasen ny» er laget som et raskt utkast i 2.0 for å prøve listeoppslaget i praksis, selv om trinn 1–3 ikke er gjort og nybyggingen ellers skjer i Bokadmin 3. Se loggen nederst. Ikke deployet, ikke lagt i git.
+
 **Fase 1: bare tester mot Bokbasen (bare lesing).** Utviklingsbutikken og livebutikken venter.
 Ingen ny kode skriver til Shopify. Dagens drift mot live fortsetter som før, styrt av Eirik.
 
@@ -85,3 +87,4 @@ Ingen ny kode skriver til Shopify. Dagens drift mot live fortsetter som før, st
 | 16.11.2026 | Status kontrollert (bare lesing). STATUS og oppdrag for trinn 0, 1 og 2 skrevet. Ingenting endret i kode, Supabase eller Shopify | Cowork (Claude) |
 | 16.11.2026 | Eirik: 25 ISBN i trinn 1 (50 oppslag). Prisjobbens logg slettes i trinn 0. Trinnene går etter hverandre: 0, 1, 2 | Eirik |
 | 16.11.2026 | Trinn 0: kopi av `sync_log` (378 257 rader) og 7 små tabeller i `C:\Bokadmin-backup\2026-11-16\`, kontroll grønn. 296 623 rader slettet, `VACUUM FULL`: `sync_log` 219 → 22 MB, databasen 393 → 196 MB. Klokkejobb `rydd-sync-log` (02:47 UTC, 90 dager). Migrasjonene i git | Claude Code |
+| 22.11.2026 | Utkast: ny funksjon `bokbasen-ny/` (listeoppslag v3, én bunke per kall, lagrer ingenting), ny side `BokbasenNy.tsx` + menyvalg, `parseOnix` flyttet uendret til `_shared/onix-book.ts`, `BOKBASEN_ONIX_V3_URL`, `scripts/bokbasen-ny/probe-liste.mjs`. Tester 378/378 grønne, bygget går. **Ikke prøvd mot Bokbasen** (ingen nøkler lokalt), ikke deployet, ikke lagt i git. Uten lager: bokmerket ligger i nettleseren, valgte bøker legges i `books` | Cowork (Claude) |
